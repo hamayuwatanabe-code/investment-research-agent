@@ -203,6 +203,13 @@ FAVOURABLE_PATTERNS: tuple[RegulatoryPattern, ...] = (
         False,
     ),
     RegulatoryPattern(
+        "rare_pediatric_disease",
+        "Rare Pediatric Disease designation",
+        re.compile(r"(?i)\brare pediatric disease\b"),
+        Materiality.LOW,
+        False,
+    ),
+    RegulatoryPattern(
         "rmat",
         "RMAT designation",
         re.compile(r"(?i)\bRMAT\b|regenerative\s+medicine\s+advanced\s+therapy"),
@@ -227,7 +234,18 @@ COMPANY_FRAMING_RE = re.compile(
 
 #: Designations that say nothing about efficacy-evidence acceptability.  Naming
 #: this explicitly matters: designation count is the classic false comfort.
-PROCEDURAL_ONLY_DESIGNATIONS = {"fast_track", "orphan_drug", "priority_review"}
+PROCEDURAL_ONLY_DESIGNATIONS = {
+    "fast_track",
+    "orphan_drug",
+    "priority_review",
+    "rare_pediatric_disease",
+    # Breakthrough and RMAT accelerate interaction with the regulator. Neither
+    # is a statement that the efficacy evidence or the endpoint will be
+    # accepted, and listing them without that caveat is how a designation count
+    # comes to look like regulatory progress.
+    "breakthrough",
+    "rmat",
+}
 
 MEETING_RE = re.compile(r"(?i)\btype\s+([abcd])\s+meeting\b|\bpre-?(?:IND|NDA|BLA)\s+meeting\b")
 
@@ -428,11 +446,24 @@ class RegulatoryAgent(Agent):
         )
         return not commercial
 
+    #: Any of these signals means the regulator has not accepted the endpoint.
+    #: Kept as a named set so adding a pattern cannot silently fail to move the
+    #: position -- which is exactly the bug that let a K5 finding coexist with an
+    #: endpoint_position of UNKNOWN.
+    REJECTING_SIGNALS = frozenset(
+        {
+            "endpoint_not_acceptable",
+            "endpoint_insufficient_for_efficacy",
+            "registrational_status_withdrawn",
+            "regulator_prescribes_other_endpoints",
+            "additional_trial_required",
+            "surrogate_not_accepted",
+        }
+    )
+
     @staticmethod
     def _endpoint_position(matched: set[str]) -> str:
-        if "endpoint_not_acceptable" in matched or "additional_trial_required" in matched:
-            return "REJECTED"
-        if "surrogate_not_accepted" in matched:
+        if matched & RegulatoryAgent.REJECTING_SIGNALS:
             return "REJECTED"
         if "endpoint_agreed" in matched or "spa_agreement" in matched:
             return "AGREED"

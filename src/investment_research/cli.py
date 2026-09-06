@@ -38,7 +38,11 @@ from .reporting.report import render_report
 from .research.adversarial import build_plan, run_adversarial_search
 from .research.anthropic_web import AnthropicWebResearchProvider
 from .research.corpus import CorpusResearchProvider
-from .research.provider import CompositeResearchProvider, NullResearchProvider
+from .research.provider import (
+    CompositeResearchProvider,
+    NullResearchProvider,
+    ResearchProvider,
+)
 from .schemas.enums import Provenance, RunStatus
 from .storage.db import open_db
 from .storage.repository import Repository
@@ -160,7 +164,7 @@ def build_research_stack(ticker: str, args: argparse.Namespace, settings, llm):
     live web research is the general channel. Whichever serves a query is
     recorded on the result, so the report can say how each fact was obtained.
     """
-    providers = []
+    providers: list[ResearchProvider] = []
     if args.corpus:
         providers.append(CorpusResearchProvider(settings.corpus_dir, ticker))
     if args.live and llm is not None:

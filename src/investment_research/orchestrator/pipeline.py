@@ -11,6 +11,7 @@ never reported as a successful analysis.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import re
@@ -438,10 +439,11 @@ class Pipeline:
             result.escalation = escalation
             self.repo.save_escalations(ctx.run_id, escalation.attempts)
             for fact in verified_facts:
-                try:
+                # Escalation rewrites verified_status and confidence, so the
+                # updated versions are persisted. Failures here were already
+                # reported when the fact was first written.
+                with contextlib.suppress(Exception):
                     self.repo.save_fact(fact)
-                except Exception:  # noqa: BLE001 - already reported above
-                    pass
             if escalation.unconfirmed:
                 result.failures.append(
                     f"escalation: {len(escalation.unconfirmed)} material claim(s) could not be "

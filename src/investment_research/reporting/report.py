@@ -180,11 +180,14 @@ class ReportRenderer:
             if wanted is None or number in wanted:
                 add(renderer())
 
-        add(self._section_research_provenance())
-        add(self._section_search_coverage())
-        add(self._section_escalation())
-        add(self._section_traceability())
-        add(self._section_cost())
+        # Phase 2 appendices. Defined as module-level functions taking the
+        # renderer, so the class stays readable and the sections stay grouped
+        # with the concerns they document.
+        add(_section_research_provenance(self))
+        add(_section_search_coverage(self))
+        add(_section_escalation(self))
+        add(_section_traceability(self))
+        add(_section_cost(self))
 
         if self.citation_issues:
             add("")
@@ -748,9 +751,7 @@ def _section_research_provenance(self: ReportRenderer) -> str:
     for name, count in sorted(kinds.items()):
         out.append(f"  {name:<12} {count}")
 
-    summary_sources = [
-        s for s in self.bus.sources if "SEARCH_SUMMARY" in str(getattr(s, "content_kind", ""))
-    ]
+    summary_sources = [s for s in self.bus.sources if not s.content_kind.is_primary_text]
     if summary_sources:
         out.append("")
         out.append(
@@ -874,7 +875,6 @@ def _section_cost(self: ReportRenderer) -> str:
         for agent_id, tokens in sorted(budget.by_agent().items()):
             out.append(f"      {agent_id:<22} {tokens:>9,}")
 
-    packs = [(record.agent_id, record) for record in self.result.agent_records]
     if self.result.chunks:
         out.append("")
         out.append(
@@ -887,8 +887,3 @@ def _section_cost(self: ReportRenderer) -> str:
     return "\n".join(out)
 
 
-ReportRenderer._section_research_provenance = _section_research_provenance
-ReportRenderer._section_search_coverage = _section_search_coverage
-ReportRenderer._section_escalation = _section_escalation
-ReportRenderer._section_traceability = _section_traceability
-ReportRenderer._section_cost = _section_cost

@@ -193,6 +193,29 @@ RULES: tuple[ExtractionRule, ...] = (
         _rx(r"\b(?:restricted stock units?|RSUs?|equity grants?)\b"),
     ),
     ExtractionRule(
+        "company_framing",
+        FactCategory.REGULATORY,
+        _rx(
+            r"\b(?:constructive|productive|encouraging|collaborative|aligned|supportive|"
+            r"favou?rable|on track)\b"
+        ),
+        company_claim_default=True,
+        unit="company_characterization",
+    ),
+    ExtractionRule(
+        "pipeline_asset",
+        FactCategory.SCIENCE,
+        _rx(
+            r"\b(?:pipeline includes|pipeline comprises|next-generation|antibody drug conjugate)\b"
+        ),
+        company_claim_default=True,
+    ),
+    ExtractionRule(
+        "programme_code",
+        FactCategory.CLINICAL,
+        _rx(r"\b[A-Z]{2,4}-\d{3}\b"),
+    ),
+    ExtractionRule(
         "market_size",
         FactCategory.MARKET_SIZE,
         _rx(r"\b(?:addressable market|prevalence|patients (?:in|with))\b"),
@@ -220,6 +243,7 @@ def _source_for(document: Document) -> Source:
         provenance=document.provenance,
         content_hash=document.content_hash(),
         excerpt=document.text[:2000],
+        content_kind=document.content_kind,
     )
 
 

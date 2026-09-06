@@ -21,6 +21,7 @@ from typing import Any
 
 from .enums import (
     UNKNOWN,
+    ContentKind,
     DateKind,
     EvidenceClass,
     FactCategory,
@@ -86,6 +87,9 @@ class Source:
     content_hash: str = UNKNOWN
     syndicated_from: str | None = None
     excerpt: str = ""
+    #: How much of the document is actually in hand. A search engine's summary
+    #: about a filing is not the filing, and the report says so.
+    content_kind: ContentKind = ContentKind.FULL_DOCUMENT
 
     @property
     def is_reprint(self) -> bool:
