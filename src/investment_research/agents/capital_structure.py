@@ -65,10 +65,12 @@ class ShareComponent:
 #: reporting; every component is searched independently.
 COMPONENTS: tuple[ShareComponent, ...] = (
     ShareComponent("basic_shares", "basic shares outstanding", ("basic shares", "shares outstanding", "common stock outstanding"), dilutive=False),
+    # Matched most-specific first, and each source fact may satisfy only one
+    # component: "Options and RSUs cover 7,100,000 shares" is one number, not two.
+    ShareComponent("prefunded_warrants", "pre-funded warrants", ("pre-funded warrant", "prefunded warrant")),
+    ShareComponent("public_warrants", "public/private warrants", ("public warrant", "private warrant", "public and private warrant")),
     ShareComponent("options", "stock options", ("option",)),
     ShareComponent("rsus", "RSUs", ("rsu", "restricted stock unit")),
-    ShareComponent("prefunded_warrants", "pre-funded warrants", ("pre-funded warrant", "prefunded warrant")),
-    ShareComponent("public_warrants", "public/private warrants", ("public warrant", "private warrant", "warrants exercisable")),
     ShareComponent("preferred", "preferred stock (as-converted)", ("preferred stock", "series a preferred", "convertible preferred")),
     ShareComponent("convertible_debt", "convertible debt (as-converted)", ("convertible note", "convertible debt", "convertible senior")),
 )
@@ -110,7 +112,9 @@ class CapitalStructureAgent(Agent):
             )
         ]
         picture = self._extract_components(facts)
-        cash, cash_fact = self._find_value(facts, ("cash, cash equivalents", "cash and cash equivalents", "cash and equivalents"))
+        cash, cash_fact = self._find_value(
+            facts, ("cash, cash equivalents", "cash and cash equivalents", "cash and equivalents")
+        )
         debt, _ = self._find_value(facts, ("total debt", "debt outstanding", "notes payable"))
         burn_six_months, _ = self._find_value(facts, ("net cash used in operating activities",))
         atm_capacity, atm_fact = self._find_value(facts, _ATM_PATTERNS)
@@ -261,27 +265,40 @@ class CapitalStructureAgent(Agent):
 
     # -- extraction helpers ------------------------------------------------
     def _extract_components(self, facts: list[Fact]) -> CapitalPicture:
+        """Extract each component, never letting one fact count twice.
+
+        A single disclosure line often names two instrument types ("Options and
+        RSUs outstanding cover 7,100,000 shares"). Attributing that number to
+        both components silently inflates the diluted share count, so a fact
+        that has been consumed is not offered to a later component -- the
+        uncovered component is reported UNKNOWN instead.
+        """
         picture = CapitalPicture()
+        consumed: set[str] = set()
         for component in COMPONENTS:
-            value, fact_id = self._find_value(facts, component.patterns)
+            value, fact_id = self._find_value(facts, component.patterns, exclude=consumed)
             picture.values[component.key] = value
             if fact_id:
                 picture.fact_ids[component.key] = fact_id
+                consumed.add(fact_id)
             if value is None:
                 picture.unknown_fields.append(component.key)
         return picture
 
     @staticmethod
-    def _find_value(facts: list[Fact], patterns: tuple[str, ...]) -> tuple[float | None, str]:
+    def _find_value(
+        facts: list[Fact], patterns: tuple[str, ...], exclude: set[str] | None = None
+    ) -> tuple[float | None, str]:
         """First numeric value whose claim matches any pattern.
 
         Prefers a fact's structured ``value`` over parsing prose, and prefers
         higher-tier sources.
         """
+        exclude = exclude or set()
         candidates = [
             f
             for f in facts
-            if any(p in f.claim.lower() for p in patterns)
+            if f.fact_id not in exclude and any(p in f.claim.lower() for p in patterns)
         ]
         candidates.sort(key=lambda f: (f.source_tier.rank, -f.confidence))
         for fact in candidates:

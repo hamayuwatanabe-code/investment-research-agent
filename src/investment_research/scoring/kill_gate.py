@@ -372,8 +372,15 @@ def evaluate_kill_gate(
             )
         )
 
+    # A category is only reported as unsearched when the search that would have
+    # covered it did not run AND nothing else surfaced a finding for it. A
+    # category that produced a K5 from a filing was, in the way that matters,
+    # examined.
+    effective_unsearched = tuple(
+        category for category in unsearched_categories if not findings[category]
+    )
     return KillGateResult(
-        assessments=tuple(assessments), unsearched_categories=tuple(unsearched_categories)
+        assessments=tuple(assessments), unsearched_categories=effective_unsearched
     )
 
 

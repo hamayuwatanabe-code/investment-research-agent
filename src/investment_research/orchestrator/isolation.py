@@ -434,12 +434,28 @@ class IsolationGuard:
             # Requirement 10: preferences are dropped, not merely ignored.
             params_out.pop("user_preferences", None)
 
+        risk_flags = tuple(self.bus.risk_flags) if policy.sees_risk_flags else ()
+        contradictions = tuple(self.bus.contradictions) if policy.sees_contradictions else ()
+        unresolved = tuple(self.bus.unresolved)
+
         if policy.anonymize:
-            from .anonymize import anonymize_pack
+            from .anonymize import (
+                anonymize_contradictions,
+                anonymize_pack,
+                anonymize_risk_flags,
+                anonymize_unresolved,
+            )
 
             selected_facts, channels, params_out, ref_map = anonymize_pack(
                 selected_facts, channels, params_out, ticker, company_name, aliases
             )
+            # Everything else in the pack carries prose too, and prose carries
+            # the company name.
+            risk_flags = anonymize_risk_flags(risk_flags, ticker, company_name, aliases)
+            contradictions = anonymize_contradictions(
+                contradictions, ticker, company_name, aliases
+            )
+            unresolved = anonymize_unresolved(unresolved, ticker, company_name, aliases)
             # Kept out of band: the map holds real URLs and is used only to
             # restore citations AFTER the blind verdict is fixed.
             self.source_ref_maps[agent_id] = ref_map
@@ -451,11 +467,9 @@ class IsolationGuard:
             company_name=None if not policy.sees_identity else company_name,
             facts=selected_facts if policy.sees_facts else (),
             sources=tuple(self.bus.sources) if policy.sees_facts and not policy.anonymize else (),
-            risk_flags=tuple(self.bus.risk_flags) if policy.sees_risk_flags else (),
-            contradictions=(
-                tuple(self.bus.contradictions) if policy.sees_contradictions else ()
-            ),
-            unresolved=tuple(self.bus.unresolved),
+            risk_flags=risk_flags,
+            contradictions=contradictions,
+            unresolved=unresolved,
             channels=channels,
             params=params_out,
         )

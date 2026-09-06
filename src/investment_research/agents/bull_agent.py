@@ -24,6 +24,24 @@ from .base import Agent
 
 log = logging.getLogger(__name__)
 
+#: Phrases that make a finding adverse, whatever its source quality.
+_ADVERSE_MARKERS = (
+    "did not correlate",
+    "no correlation",
+    "does not predict",
+    "failed to predict",
+    "did not meet",
+    "failed to meet",
+    "was not met",
+    "no significant",
+    "not statistically significant",
+    "discontinued",
+    "terminated",
+    "safety signal",
+    "did not support",
+    "does not support",
+)
+
 
 class BullAgent(Agent):
     agent_id = "bull_agent"
@@ -114,9 +132,15 @@ class BullAgent(Agent):
                     }
                 )
         for fact in data.facts_in(FactCategory.SCIENCE):
-            if fact.is_decision_grade and (
-                "grant" in fact.claim.lower() or "peer-review" in fact.claim.lower()
-            ):
+            text = fact.claim.lower()
+            supportive = "grant" in text or "peer-review" in text or "peer reviewed" in text
+            # A peer-reviewed paper that CONTRADICTS the mechanism is evidence
+            # against the thesis. Citing it as "independent scientific support"
+            # because it is independent and scientific is exactly the kind of
+            # narrative laundering this system exists to prevent.
+            if supportive and any(marker in text for marker in _ADVERSE_MARKERS):
+                continue
+            if fact.is_decision_grade and supportive:
                 points.append(
                     {
                         "claim": f"Independent scientific support: {fact.claim}",

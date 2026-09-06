@@ -98,6 +98,9 @@ class MicrostructureAgent(Agent):
                 )
             )
             out.degraded = True
+            out.errors.append(
+                f"{len(unknown_fields)}/{len(FIELDS)} microstructure fields have no data"
+            )
 
         payload = {
             "values": values,

@@ -114,10 +114,55 @@ def anonymize_evaluation(
     )
 
 
+def anonymize_risk_flags(flags, ticker, company_name, aliases=()):
+    """Redact identity from risk flags handed to a blind agent."""
+    from dataclasses import replace as _replace
+
+    patterns = _identity_patterns(ticker, company_name, aliases)
+    return tuple(
+        _replace(flag, title=_redact(flag.title, patterns), detail=_redact(flag.detail, patterns))
+        for flag in flags
+    )
+
+
+def anonymize_contradictions(items, ticker, company_name, aliases=()):
+    from dataclasses import replace as _replace
+
+    patterns = _identity_patterns(ticker, company_name, aliases)
+    return tuple(
+        _replace(
+            item,
+            ticker=ANON_LABEL,
+            description=_redact(item.description, patterns),
+            left_summary=_redact(item.left_summary, patterns),
+            right_summary=_redact(item.right_summary, patterns),
+            resolution_note=_redact(item.resolution_note, patterns),
+        )
+        for item in items
+    )
+
+
+def anonymize_unresolved(items, ticker, company_name, aliases=()):
+    from dataclasses import replace as _replace
+
+    patterns = _identity_patterns(ticker, company_name, aliases)
+    return tuple(
+        _replace(
+            item,
+            question=_redact(item.question, patterns),
+            why_it_matters=_redact(item.why_it_matters, patterns),
+        )
+        for item in items
+    )
+
+
 #: Params that must never reach the Blind Judge (requirement 6/10/14):
 #: prior evaluations anchor, holdings bias, and rankings re-import a view.
 _BLIND_FORBIDDEN_PARAMS = frozenset(
     {
+        "ticker",
+        "company_name",
+        "aliases",
         "user_preferences",
         "prior_scores",
         "prior_rank",
@@ -152,10 +197,20 @@ def anonymize_pack(
         for name, ev in channels.items()
     }
     patterns = _identity_patterns(ticker, company_name, aliases)
+    def scrub(value: Any) -> Any:
+        """Redact recursively: a company name hides just as well inside a list."""
+        if isinstance(value, str):
+            return _redact(value, patterns)
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(scrub(v) for v in value)
+        return value
+
     anon_params: dict[str, Any] = {}
     for key, value in params.items():
         if key in _BLIND_FORBIDDEN_PARAMS:
             continue
-        anon_params[key] = _redact(value, patterns) if isinstance(value, str) else value
+        anon_params[key] = scrub(value)
     anon_params["anonymized_label"] = ANON_LABEL
     return anon_facts, anon_channels, anon_params, ref_map

@@ -57,7 +57,7 @@ _NONRANDOM_RE = re.compile(r"(?i)\bnon[- ]randomi[sz]ed\b|\bsingle[- ]arm\b|allo
 _MASKED_RE = re.compile(r"(?i)\b(double|triple|quadruple)\b|\bmasking is (double|triple|quadruple)")
 _OPENLABEL_RE = re.compile(r"(?i)\bopen[- ]label\b|masking is none")
 _ENROLLMENT_RE = re.compile(r"(?i)enrollment is (\d+)")
-_PHASE_RE = re.compile(r"(?i)phase is (?:phase)?\s*([0-4](?:/[0-4])?[ab]?)")
+_PHASE_RE = re.compile(r"(?i)\bphase\s+(?:is\s+)?(?:phase\s*)?([0-4](?:/[0-4])?[ab]?)\b")
 _POSTHOC_RE = re.compile(r"(?i)\bpost[- ]hoc\b|\bsubgroup analysis\b|\bexploratory endpoint\b")
 
 _TECH_SIGNALS = (

@@ -69,6 +69,10 @@ class CompetitiveAgent(Agent):
 
         if len(competitors) < MIN_COMPETITORS:
             out.degraded = True
+            out.errors.append(
+                f"only {len(competitors)} competitor(s) identified; requirement is at least "
+                f"{MIN_COMPETITORS} for a usable comparison"
+            )
             out.unresolved.append(
                 UnresolvedQuestion(
                     question=(
