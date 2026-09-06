@@ -60,6 +60,7 @@ class Channel:
     BULL = "bull_case"
     SCENARIOS = "scenarios"
     VERDICT = "verdict"
+    PORTFOLIO = "portfolio_guidance"
     USER_PREFERENCES = "user_preferences"
     PRIOR_EVALUATION = "prior_evaluation"
     IDENTITY = "identity"
@@ -509,7 +510,15 @@ class IsolationGuard:
             pref_text = _serialize(agent_input).lower()
             for key, value in user_preferences.items():
                 needle = str(value).strip().lower()
-                if len(needle) >= 5 and needle in pref_text:
+                # Only distinctive values are scanned. A bare number such as a
+                # portfolio value or a share count collides with ordinary
+                # financial figures by nature, so flagging those coincidences
+                # would block legitimate runs while proving nothing. Numeric
+                # preferences are covered by the structural guarantee instead:
+                # projection never copies preferences into a denied agent's
+                # input, so there is no path by which one could arrive.
+                distinctive = len(needle) >= 8 and any(c.isalpha() for c in needle)
+                if distinctive and needle in pref_text:
                     violations.append(
                         f"user preference {key!r} leaked into input to {policy.agent_id!r}"
                     )

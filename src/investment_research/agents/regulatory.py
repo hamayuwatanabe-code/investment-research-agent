@@ -276,8 +276,13 @@ class RegulatoryAgent(Agent):
                 matched_keys.add("regulator_meeting")
 
         # --- the decisive question -----------------------------------------
+        # Only asked where an approval pathway actually gates the business. For
+        # a company with no clinical or regulatory footprint the question is not
+        # merely unanswered, it does not apply -- and reporting it as an
+        # unresolved regulatory risk would be a false signal.
+        approval_gated = self._is_approval_gated(data)
         endpoint_position = self._endpoint_position(matched_keys)
-        if endpoint_position == "UNKNOWN":
+        if endpoint_position == "UNKNOWN" and approval_gated:
             unresolved_items.append(
                 "No evidence found stating whether the regulator accepts the primary endpoint "
                 "as adequate to establish effectiveness"
@@ -318,7 +323,16 @@ class RegulatoryAgent(Agent):
                 "regulator position found in primary filings"
             )
 
+        if not approval_gated:
+            endpoint_position = "NOT_APPLICABLE"
+            unresolved_items.append(
+                "No approval-gated pathway identified in the evidence; endpoint acceptability "
+                "does not apply to this business as described"
+            )
+
         for question in _STANDING_QUESTIONS:
+            if not approval_gated:
+                break
             if question.key not in matched_keys:
                 out.unresolved.append(
                     UnresolvedQuestion(
@@ -359,6 +373,23 @@ class RegulatoryAgent(Agent):
         out.metrics["endpoint_position"] = endpoint_position
         out.metrics["adverse_signals"] = len(not_agreed)
         return out
+
+    @staticmethod
+    def _is_approval_gated(data: AgentInput) -> bool:
+        """Whether a regulatory approval decides this company's value.
+
+        True when there is clinical or regulatory evidence, and also when there
+        is no evidence at all -- an empty evidence set must not be read as
+        "not regulated", which would silently drop the most important question
+        this agent asks.
+        """
+        clinical = data.facts_in(FactCategory.CLINICAL, FactCategory.REGULATORY)
+        if clinical:
+            return True
+        commercial = data.facts_in(
+            FactCategory.TECHNOLOGY, FactCategory.COMMERCIAL, FactCategory.CONTRACTS
+        )
+        return not commercial
 
     @staticmethod
     def _endpoint_position(matched: set[str]) -> str:

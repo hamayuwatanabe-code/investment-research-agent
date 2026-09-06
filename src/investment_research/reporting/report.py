@@ -23,6 +23,14 @@ from ..schemas.enums import (
 from ..schemas.evaluation import SCORE_DIMENSIONS
 from .citations import CitationValidator
 
+#: Sections rendered in each mode. The full report is always the default; the
+#: narrow modes exist so a focused question gets a focused answer, and every one
+#: of them keeps sections 1-4 (verdict, confidence, red flags, thesis breakers).
+MODE_SECTIONS: dict[str, tuple[int, ...]] = {
+    "kill-test": (1, 2, 3, 4, 5, 6, 8, 9, 10, 16, 17, 19, 20),
+    "catalyst": (1, 2, 3, 4, 11, 14, 15, 16, 17, 19, 20),
+}
+
 SECTION_ORDER = (
     "1. Verdict",
     "2. Evidence Confidence",
@@ -127,26 +135,39 @@ class ReportRenderer:
                 add(f"  ... and {len(self.result.failures) - 12} more (see logs)")
             add("*" * 78)
 
-        add(self._section_1_verdict())
-        add(self._section_2_confidence())
-        add(self._section_3_red_flags())
-        add(self._section_4_thesis_breakers())
-        add(self._section_5_verified_facts())
-        add(self._section_6_contradictions())
-        add(self._section_7_bull())
-        add(self._section_8_bear())
-        add(self._section_9_regulatory())
-        add(self._section_10_capital())
-        add(self._section_11_science())
-        add(self._section_12_competition())
-        add(self._section_13_valuation())
-        add(self._section_14_catalysts())
-        add(self._section_15_scenarios())
-        add(self._section_16_scores())
-        add(self._section_17_action())
-        add(self._section_18_changes())
-        add(self._section_19_unresolved())
-        add(self._section_20_sources())
+        renderers = (
+            self._section_1_verdict,
+            self._section_2_confidence,
+            self._section_3_red_flags,
+            self._section_4_thesis_breakers,
+            self._section_5_verified_facts,
+            self._section_6_contradictions,
+            self._section_7_bull,
+            self._section_8_bear,
+            self._section_9_regulatory,
+            self._section_10_capital,
+            self._section_11_science,
+            self._section_12_competition,
+            self._section_13_valuation,
+            self._section_14_catalysts,
+            self._section_15_scenarios,
+            self._section_16_scores,
+            self._section_17_action,
+            self._section_18_changes,
+            self._section_19_unresolved,
+            self._section_20_sources,
+        )
+        wanted = MODE_SECTIONS.get(ctx.mode)
+        if wanted is not None:
+            add("")
+            add(
+                f"[{ctx.mode} mode: showing sections "
+                f"{', '.join(str(n) for n in wanted)} of 20. "
+                "Run without the mode flag for the full report.]"
+            )
+        for number, renderer in enumerate(renderers, start=1):
+            if wanted is None or number in wanted:
+                add(renderer())
 
         if self.citation_issues:
             add("")
@@ -567,6 +588,20 @@ class ReportRenderer:
             )
         if self.result.context.use_fixtures:
             out.append("This action is derived from SYNTHETIC data and must not be acted on.")
+
+        guidance = self.result.portfolio_guidance
+        if guidance:
+            out.append("")
+            out.append("Position guidance (the only step that saw your holdings, and it ran")
+            out.append("after the verdict above was already fixed):")
+            if guidance.get("portfolio_concentration_pct") is not None:
+                out.append(
+                    f"  concentration: {guidance['portfolio_concentration_pct']}% of portfolio"
+                )
+            if guidance.get("unrealised_pct") is not None:
+                out.append(f"  unrealised   : {guidance['unrealised_pct']}%")
+            for line in guidance.get("guidance", []):
+                out.append(f"  - {self._safe(line)}")
         return "\n".join(out)
 
     def _section_18_changes(self) -> str:

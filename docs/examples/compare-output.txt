@@ -1,0 +1,7 @@
+COMPARISON
+==============================================================================
+Compared on evidence confidence and worst kill level FIRST. There is no combined score, and a ranking by upside alone is not offered.
+
+  ticker      conf  kill action             status
+  DEMOBIO      1.0    K5 AVOID              INCOMPLETE_RESEARCH
+  DEMOTECH     1.8    K0 WAIT_FOR_EVENT     INCOMPLETE_RESEARCH

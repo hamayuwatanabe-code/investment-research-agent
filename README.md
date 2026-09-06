@@ -60,6 +60,7 @@ python3 main.py CRBP --live --company-name "Corbus Pharmaceuticals Holdings, Inc
 | `main.py TICKER --catalyst` | catalyst calendar emphasis |
 | `main.py --compare CRBP CNTB` | compare, ranked by confidence and kill level first |
 | `main.py --screen explosive --fixtures` | screen the fixture universe |
+| `--portfolio FILE` | your position, read **only** after the blind verdict is fixed |
 | `--live` | permit outbound network calls |
 | `--fixtures` | use synthetic data (always labelled) |
 | `--json` / `--report-out FILE` | machine-readable / file output |
@@ -83,6 +84,12 @@ ACTION                       AVOID
 That combination is the point. The company can move violently *and* there is no
 case for owning it, and the system states both without averaging them into one
 misleading number.
+
+The control case matters just as much — a system that always says AVOID would be
+useless. [`DEMOTECH`](docs/examples/DEMOTECH-fixture-run.txt), a synthetic
+company with no disqualifying facts, comes back `K0` and `WAIT_FOR_EVENT`: not
+avoided, and not bought either, because several kill categories were never
+searched and the system will not report an unsearched category as clean.
 
 ## The ten rules
 
@@ -150,6 +157,7 @@ COLLECT → VERIFY → DOMAIN → CONTRADICT → KILL → BEAR ∥ BULL → VALU
 | 12 | Microstructure | positioning and flow | **all fundamentals** |
 | 13 | Contradiction | mechanical cross-checks | bull and bear |
 | 14 | Blind Judge | the verdict | **identity, prior scores, your holdings** |
+| — | Portfolio | applies the fixed verdict to your position | nothing — but runs **last** |
 
 Prompt contracts are in [`agents/`](agents/).
 
@@ -281,9 +289,13 @@ Decisions taken without asking, per the brief:
 4. **Fixture companies are synthetic.** Attributing invented facts to a real
    issuer would itself be fabrication
    ([ADR 0004](docs/adr/0004-mock-and-production-data-separation.md)).
-5. **User preferences are not wired into the CLI research path at all.** Only a
-   portfolio step, running after the blind verdict is fixed, may ever read
-   holdings, cost basis, tax position or concentration.
+5. **Holdings reach exactly one component, and it runs last.** `--portfolio
+   FILE` is read only by the Portfolio step, after the blind verdict is fixed,
+   so knowing that a position is held — and at what price — cannot influence
+   what the evidence was judged to mean. It never revises the verdict; it
+   answers a different question: given this verdict, what should happen to the
+   position? A test asserts the verdict and every score are byte-identical with
+   and without a position supplied.
 6. **`explosive_potential` is not capped by the kill gate**; investment-quality
    dimensions are. See ADR 0002.
 7. **EV/Sales 5x and a 20% net margin** are the default translations from

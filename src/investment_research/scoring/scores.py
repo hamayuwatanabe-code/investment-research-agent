@@ -86,6 +86,7 @@ def build_scorecard(
     endpoint_position = reg_payload.get("endpoint_position", "UNKNOWN")
     scores["regulatory_quality"] = {
         "AGREED": 8.5,
+        "NOT_APPLICABLE": 6.0,  # no approval gate is a genuine absence of this risk
         "UNKNOWN": 4.0,
         "REJECTED": 1.0,
     }.get(endpoint_position, 4.0)

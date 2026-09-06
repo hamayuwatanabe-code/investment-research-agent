@@ -75,6 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", dest="as_json", action="store_true", help="emit machine-readable JSON"
     )
     parser.add_argument("--report-out", type=Path, help="write the report to a file")
+    parser.add_argument(
+        "--portfolio",
+        type=Path,
+        help=(
+            "JSON file with your position (shares, cost_basis, portfolio_value, stop_loss, "
+            "tax_notes). Read ONLY by the portfolio step, which runs after the blind verdict "
+            "is fixed; no research agent ever sees it."
+        ),
+    )
     parser.add_argument("--db", type=Path, help="override the SQLite path")
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
@@ -146,12 +155,27 @@ def run_one(
         mode=mode,
         price=price,
         aliases=metadata.get("aliases", ()),
-        # User preferences are deliberately NOT wired into the research
-        # pipeline. Only a portfolio step (run after the blind verdict) may see
-        # them; see orchestrator/isolation.py.
-        user_preferences=None,
+        # Read only by the portfolio step, which runs after the blind verdict
+        # is fixed. Every research agent's isolation policy denies it; see
+        # orchestrator/isolation.py.
+        user_preferences=load_portfolio(args.portfolio),
         offline=not args.live,
     )
+
+
+def load_portfolio(path: Path | None) -> dict | None:
+    """Load the user's position, if one was supplied."""
+    if path is None:
+        return None
+    if not path.is_file():
+        log.warning("portfolio file not found: %s", path)
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        log.error("malformed portfolio file %s: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def result_to_json(result: ResearchResult) -> dict:
@@ -174,6 +198,7 @@ def result_to_json(result: ResearchResult) -> dict:
         "contradictions": len(result.bus.contradictions),
         "failures": result.failures,
         "thesis_version": result.thesis_version,
+        "portfolio_guidance": result.portfolio_guidance or None,
     }
 
 

@@ -31,6 +31,7 @@ from ..agents.evidence_integrity import EvidenceIntegrityAgent
 from ..agents.fact_collector import FactCollectorAgent
 from ..agents.kill_agent import KillAgent
 from ..agents.microstructure import MicrostructureAgent
+from ..agents.portfolio import PortfolioAgent
 from ..agents.regulatory import RegulatoryAgent
 from ..agents.science import ScienceAgent
 from ..agents.valuation import ValuationAgent
@@ -80,6 +81,8 @@ class ResearchResult:
     thesis_version: int = 0
     source_ref_map: Any = None
     collection_results: list[CollectionResult] = field(default_factory=list)
+    #: Populated only when the caller supplied portfolio information.
+    portfolio_guidance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def incomplete(self) -> bool:
@@ -318,12 +321,18 @@ class Pipeline:
 
         # ---- Stage 6: bear and bull, mutually blind ----------------------
         # Order matters only for reproducibility; neither can see the other.
-        self._run_agent(
-            BearAgent(), guard, result, params=params, user_preferences=user_preferences
-        )
-        self._run_agent(
-            BullAgent(), guard, result, params=params, user_preferences=user_preferences
-        )
+        # In kill-test mode the bull case is not built at all: the question
+        # being asked is "is there a reason to discard this", and constructing
+        # a case for it would only invite the reader to weigh one against the
+        # other, which is exactly the trade this system refuses to make.
+        if mode != "catalyst":
+            self._run_agent(
+                BearAgent(), guard, result, params=params, user_preferences=user_preferences
+            )
+        if mode not in ("kill-test", "catalyst"):
+            self._run_agent(
+                BullAgent(), guard, result, params=params, user_preferences=user_preferences
+            )
 
         # ---- Stage 7: valuation ------------------------------------------
         self._run_agent(
@@ -453,7 +462,23 @@ class Pipeline:
             verdict.run_status = ctx.status
             ctx.notes.append(f"action={verdict.action}")
 
-        # ---- Stage 10: thesis versioning ---------------------------------
+        # ---- Stage 10: portfolio (the ONLY step that sees holdings) -------
+        # Deliberately after the verdict is fixed: knowing that a position is
+        # held, and at what price, is exactly what turns research into
+        # rationalisation. It is admitted only once it can no longer change the
+        # judgement.
+        if user_preferences:
+            portfolio_output = self._run_agent(
+                PortfolioAgent(),
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+            )
+            if portfolio_output.evaluation:
+                result.portfolio_guidance = portfolio_output.evaluation.payload
+
+        # ---- Stage 11: thesis versioning ---------------------------------
         if verdict is not None and card is not None:
             previous = self.repo.latest_thesis(ctx.ticker)
             previous_fact_ids: set[str] = set()

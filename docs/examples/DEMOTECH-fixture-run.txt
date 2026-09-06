@@ -1,0 +1,439 @@
+==============================================================================
+INVESTMENT RESEARCH REPORT -- DEMOTECH
+Company: Demotech Systems
+Run ID: 20260906T062239-a7bf59   Mode: standard
+Generated (UTC): 2026-09-06T06:22:39+00:00
+==============================================================================
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+SYNTHETIC FIXTURE DATA -- THIS IS NOT REAL RESEARCH.
+Every source below uses the fixture:// scheme and describes no real issuer.
+This run exists to exercise the pipeline, not to inform a trading decision.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+******************************************************************************
+*** INCOMPLETE_RESEARCH ***
+One or more agents or collectors did not complete. This analysis is partial
+and must not be treated as a finished assessment.
+  - microstructure: DEGRADED :: 15/17 microstructure fields have no data
+  - kill_agent: DEGRADED :: 26 mandatory kill queries were not executed (no search provider configured)
+******************************************************************************
+
+------------------------------------------------------------------------------
+1. Verdict
+------------------------------------------------------------------------------
+Action: WAIT_FOR_EVENT
+Judged blind (identity withheld from the judge): True
+Worst kill level: K0
+Headline: Evidence confidence 1.8/10; worst kill level K0; regulator endpoint position NOT_APPLICABLE; action WAIT_FOR_EVENT.
+CAVEAT: INCOMPLETE RESEARCH: one or more agents or collectors failed. This is not a completed analysis.
+CAVEAT: Evidence confidence is low; the scores describe a possibility, not an established situation.
+CAVEAT: Some kill categories were never searched; their K0 means 'not examined'.
+
+Reasoning:
+  - Evidence confidence is 1.8/10, evaluated before any action label.
+  - Research is incomplete: parts of the mandatory evidence set were not obtained, so no buy-side action is available yet.
+
+------------------------------------------------------------------------------
+2. Evidence Confidence
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 1.8 / 10
+
+This is reported before the scores and before the action, and it is a separate question from whether the upside is large.
+
+  facts in evidence set        : 18
+  Tier 1/2 primary sources     : 78%
+  decision-grade evidence      : 39%
+  independently corroborated   : 0%
+  company claims (uncorrob.)   : 56%
+  stale by event date          : 0%
+  blocking unknowns            : 2
+  kill categories not searched : 6
+
+Penalties applied:
+  - 2 blocking unresolved question(s)
+  - 6 kill category/categories were never searched
+  - run used SYNTHETIC FIXTURE data; evidence confidence is capped and this is not real research
+
+------------------------------------------------------------------------------
+3. Critical Red Flags
+------------------------------------------------------------------------------
+  [!] Kill categories never searched: CAPITAL_KILL, CLINICAL_KILL, COMMERCIAL_KILL, GOVERNANCE_KILL, LIQUIDITY_KILL, REGULATORY_KILL -- reported as unexamined, not clean
+
+------------------------------------------------------------------------------
+4. What Would Kill The Thesis
+------------------------------------------------------------------------------
+Stated before the bull case on purpose: these are the findings that would invalidate an investment thesis here.
+
+  - Bear mechanism: Insufficient evidence to construct a specific failure path
+
+------------------------------------------------------------------------------
+5. Verified Facts
+------------------------------------------------------------------------------
+18 fact(s). Class and tier are shown for every one.
+
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Basic shares outstanding were 62,400,000 as of the cover date of the most recent Form 10-Q
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_7500aa91ba3bf78c55b5
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Options and RSUs outstanding cover 4,900,000 shares
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_85744d0dd6153f86a287
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (GOVERNANCE/COMPANY_CLAIM/TIER_1/conf 0.60) The company is in compliance with all continued listing requirements
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_c2ff5f4ee790cfbaefa8
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[P] (COMPETITION/INDEPENDENT_EVIDENCE/TIER_3/conf 0.45) A competitor ships a comparable module at a lower price but has not been qualified by the three tier-one customers
+      source: fixture://news/DEMOTECH-COMP-1 | event_date=2026-07-14 published=2026-07-15 | id=fact_90134d24b6dfa64d2be7
+      note: collected_by=fixtures
+[P] (COMPETITION/INDEPENDENT_EVIDENCE/TIER_3/conf 0.45) A second competitor announced a rival architecture that remains at technology readiness level 5
+      source: fixture://news/DEMOTECH-COMP-2 | event_date=2026-06-01 published=2026-06-02 | id=fact_c45c0c34feda47ce301f
+      note: collected_by=fixtures
+[P] (COMPETITION/INDEPENDENT_EVIDENCE/TIER_3/conf 0.45) A third competitor exited the segment and redirected its distribution agreements elsewhere
+      source: fixture://news/DEMOTECH-COMP-3 | event_date=2026-04-17 published=2026-04-18 | id=fact_02a60cd2714d476f62c9
+      note: collected_by=fixtures
+[ ] (COMMERCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Backlog under signed purchase orders was $214,000,000 at 2026-06-30
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_18ecea4f5b2dda622140
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Cash, cash equivalents and short-term investments were $286,000,000 at 2026-06-30
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_7c892f78e6b909715e50
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Net cash used in operating activities was $18,400,000 for the six months ended 2026-06-30
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_4faadb30bc3c01f0049c
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Total debt outstanding was $0
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_19a0c2fcd55d2a652827
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Revenue for the quarter ended 2026-06-30 was $61,200,000
+      source: fixture://sec/DEMOTECH/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-05 | id=fact_a43fdd6c802555cec1bd
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (MICROSTRUCTURE/MARKET_INFERENCE/TIER_1/conf 0.80) Short interest was 1,400,000 shares, approximately 2.4 percent of the public float, at the most recent settlement date
+      source: fixture://exchange/DEMOTECH/short-interest | event_date=2026-08-15 published=2026-08-25 | id=fact_2527145d7a3fef45eee4
+      note: collected_by=fixtures
+[V] (TECHNOLOGY/VERIFIED_FACT/TIER_1/conf 0.80) The company holds 41 granted patents covering the sensor fusion architecture, per the patent office register
+      source: fixture://uspto/DEMOTECH/register | event_date=2026-05-30 published=2026-05-30 | id=fact_43a420453112380ee02d
+      note: collected_by=fixtures
+[V] (TECHNOLOGY/VERIFIED_FACT/TIER_1/conf 0.80) Units are deployed and in production at three named tier-one customers, confirmed in those customers' own filings
+      source: fixture://sec/CUSTOMER-A/10-K | event_date=2025-12-31 published=2026-02-20 | id=fact_332b4829cea44807d77c
+      note: collected_by=fixtures
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) The next quarterly results are scheduled for the fourth quarter of 2026
+      source: fixture://ir/DEMOTECH/calendar | event_date=2026-11-05 published=2026-08-01 | id=fact_655208b9c88eb52cf56e
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (COMMERCIAL/COMPANY_CLAIM/TIER_2/conf 0.45) Production scalability is evidenced by a second qualified manufacturing site with reported yield above 92 percent
+      source: fixture://ir/DEMOTECH/deck | event_date=2026-08-01 published=2026-08-01 | id=fact_eaba2aff9f7e887df4c3
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[P] (MARKET_SIZE/INDEPENDENT_EVIDENCE/TIER_2/conf 0.65) An independent industry study estimates the addressable market for qualified sensor fusion modules at $3,100,000,000
+      source: fixture://research/DEMOTECH-MARKET | event_date=2026-03-20 published=2026-03-20 | id=fact_d1e419660b78b1bad7ec
+      note: collected_by=fixtures
+[P] (TECHNOLOGY/INDEPENDENT_EVIDENCE/TIER_3/conf 0.45) Independent trade-press testing reported switching cost is high because the module must be re-qualified over an 18 month cycle
+      source: fixture://news/DEMOTECH-TEARDOWN | event_date=2026-06-11 published=2026-06-11 | id=fact_d88300e2c8e63ff4a107
+      note: collected_by=fixtures
+
+------------------------------------------------------------------------------
+6. Contradictions
+------------------------------------------------------------------------------
+No contradictions detected by the mechanical checks.
+Checks run: company_vs_regulator, company_vs_filing, analyst_vs_primary, guidance_change, tam_vs_population, basic_vs_fully_diluted
+
+------------------------------------------------------------------------------
+7. Bull Case
+------------------------------------------------------------------------------
+3 evidence-backed argument(s) for undervaluation, resting on 7 decision-grade fact(s).
+
+(Built without sight of the bear case or the kill findings.)
+  + Technical differentiation is evidenced by: patents, deployment, customer_validation, switching_cost, scalability
+      facts: fact_43a420453112380ee02d, fact_332b4829cea44807d77c, fact_d88300e2c8e63ff4a107
+  + Roughly 93.3 months of runway funds the programme past its next catalyst without a forced financing.
+      facts: fact_7c892f78e6b909715e50, fact_4faadb30bc3c01f0049c
+  + No debt outstanding, so equity holders are not structurally subordinated.
+      facts: fact_19a0c2fcd55d2a652827
+
+  1 unsupported point(s) were dropped for lacking a fact.
+
+------------------------------------------------------------------------------
+8. Bear Case
+------------------------------------------------------------------------------
+Most likely failure path: Insufficient evidence to construct a specific failure path. The bear case cannot be specified because the evidence set is too thin. This is a reason for low confidence, not for comfort.
+
+(Built without sight of the bull case.)
+  - [HIGH] Insufficient evidence to construct a specific failure path
+      The bear case cannot be specified because the evidence set is too thin. This is a reason for low confidence, not for comfort.
+
+------------------------------------------------------------------------------
+9. Regulatory
+------------------------------------------------------------------------------
+REGULATOR POSITION ON PRIMARY ENDPOINT: NOT_APPLICABLE
+
+What the regulator has agreed:
+  (nothing found)
+
+What the regulator has NOT agreed / adverse findings:
+  (nothing found)
+
+Unresolved:
+  ? No approval-gated pathway identified in the evidence; endpoint acceptability does not apply to this business as described
+
+------------------------------------------------------------------------------
+10. Capital Structure / Dilution
+------------------------------------------------------------------------------
+As of: 2026-06-30
+  basic shares            : 62,400,000
+  fully diluted shares    : 67,300,000
+  dilution overhang       : 7.9%
+  components:
+      basic_shares          : 62,400,000
+      prefunded_warrants    : UNKNOWN
+      public_warrants       : UNKNOWN
+      options               : 4,900,000
+      rsus                  : UNKNOWN
+      preferred             : UNKNOWN
+      convertible_debt      : UNKNOWN
+  cash                    : $286.00M
+  debt                    : $0.00
+  implied quarterly burn  : $9.20M
+  runway (months)         : 93.3
+  ATM capacity            : UNKNOWN
+  shelf effective         : False
+  going concern doubt     : False
+  listing compliance issue: False
+
+  INCOMPLETE: the following dilution components were not found, so the fully diluted figure is a FLOOR: pre-funded warrants, public/private warrants, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+
+------------------------------------------------------------------------------
+11. Science / Technology
+------------------------------------------------------------------------------
+Mode technology. Differentiation evidence found for: ['patents', 'deployment', 'customer_validation', 'switching_cost', 'scalability'].
+
+  design_quality_score  : 8.3
+  signals_present       : ['patents', 'deployment', 'customer_validation', 'switching_cost', 'scalability']
+  signals_absent        : ['trl']
+
+------------------------------------------------------------------------------
+12. Competition
+------------------------------------------------------------------------------
+Competitors identified: 3
+  [     ] A competitor ships a comparable module at a lower price but has not been qualified by the three tier-one customers
+  [     ] A second competitor announced a rival architecture that remains at technology readiness level 5
+  [     ] A third competitor exited the segment and redirected its distribution agreements elsewhere
+
+  TAM: $3.10B
+  SAM: UNKNOWN (units depend on the source; see notes)
+  SOM: UNKNOWN
+  note: SOM is UNKNOWN: obtainable share requires competitor share, distribution and payer evidence that is not present.
+  comparison dimensions with no evidence: clinical_efficacy, safety, sales, approval_status, market_share, cash, valuation, partnership, technical_superiority
+
+------------------------------------------------------------------------------
+13. Valuation
+------------------------------------------------------------------------------
+  price                    : $18.60
+  basic market cap         : $1.16B
+  fully diluted market cap : $1.25B
+  enterprise value         : $965.78M
+  cash-adjusted EV         : $965.78M
+
+What each multiple REQUIRES (not what it would be nice to have):
+  - 2x requires a market cap of $2.50B; revenue of about $443.51M; net income of about $88.70M; 14.31% of the stated addressable market.
+  - 3x requires a market cap of $3.76B; revenue of about $693.87M; net income of about $138.77M; 22.38% of the stated addressable market.
+  - 5x requires a market cap of $6.26B; revenue of about $1.19B; net income of about $238.92M; 38.53% of the stated addressable market.
+  - 10x requires a market cap of $12.52B; revenue of about $2.45B; net income of about $489.27M; 78.91% of the stated addressable market. Requires a dominant share of the entire addressable market.
+  - 20x requires a market cap of $25.04B; revenue of about $4.95B; net income of about $989.98M; 159.67% of the stated addressable market. Requires more revenue than the entire stated addressable market: this multiple is not reachable on the evidence provided.
+  - 50x requires a market cap of $62.59B; revenue of about $12.46B; net income of about $2.49B; 401.95% of the stated addressable market. Requires more revenue than the entire stated addressable market: this multiple is not reachable on the evidence provided.
+  - 100x requires a market cap of $125.18B; revenue of about $24.98B; net income of about $5.00B; 805.75% of the stated addressable market. Requires more revenue than the entire stated addressable market: this multiple is not reachable on the evidence provided.
+  - 200x requires a market cap of $250.36B; revenue of about $50.01B; net income of about $10.00B; 1613.35% of the stated addressable market. Requires more revenue than the entire stated addressable market: this multiple is not reachable on the evidence provided.
+
+  UNREACHABLE on the stated market size: 20x, 50x, 100x, 200x
+  assumption: Fully diluted share count is incomplete; the diluted market cap below is a FLOOR, and the true figure is higher by an unknown amount.
+  assumption: Required revenue is derived at EV/Sales = 5x and required profit at a 20% net margin. Both are stated assumptions, not evidence about this company.
+
+------------------------------------------------------------------------------
+14. Catalysts (JST)
+------------------------------------------------------------------------------
+Timezone: Asia/Tokyo (JST)   Today: 2026-09-06
+
+  [T2] 2026-11-05 (date confidence HIGH)
+      event   : The next quarterly results are scheduled for the fourth quarter of 2026
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : Investor calendar (fixture) (TIER_2)
+
+------------------------------------------------------------------------------
+15. Scenarios
+------------------------------------------------------------------------------
+
+  DISASTER (VERY_LOW_CONFIDENCE)
+    probability   : 5% - 15%
+    price range   : $0.93 - $4.65
+    market cap    : $290.16M
+    FD market cap : $312.94M
+    horizon       : 0-12 months
+    requires      : No further financing available on any terms, or a programme-ending regulatory or clinical outcome
+    fails if      : Insufficient evidence to construct a specific failure path
+
+  BEAR (VERY_LOW_CONFIDENCE)
+    probability   : 20% - 35%
+    price range   : $4.65 - $11.16
+    market cap    : $696.38M
+    FD market cap : $751.07M
+    horizon       : 6-18 months
+    requires      : Dilutive financing before the catalyst, or a disappointing readout
+    fails if      : Insufficient evidence to construct a specific failure path
+
+  BASE (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    price range   : $11.16 - $24.18
+    market cap    : $1.51B
+    FD market cap : $1.63B
+    horizon       : 12-24 months
+    requires      : The programme continues, financing occurs on ordinary terms, and no new disqualifying fact emerges
+    fails if      : Insufficient evidence to construct a specific failure path
+
+  BULL (VERY_LOW_CONFIDENCE)
+    probability   : 10% - 25%
+    price range   : $24.18 - $55.80
+    market cap    : $3.48B
+    FD market cap : $3.76B
+    horizon       : 12-36 months
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Technical differentiation is evidenced by: patents, deployment, customer_validation, switching_cost, scalability
+    requires      : Roughly 93.3 months of runway funds the programme past its next catalyst without a forced financing.
+    requires      : No debt outstanding, so equity holders are not structurally subordinated.
+    fails if      : Insufficient evidence to construct a specific failure path
+
+  EXTREME_BULL (VERY_LOW_CONFIDENCE)
+    probability   : 2% - 8%
+    price range   : $55.80 - $186.00
+    market cap    : $11.61B
+    FD market cap : $12.52B
+    horizon       : 3-7 years
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Technical differentiation is evidenced by: patents, deployment, customer_validation, switching_cost, scalability
+    requires      : Roughly 93.3 months of runway funds the programme past its next catalyst without a forced financing.
+    requires      : No debt outstanding, so equity holders are not structurally subordinated.
+    requires      : Approval, launch, and capture of a substantial share of the obtainable market
+    fails if      : Insufficient evidence to construct a specific failure path
+
+------------------------------------------------------------------------------
+16. Scores
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE (read this first): 1.8 / 10
+
+There is deliberately NO overall score. A single number would let a large
+upside estimate outvote a disqualifying fact, which is the failure mode
+this system exists to prevent.
+
+  dimension                     score   conf   note
+  evidence_quality                1.8   1.8   Mirrors the evidence confidence breakdown.
+  management_quality              5.0   1.8   Neutral by default: management quality was not independently assessed.
+  science_technology_quality      8.3   1.8   From checkable design/technology attributes.
+  clinical_quality                8.3   1.8   From checkable design/technology attributes.
+  regulatory_quality              6.0   1.8   Regulator position on the primary endpoint: NOT_APPLICABLE.
+  financial_strength             10.0   1.8   About 93.3 months of runway.
+  capital_structure_quality       9.0   1.8   Dilution overhang about 7.9% over basic.
+  competitive_moat                5.5   1.8   3 peer(s) identified, 0 further advanced.
+  tam_quality                     7.0   1.8   TAM present; company-sourced TAM is discounted.
+  sam_som_quality                 2.0   1.8   SOM is UNKNOWN: obtainable share is not established.
+  growth_quality                  3.0   1.8   No verified revenue growth series in evidence.
+  valuation                       2.0   1.8   4 of the requested multiples require more revenue than the entire stated addressable market.
+  catalyst_strength               4.5   1.8   1 dated forward catalyst(s).
+  catalyst_timing                 7.0   1.8   A catalyst falls inside three months.
+  market_pricing                  5.0   1.8   UNKNOWN: whether the market has already discounted the catalyst is not in evidence.
+  flow_microstructure             0.5   1.8   15 microstructure field(s) unknown.
+  immediate_buy                   7.7   1.8   Regulatory position, balance sheet and catalyst timing.
+  explosive_potential             7.5   1.8   Capacity for a violent move given size, catalyst proximity and positioning. This is NOT a statement that the move will be upward, and it is not capped by the kill gate.
+  long_term_multibagger           4.5   1.8   Mean of moat, obtainable market and regulatory position.
+  downside_risk                   2.0   1.8   Higher is worse. Worst kill level K0; 0 category/categories at K3 or above.
+  risk_reward                     7.8   1.8   Upside capacity against downside severity.
+  time_efficiency                 6.0   1.8   How soon the thesis is testable.
+
+------------------------------------------------------------------------------
+17. Immediate Action
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 1.8 / 10   (shown before the action)
+ACTION: WAIT_FOR_EVENT
+This action is provisional: the run is marked INCOMPLETE_RESEARCH.
+This action is derived from SYNTHETIC data and must not be acted on.
+
+------------------------------------------------------------------------------
+18. What Changed Since Previous Run
+------------------------------------------------------------------------------
+Thesis version: v1
+
+WHAT_CHANGED:
+  - First recorded thesis for this ticker.
+
+WHY_CHANGED:
+  - No prior run to compare against.
+
+NEW_FACT: 18 new fact id(s)
+REMOVED_ASSUMPTION: 0 fact id(s) no longer present
+
+------------------------------------------------------------------------------
+19. Unresolved Questions
+------------------------------------------------------------------------------
+BLOCKING -- these prevent a confident conclusion:
+  [!] No evidence was obtained for: FDA documents
+      why: This is a required collection target. Absence of evidence here is an unexamined area, not a clean result.  (raised by fact_collector)
+  [!] The following kill categories were never searched: CAPITAL_KILL, CLINICAL_KILL, COMMERCIAL_KILL, GOVERNANCE_KILL, LIQUIDITY_KILL, REGULATORY_KILL
+      why: K0 for an unsearched category means 'not examined'. Treating it as 'no problem found' is the failure mode this system is built to prevent.  (raised by kill_agent)
+
+Other open questions:
+  ? No evidence was obtained for: current reports (8-K)  (raised by fact_collector)
+  ? No evidence was obtained for: insider transactions (Form 4)  (raised by fact_collector)
+  ? No evidence was obtained for: ClinicalTrials.gov registrations  (raised by fact_collector)
+  ? No evidence was obtained for: trial protocol / design  (raised by fact_collector)
+  ? No evidence was obtained for: government contracts  (raised by fact_collector)
+  ? No evidence was obtained for: peer-reviewed literature  (raised by fact_collector)
+  ? No evidence was obtained for: company IR materials  (raised by fact_collector)
+  ? No evidence was obtained for: management  (raised by fact_collector)
+  ? No evidence was obtained for: pipeline  (raised by fact_collector)
+  ? Fully diluted share count is incomplete; missing components: pre-funded warrants, public/private warrants, RSUs, preferred stock (as-converted), convertible debt (as-converted)  (raised by capital_structure)
+  ? No evidence found for technology signal: trl  (raised by science)
+  ? What share of the serviceable market is realistically obtainable?  (raised by competitive)
+  ? No comparative evidence on: clinical_efficacy  (raised by competitive)
+  ? No comparative evidence on: safety  (raised by competitive)
+  ? No comparative evidence on: sales  (raised by competitive)
+  ? No comparative evidence on: approval_status  (raised by competitive)
+  ? No comparative evidence on: market_share  (raised by competitive)
+  ? No comparative evidence on: cash  (raised by competitive)
+  ? No comparative evidence on: valuation  (raised by competitive)
+  ? No comparative evidence on: partnership  (raised by competitive)
+  ? No comparative evidence on: technical_superiority  (raised by competitive)
+  ? Microstructure fields with no data: days_to_cover, borrow_availability, borrow_fee, options_open_interest, gamma_exposure, average_volume, relative_volume, vwap, atr, rsi, support, resistance, institutional_ownership, insider_ownership, etf_index_exposure  (raised by microstructure)
+
+------------------------------------------------------------------------------
+20. Sources
+------------------------------------------------------------------------------
+  [TIER_1] [FIXTURE] Exchange short interest report (fixture)
+      fixture://exchange/DEMOTECH/short-interest
+      date used: 2026-08-15 (event_date) | published=2026-08-25 event=2026-08-15 filed=UNKNOWN
+  [TIER_1] [FIXTURE] Customer Form 10-K describing the deployment
+      fixture://sec/CUSTOMER-A/10-K
+      date used: 2025-12-31 (event_date) | published=2026-02-20 event=2025-12-31 filed=2026-02-20
+  [TIER_1] [FIXTURE] Form 10-Q for the quarter ended 2026-06-30
+      fixture://sec/DEMOTECH/10-Q-2026Q2
+      date used: 2026-06-30 (event_date) | published=2026-08-05 event=2026-06-30 filed=2026-08-05
+  [TIER_1] [FIXTURE] Patent register extract (fixture)
+      fixture://uspto/DEMOTECH/register
+      date used: 2026-05-30 (event_date) | published=2026-05-30 event=2026-05-30 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Investor calendar (fixture)
+      fixture://ir/DEMOTECH/calendar
+      date used: 2026-11-05 (event_date) | published=2026-08-01 event=2026-11-05 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Corporate investor presentation (fixture)
+      fixture://ir/DEMOTECH/deck
+      date used: 2026-08-01 (event_date) | published=2026-08-01 event=2026-08-01 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Independent industry market study (fixture)
+      fixture://research/DEMOTECH-MARKET
+      date used: 2026-03-20 (event_date) | published=2026-03-20 event=2026-03-20 filed=UNKNOWN
+  [TIER_3] [FIXTURE] Trade press competitive review (fixture)
+      fixture://news/DEMOTECH-COMP-1
+      date used: 2026-07-14 (event_date) | published=2026-07-15 event=2026-07-14 filed=UNKNOWN
+  [TIER_3] [FIXTURE] Trade press technology briefing (fixture)
+      fixture://news/DEMOTECH-COMP-2
+      date used: 2026-06-01 (event_date) | published=2026-06-02 event=2026-06-01 filed=UNKNOWN
+  [TIER_3] [FIXTURE] Trade press market share and distribution report (fixture)
+      fixture://news/DEMOTECH-COMP-3
+      date used: 2026-04-17 (event_date) | published=2026-04-18 event=2026-04-17 filed=UNKNOWN
+  [TIER_3] [FIXTURE] Independent teardown and qualification analysis (fixture)
+      fixture://news/DEMOTECH-TEARDOWN
+      date used: 2026-06-11 (event_date) | published=2026-06-11 event=2026-06-11 filed=UNKNOWN
+
+Dates: 'date used' is the event or effective date wherever one exists. A publication date is never treated as the date the event occurred.

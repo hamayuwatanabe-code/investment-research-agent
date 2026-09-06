@@ -35,6 +35,41 @@ Note also:
 
 This is synthetic data and is labelled as such throughout.
 
+## `DEMOTECH-fixture-run.txt`
+
+`python main.py DEMOTECH --fixtures`
+
+The control case, and the reason it is committed: **a falsification-first system
+that always says AVOID would be useless.** `DEMOTECH` is a synthetic company with
+no disqualifying facts -- funded for years, no debt, independently corroborated
+deployments, three named competitors, an independent market study rather than a
+company TAM slide.
+
+```
+REGULATORY_KILL              K0
+worst kill level             K0
+ACTION                       WAIT_FOR_EVENT
+```
+
+Not AVOID, and not BUY either: evidence confidence is still low because this is
+fixture data and no search provider was configured, so several kill categories
+were never searched. The system distinguishes "nothing disqualifying was found"
+from "we looked and it is clean", and reports the second only when it is true.
+
+This run also fixed a real false signal: the Regulatory agent used to ask whether
+the regulator accepts the primary endpoint even for a technology company that has
+no approval pathway, and reported the unanswerable question as a regulatory risk.
+It now asks only where an approval actually gates the business -- while still
+asking when the evidence set is empty, since an empty set must never be read as
+"not regulated".
+
+## `compare-output.txt`
+
+`python main.py --compare DEMOBIO DEMOTECH --fixtures`
+
+Comparison is ordered by evidence confidence and worst kill level, never by
+upside. There is no combined score to sort on.
+
 ## `CRBP-live-run-blocked-network.txt`
 
 `python main.py CRBP --live --company-name "Corbus Pharmaceuticals Holdings, Inc." --price 12.50`
