@@ -1,0 +1,293 @@
+-- investment-research-agent persistent store (requirement 11).
+-- Facts are APPEND-ONLY and versioned: a revised fact never overwrites its
+-- predecessor.  The primary key is (fact_id, version).
+
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS companies (
+    ticker              TEXT PRIMARY KEY,
+    company_name        TEXT NOT NULL DEFAULT 'UNKNOWN',
+    cik                 TEXT DEFAULT 'UNKNOWN',
+    exchange            TEXT DEFAULT 'UNKNOWN',
+    country             TEXT DEFAULT 'UNKNOWN',
+    sector              TEXT DEFAULT 'UNKNOWN',
+    aliases             TEXT DEFAULT '',
+    first_seen          TEXT NOT NULL,
+    last_seen           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sources (
+    source_id           TEXT NOT NULL,
+    url                 TEXT NOT NULL,
+    title               TEXT NOT NULL DEFAULT '',
+    tier                TEXT NOT NULL,
+    publisher           TEXT DEFAULT 'UNKNOWN',
+    published_date      TEXT DEFAULT 'UNKNOWN',
+    event_date          TEXT DEFAULT 'UNKNOWN',
+    effective_date      TEXT DEFAULT 'UNKNOWN',
+    filing_date         TEXT DEFAULT 'UNKNOWN',
+    accession           TEXT DEFAULT 'UNKNOWN',
+    retrieved_at        TEXT NOT NULL,
+    provenance          TEXT NOT NULL DEFAULT 'LIVE',
+    content_hash        TEXT DEFAULT 'UNKNOWN',
+    syndicated_from     TEXT,
+    excerpt             TEXT DEFAULT '',
+    PRIMARY KEY (source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sources_hash ON sources(content_hash);
+
+CREATE TABLE IF NOT EXISTS facts (
+    fact_id                     TEXT NOT NULL,
+    version                     INTEGER NOT NULL DEFAULT 1,
+    ticker                      TEXT NOT NULL,
+    category                    TEXT NOT NULL,
+    claim                       TEXT NOT NULL,
+    evidence_class              TEXT NOT NULL,
+    source_id                   TEXT NOT NULL,
+    source_url                  TEXT NOT NULL,
+    source_title                TEXT DEFAULT '',
+    source_tier                 TEXT NOT NULL,
+    publication_date            TEXT DEFAULT 'UNKNOWN',
+    event_date                  TEXT DEFAULT 'UNKNOWN',
+    effective_date              TEXT DEFAULT 'UNKNOWN',
+    filing_date                 TEXT DEFAULT 'UNKNOWN',
+    verified_status             TEXT NOT NULL,
+    confidence                  REAL NOT NULL DEFAULT 0.0,
+    company_claim               INTEGER NOT NULL DEFAULT 0,
+    independent_confirmation    INTEGER NOT NULL DEFAULT 0,
+    corroborating_source_ids    TEXT DEFAULT '',
+    contradicting_evidence      TEXT DEFAULT '',
+    materiality                 TEXT NOT NULL DEFAULT 'INFORMATIONAL',
+    value                       TEXT DEFAULT 'UNKNOWN',
+    unit                        TEXT DEFAULT 'UNKNOWN',
+    provenance                  TEXT NOT NULL DEFAULT 'LIVE',
+    stale                       INTEGER NOT NULL DEFAULT 0,
+    superseded_by               TEXT,
+    run_id                      TEXT NOT NULL,
+    notes                       TEXT DEFAULT '',
+    tags                        TEXT DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    PRIMARY KEY (fact_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_facts_ticker ON facts(ticker);
+CREATE INDEX IF NOT EXISTS idx_facts_run ON facts(run_id);
+CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(ticker, category);
+
+-- Guard rail: an UPDATE to an existing fact row is a bug, not a feature.
+CREATE TRIGGER IF NOT EXISTS facts_are_append_only
+BEFORE UPDATE OF claim, value, evidence_class, verified_status ON facts
+BEGIN
+    SELECT RAISE(ABORT, 'facts are append-only: write a new version instead');
+END;
+
+CREATE TABLE IF NOT EXISTS contradictions (
+    contradiction_id    TEXT PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    kind                TEXT NOT NULL,
+    description         TEXT NOT NULL,
+    left_fact_id        TEXT NOT NULL,
+    right_fact_id       TEXT NOT NULL,
+    left_summary        TEXT DEFAULT '',
+    right_summary       TEXT DEFAULT '',
+    severity            TEXT NOT NULL DEFAULT 'MEDIUM',
+    resolved            INTEGER NOT NULL DEFAULT 0,
+    resolution_note     TEXT DEFAULT '',
+    run_id              TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contradictions_ticker ON contradictions(ticker);
+
+CREATE TABLE IF NOT EXISTS regulatory_events (
+    event_id            TEXT PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    regulator           TEXT NOT NULL DEFAULT 'UNKNOWN',
+    event_type          TEXT NOT NULL,
+    event_date          TEXT DEFAULT 'UNKNOWN',
+    agreed              TEXT DEFAULT 'UNKNOWN',
+    not_agreed          TEXT DEFAULT 'UNKNOWN',
+    unresolved          TEXT DEFAULT 'UNKNOWN',
+    company_framing     TEXT DEFAULT '',
+    regulator_statement TEXT DEFAULT '',
+    fact_ids            TEXT DEFAULT '',
+    run_id              TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS clinical_trials (
+    nct_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    title               TEXT DEFAULT '',
+    phase               TEXT DEFAULT 'UNKNOWN',
+    status              TEXT DEFAULT 'UNKNOWN',
+    enrollment          INTEGER,
+    randomized          TEXT DEFAULT 'UNKNOWN',
+    blinding            TEXT DEFAULT 'UNKNOWN',
+    control_arm         TEXT DEFAULT 'UNKNOWN',
+    primary_endpoint    TEXT DEFAULT 'UNKNOWN',
+    secondary_endpoints TEXT DEFAULT '',
+    primary_completion  TEXT DEFAULT 'UNKNOWN',
+    sponsor             TEXT DEFAULT 'UNKNOWN',
+    fact_ids            TEXT DEFAULT '',
+    run_id              TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (nct_id, run_id)
+);
+
+CREATE TABLE IF NOT EXISTS capital_structure (
+    run_id                      TEXT NOT NULL,
+    ticker                      TEXT NOT NULL,
+    as_of                       TEXT DEFAULT 'UNKNOWN',
+    basic_shares                REAL,
+    fully_diluted_shares        REAL,
+    options                     REAL,
+    rsus                        REAL,
+    public_warrants             REAL,
+    private_warrants            REAL,
+    prefunded_warrants          REAL,
+    preferred                   REAL,
+    convertible_debt            REAL,
+    atm_capacity                REAL,
+    shelf_capacity              REAL,
+    cash                        REAL,
+    debt                        REAL,
+    quarterly_burn              REAL,
+    runway_months               REAL,
+    going_concern               TEXT DEFAULT 'UNKNOWN',
+    reverse_split_history       TEXT DEFAULT 'UNKNOWN',
+    listing_compliance          TEXT DEFAULT 'UNKNOWN',
+    unknown_fields              TEXT DEFAULT '',
+    fact_ids                    TEXT DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    PRIMARY KEY (run_id, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS insider_trades (
+    trade_id            TEXT PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    insider             TEXT DEFAULT 'UNKNOWN',
+    role                TEXT DEFAULT 'UNKNOWN',
+    transaction_date    TEXT DEFAULT 'UNKNOWN',
+    transaction_code    TEXT DEFAULT 'UNKNOWN',
+    shares              REAL,
+    price               REAL,
+    is_10b5_1           TEXT DEFAULT 'UNKNOWN',
+    source_url          TEXT DEFAULT '',
+    run_id              TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS catalysts (
+    event_id            TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    run_id              TEXT NOT NULL,
+    horizon             TEXT NOT NULL,
+    date_jst            TEXT DEFAULT 'UNKNOWN',
+    date_confidence     TEXT DEFAULT 'UNKNOWN',
+    event               TEXT NOT NULL,
+    expected_outcome    TEXT DEFAULT 'UNKNOWN',
+    bull_outcome        TEXT DEFAULT 'UNKNOWN',
+    bear_outcome        TEXT DEFAULT 'UNKNOWN',
+    market_pricing      TEXT DEFAULT 'UNKNOWN',
+    information_source  TEXT DEFAULT 'UNKNOWN',
+    fact_ids            TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (event_id, run_id)
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    dimension           TEXT NOT NULL,
+    score               REAL,
+    confidence          REAL,
+    rationale           TEXT DEFAULT '',
+    capped_by_kill_gate INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (run_id, ticker, dimension)
+);
+
+CREATE TABLE IF NOT EXISTS kill_assessments (
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    category            TEXT NOT NULL,
+    level               TEXT NOT NULL,
+    rationale           TEXT DEFAULT '',
+    evidence_confidence REAL DEFAULT 0.0,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (run_id, ticker, category)
+);
+
+CREATE TABLE IF NOT EXISTS scenarios (
+    run_id                      TEXT NOT NULL,
+    ticker                      TEXT NOT NULL,
+    name                        TEXT NOT NULL,
+    prob_low                    REAL,
+    prob_high                   REAL,
+    price_low                   REAL,
+    price_high                  REAL,
+    market_cap                  REAL,
+    fully_diluted_market_cap    REAL,
+    time_horizon                TEXT DEFAULT 'UNKNOWN',
+    required_conditions         TEXT DEFAULT '',
+    failure_conditions          TEXT DEFAULT '',
+    confidence                  TEXT DEFAULT 'LOW_CONFIDENCE',
+    notes                       TEXT DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    PRIMARY KEY (run_id, ticker, name)
+);
+
+CREATE TABLE IF NOT EXISTS thesis_versions (
+    ticker              TEXT NOT NULL,
+    version             INTEGER NOT NULL,
+    run_id              TEXT NOT NULL,
+    action              TEXT NOT NULL,
+    evidence_confidence REAL NOT NULL,
+    headline            TEXT DEFAULT '',
+    max_kill_level      TEXT DEFAULT 'K0',
+    what_changed        TEXT DEFAULT '',
+    why_changed         TEXT DEFAULT '',
+    new_facts           TEXT DEFAULT '',
+    removed_assumptions TEXT DEFAULT '',
+    score_change        TEXT DEFAULT '',
+    snapshot            TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (ticker, version)
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id              TEXT NOT NULL,
+    agent_id            TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    started_at          TEXT NOT NULL,
+    finished_at         TEXT NOT NULL,
+    duration_ms         INTEGER NOT NULL DEFAULT 0,
+    fact_count          INTEGER NOT NULL DEFAULT 0,
+    error_count         INTEGER NOT NULL DEFAULT 0,
+    errors              TEXT DEFAULT '',
+    inputs_hash         TEXT DEFAULT '',
+    PRIMARY KEY (run_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id              TEXT PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    mode                TEXT NOT NULL DEFAULT 'standard',
+    status              TEXT NOT NULL DEFAULT 'INCOMPLETE_RESEARCH',
+    offline             INTEGER NOT NULL DEFAULT 1,
+    used_fixtures       INTEGER NOT NULL DEFAULT 0,
+    started_at          TEXT NOT NULL,
+    finished_at         TEXT DEFAULT '',
+    notes               TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS fetch_log (
+    run_id              TEXT NOT NULL,
+    url                 TEXT NOT NULL,
+    collector           TEXT NOT NULL,
+    outcome             TEXT NOT NULL,
+    http_status         INTEGER,
+    attempts            INTEGER NOT NULL DEFAULT 1,
+    detail              TEXT DEFAULT '',
+    created_at          TEXT NOT NULL
+);

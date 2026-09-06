@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investment-research-agent"
+version = "0.1.0"
+description = "Institutional-grade, falsification-first investment research multi-agent system"
+requires-python = ">=3.10"
+# Deliberately ZERO runtime dependencies: the deterministic core (kill gate,
+# capital-structure math, valuation math, contradiction detection) must be
+# reproducible anywhere and must not depend on a network library or an LLM.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.4", "mypy>=1.8"]
+
+[project.scripts]
+investment-research = "investment_research.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: exercises real sockets against a local mock server",
+    "regression: guards against a previously-made research failure",
+    "live: requires unrestricted outbound network (skipped by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+packages = ["investment_research"]
+ignore_missing_imports = true
+warn_unused_ignores = true
