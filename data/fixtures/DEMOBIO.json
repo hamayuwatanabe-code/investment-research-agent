@@ -1,0 +1,195 @@
+{
+  "_comment": [
+    "SYNTHETIC FIXTURE. DEMOBIO is not a real issuer and none of these facts describe any real company.",
+    "It reproduces the SHAPE of the failure this system exists to prevent: many attractive",
+    "surface signals (small cap, orphan/fast-track designations, DMC continuation, NIH support,",
+    "near-term catalyst) plus one disqualifying regulatory fact buried in a filing.",
+    "All source URLs use the fixture:// scheme so they can never be mistaken for real citations."
+  ],
+  "company": {
+    "ticker": "DEMOBIO",
+    "company_name": "Demobio Therapeutics",
+    "aliases": ["Demobio"],
+    "exchange": "NASDAQ",
+    "country": "US",
+    "sector": "Biotechnology",
+    "price": 3.40,
+    "as_of": "2026-08-28"
+  },
+  "facts": [
+    {
+      "category": "CAPITAL_STRUCTURE",
+      "claim": "Basic shares outstanding were 41,200,000 as of the cover date of the most recent Form 10-Q",
+      "value": "41200000", "unit": "shares", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07", "accession": "0000000000-26-000101"}
+    },
+    {
+      "category": "CAPITAL_STRUCTURE",
+      "claim": "Outstanding pre-funded warrants exercisable for 9,800,000 shares at $0.001 per share remain outstanding",
+      "value": "9800000", "unit": "shares", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "CAPITAL_STRUCTURE",
+      "claim": "Options and RSUs outstanding cover 7,100,000 shares",
+      "value": "7100000", "unit": "shares", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "CAPITAL_STRUCTURE",
+      "claim": "Public and private warrants exercisable for 5,400,000 shares at a weighted average exercise price of $6.50",
+      "value": "5400000", "unit": "shares", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "CAPITAL_STRUCTURE",
+      "claim": "An at-the-market offering program with $50,000,000 of remaining capacity is in effect under an effective shelf registration statement",
+      "value": "50000000", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/424B5-2026", "title": "Prospectus supplement (Form 424B5) establishing an ATM program", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-03-14", "event_date": "2026-03-14", "published_date": "2026-03-14"}
+    },
+    {
+      "category": "FINANCIAL",
+      "claim": "Cash, cash equivalents and short-term investments were $31,500,000 at 2026-06-30",
+      "value": "31500000", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "FINANCIAL",
+      "claim": "Net cash used in operating activities was $32,800,000 for the six months ended 2026-06-30",
+      "value": "32800000", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "FINANCIAL",
+      "claim": "Total debt outstanding was $0",
+      "value": "0", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "LIQUIDITY",
+      "claim": "Management states that existing cash is expected to fund operations into the second quarter of 2027, which is less than twelve months from the issuance date of these financial statements, raising substantial doubt about the ability to continue as a going concern",
+      "value": "going_concern_doubt", "unit": "status", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30, Note 1 Liquidity", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "REGULATORY",
+      "claim": "FDA granted Orphan Drug designation to DMB-101 for the treatment of the target rare disease",
+      "value": "orphan_drug", "unit": "designation", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/pr-orphan-2025", "title": "Company press release: Orphan Drug designation granted", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2025-11-12", "event_date": "2025-11-10"}
+    },
+    {
+      "category": "REGULATORY",
+      "claim": "FDA granted Fast Track designation to DMB-101",
+      "value": "fast_track", "unit": "designation", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/pr-fasttrack-2026", "title": "Company press release: Fast Track designation granted", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2026-01-22", "event_date": "2026-01-20"}
+    },
+    {
+      "category": "REGULATORY",
+      "claim": "In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required to support a marketing application",
+      "value": "endpoint_not_accepted", "unit": "regulatory_position", "company_claim": false,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2-riskfactors", "title": "Form 10-Q for the quarter ended 2026-06-30, Risk Factors", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-05-19", "published_date": "2026-08-07", "excerpt": "FDA has advised us that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication."}
+    },
+    {
+      "category": "REGULATORY",
+      "claim": "Company press release characterizes the Type C meeting outcome as constructive and states the company is aligned with FDA on the path forward",
+      "value": "constructive", "unit": "company_characterization", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/pr-typec-2026", "title": "Company press release: Type C meeting outcome", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2026-05-27", "event_date": "2026-05-19"}
+    },
+    {
+      "category": "CLINICAL",
+      "claim": "NCT-FIXTURE-0001 is a Phase 2b trial of DMB-101; allocation is Randomized, masking is DOUBLE",
+      "value": "Randomized/DOUBLE", "unit": "design", "company_claim": true,
+      "source": {"url": "fixture://ctgov/NCT-FIXTURE-0001", "title": "Phase 2b study of DMB-101 (registry record)", "tier": "TIER_1", "publisher": "ClinicalTrials.gov (fixture)", "published_date": "2026-04-02", "event_date": "2026-11-30"}
+    },
+    {
+      "category": "CLINICAL",
+      "claim": "NCT-FIXTURE-0001 primary outcome measure is: change from baseline in a biomarker-based composite score at week 24",
+      "value": "biomarker composite at week 24", "unit": "endpoint", "company_claim": true,
+      "source": {"url": "fixture://ctgov/NCT-FIXTURE-0001", "title": "Phase 2b study of DMB-101 (registry record)", "tier": "TIER_1", "publisher": "ClinicalTrials.gov (fixture)", "published_date": "2026-04-02", "event_date": "2026-11-30"}
+    },
+    {
+      "category": "CLINICAL",
+      "claim": "NCT-FIXTURE-0001 enrollment is 84 (ACTUAL)",
+      "value": "84", "unit": "participants", "company_claim": true,
+      "source": {"url": "fixture://ctgov/NCT-FIXTURE-0001", "title": "Phase 2b study of DMB-101 (registry record)", "tier": "TIER_1", "publisher": "ClinicalTrials.gov (fixture)", "published_date": "2026-04-02", "event_date": "2026-11-30"}
+    },
+    {
+      "category": "CLINICAL",
+      "claim": "NCT-FIXTURE-0001 primary completion date is 2026-11-30 (ESTIMATED)",
+      "value": "2026-11-30", "unit": "date", "company_claim": true,
+      "source": {"url": "fixture://ctgov/NCT-FIXTURE-0001", "title": "Phase 2b study of DMB-101 (registry record)", "tier": "TIER_1", "publisher": "ClinicalTrials.gov (fixture)", "published_date": "2026-04-02", "event_date": "2026-11-30"}
+    },
+    {
+      "category": "CLINICAL",
+      "claim": "The independent Data Monitoring Committee completed its planned interim safety review and recommended continuation of the trial without modification",
+      "value": "dmc_continue", "unit": "dmc_recommendation", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/pr-dmc-2026", "title": "Company press release: DMC recommends trial continuation", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2026-06-18", "event_date": "2026-06-16"}
+    },
+    {
+      "category": "SCIENCE",
+      "claim": "A peer-reviewed study of the same biomarker composite in the target disease reported that changes in the composite did not correlate with clinical outcome measures over 52 weeks",
+      "value": "no_correlation", "unit": "finding", "company_claim": false,
+      "source": {"url": "fixture://pubmed/FIXTURE-999111", "title": "Biomarker composite and clinical outcome correlation in the target disease (peer-reviewed, fixture)", "tier": "TIER_2", "publisher": "PubMed (fixture)", "published_date": "2025-09-04", "event_date": "2025-09-04"}
+    },
+    {
+      "category": "SCIENCE",
+      "claim": "NIH awarded a research grant supporting preclinical work on the DMB-101 mechanism",
+      "value": "nih_grant", "unit": "funding", "company_claim": false,
+      "source": {"url": "fixture://nih/FIXTURE-GRANT-77", "title": "NIH RePORTER award record (fixture)", "tier": "TIER_1", "publisher": "NIH (fixture)", "published_date": "2025-03-01", "event_date": "2025-03-01"}
+    },
+    {
+      "category": "MARKET_SIZE",
+      "claim": "Company investor presentation states a total addressable market in excess of $8,000,000,000 based on global prevalence multiplied by an assumed annual price",
+      "value": "8000000000", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/deck-2026", "title": "Corporate investor presentation, August 2026", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2026-08-12", "event_date": "2026-08-12"}
+    },
+    {
+      "category": "MARKET_SIZE",
+      "claim": "Diagnosed and treated prevalence in the United States is approximately 14,000 patients according to a peer-reviewed epidemiology study",
+      "value": "14000", "unit": "patients", "company_claim": false,
+      "source": {"url": "fixture://pubmed/FIXTURE-444222", "title": "Epidemiology of the target rare disease in the United States (fixture)", "tier": "TIER_2", "publisher": "PubMed (fixture)", "published_date": "2024-06-11", "event_date": "2024-06-11"}
+    },
+    {
+      "category": "COMPETITION",
+      "claim": "A competitor reported positive Phase 3 results in the same indication using a clinical endpoint accepted by FDA and has submitted a marketing application",
+      "value": "competitor_phase3_positive", "unit": "status", "company_claim": false,
+      "source": {"url": "fixture://news/FIXTURE-COMP-1", "title": "Competitor reports positive Phase 3 and files marketing application (fixture wire report)", "tier": "TIER_3", "publisher": "Financial press (fixture)", "published_date": "2026-07-09", "event_date": "2026-07-08"}
+    },
+    {
+      "category": "INSIDER",
+      "claim": "Two officers reported open-market sales totalling 310,000 shares under Rule 10b5-1 plans during the quarter",
+      "value": "310000", "unit": "shares", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/form4-2026", "title": "Forms 4 filed during the quarter", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-06-30", "event_date": "2026-06-24", "published_date": "2026-06-30"}
+    },
+    {
+      "category": "GOVERNANCE",
+      "claim": "The company received a Nasdaq notice of non-compliance with the minimum bid price requirement and has 180 days to regain compliance",
+      "value": "nasdaq_bid_price_notice", "unit": "status", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/8-K-listing", "title": "Form 8-K, Item 3.01 notice of non-compliance", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-07-02", "event_date": "2026-06-29", "published_date": "2026-07-02"}
+    },
+    {
+      "category": "CATALYST",
+      "claim": "Topline data from NCT-FIXTURE-0001 are guided for the fourth quarter of 2026",
+      "value": "2026-12-15", "unit": "date", "company_claim": true,
+      "source": {"url": "fixture://ir/DEMOBIO/deck-2026", "title": "Corporate investor presentation, August 2026", "tier": "TIER_2", "publisher": "Company IR (fixture)", "published_date": "2026-08-12", "event_date": "2026-12-15"}
+    },
+    {
+      "category": "MICROSTRUCTURE",
+      "claim": "Short interest was 6,900,000 shares, approximately 16.7 percent of the public float, at the most recent settlement date",
+      "value": "16.7", "unit": "percent_float", "company_claim": false,
+      "source": {"url": "fixture://exchange/DEMOBIO/short-interest", "title": "Exchange short interest report (fixture)", "tier": "TIER_1", "publisher": "Exchange (fixture)", "published_date": "2026-08-25", "event_date": "2026-08-15"}
+    },
+    {
+      "category": "COMMERCIAL",
+      "claim": "The company has no approved products and reported no product revenue",
+      "value": "0", "unit": "USD", "company_claim": true,
+      "source": {"url": "fixture://sec/DEMOBIO/10-Q-2026Q2", "title": "Form 10-Q for the quarter ended 2026-06-30", "tier": "TIER_1", "publisher": "SEC EDGAR (fixture)", "filing_date": "2026-08-07", "event_date": "2026-06-30", "published_date": "2026-08-07"}
+    },
+    {
+      "category": "OTHER",
+      "claim": "A sell-side analyst maintains a price target of $18.00, implying substantial upside from the current price",
+      "value": "18.00", "unit": "USD", "company_claim": false,
+      "source": {"url": "fixture://broker/FIXTURE-NOTE-1", "title": "Broker research note (fixture)", "tier": "TIER_4", "publisher": "Sell-side broker (fixture)", "published_date": "2026-08-14", "event_date": "2026-08-14"}
+    }
+  ]
+}
