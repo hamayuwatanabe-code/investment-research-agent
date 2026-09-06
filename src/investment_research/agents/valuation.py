@@ -74,9 +74,7 @@ class ValuationAgent(Agent):
 
         if math.fully_diluted_market_cap is None:
             out.degraded = True
-            out.errors.append(
-                "fully diluted market cap unavailable; valuation is incomplete"
-            )
+            out.errors.append("fully diluted market cap unavailable; valuation is incomplete")
 
         result_payload = {
             "price": math.price,
@@ -105,7 +103,10 @@ class ValuationAgent(Agent):
             )
         )
         out.evaluation = self.evaluation(
-            Channel.VALUATION, summary, tuple(requirements), result_payload,
+            Channel.VALUATION,
+            summary,
+            tuple(requirements),
+            result_payload,
             self.baseline_from(data),
         )
         out.metrics["fully_diluted_market_cap"] = math.fully_diluted_market_cap

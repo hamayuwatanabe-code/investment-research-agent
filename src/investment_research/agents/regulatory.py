@@ -140,9 +140,7 @@ FAVOURABLE_PATTERNS: tuple[RegulatoryPattern, ...] = (
     RegulatoryPattern(
         "endpoint_agreed",
         "Regulator agreed the primary endpoint",
-        re.compile(
-            r"(?i)(?:FDA|EMA|PMDA|agency)[^.]{0,80}agreed[^.]{0,80}(?:primary\s+)?endpoint"
-        ),
+        re.compile(r"(?i)(?:FDA|EMA|PMDA|agency)[^.]{0,80}agreed[^.]{0,80}(?:primary\s+)?endpoint"),
         Materiality.CRITICAL,
         False,
     ),
@@ -206,8 +204,7 @@ class RegulatoryAgent(Agent):
         relevant = [
             f
             for f in data.facts
-            if f.category
-            in (FactCategory.REGULATORY, FactCategory.CLINICAL, FactCategory.LEGAL)
+            if f.category in (FactCategory.REGULATORY, FactCategory.CLINICAL, FactCategory.LEGAL)
             or _looks_regulatory(f)
         ]
 

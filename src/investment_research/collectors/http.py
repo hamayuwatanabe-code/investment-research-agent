@@ -255,7 +255,9 @@ class HttpClient:
             url=url,
             outcome=outcome,
             status=status,
-            attempts=self.max_retries if outcome not in (FetchOutcome.BLOCKED, FetchOutcome.NOT_FOUND) else 1,
+            attempts=self.max_retries
+            if outcome not in (FetchOutcome.BLOCKED, FetchOutcome.NOT_FOUND)
+            else 1,
             error=last_error,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )

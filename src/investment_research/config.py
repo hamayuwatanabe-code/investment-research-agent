@@ -64,9 +64,7 @@ class Settings:
     db_path: Path = field(
         default_factory=lambda: REPO_ROOT / _env("IRA_DB_PATH", "data/research.db")
     )
-    cache_dir: Path = field(
-        default_factory=lambda: REPO_ROOT / _env("IRA_CACHE_DIR", "data/cache")
-    )
+    cache_dir: Path = field(default_factory=lambda: REPO_ROOT / _env("IRA_CACHE_DIR", "data/cache"))
     log_dir: Path = field(default_factory=lambda: REPO_ROOT / _env("IRA_LOG_DIR", "logs"))
     fixture_dir: Path = field(default_factory=lambda: REPO_ROOT / "data/fixtures")
 

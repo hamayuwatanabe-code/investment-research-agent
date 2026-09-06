@@ -55,9 +55,7 @@ class FixtureCollector:
             return None
 
     def collect(self, ticker: str, company_name: str = UNKNOWN) -> CollectionResult:
-        out = CollectionResult(
-            collector=self.name, provenance=Provenance.FIXTURE
-        )
+        out = CollectionResult(collector=self.name, provenance=Provenance.FIXTURE)
         payload = self.load(ticker)
         if payload is None:
             out.outcome = FetchOutcome.NOT_FOUND

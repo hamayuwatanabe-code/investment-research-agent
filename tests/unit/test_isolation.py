@@ -95,9 +95,7 @@ def build_bus() -> EvidenceBus:
 
 def project(agent_id: str, bus: EvidenceBus, **kwargs):
     guard = IsolationGuard(bus)
-    return guard.project(
-        agent_id, ticker=TICKER, company_name=NAME, aliases=ALIASES, **kwargs
-    )
+    return guard.project(agent_id, ticker=TICKER, company_name=NAME, aliases=ALIASES, **kwargs)
 
 
 # --- policy sanity ----------------------------------------------------------
@@ -202,9 +200,7 @@ def test_blind_judge_source_urls_are_opaque_refs():
 def test_source_ref_map_is_kept_out_of_the_pack():
     bus = build_bus()
     guard = IsolationGuard(bus)
-    data = guard.project(
-        "blind_judge", ticker=TICKER, company_name=NAME, aliases=ALIASES
-    )
+    data = guard.project("blind_judge", ticker=TICKER, company_name=NAME, aliases=ALIASES)
     assert "_source_ref_map" not in data.params
     ref_map = guard.source_ref_maps["blind_judge"]
     assert ref_map.to_source, "the orchestrator still needs the map to restore citations"

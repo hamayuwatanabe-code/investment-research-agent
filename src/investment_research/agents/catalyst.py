@@ -42,8 +42,18 @@ _MONTH_NUM = {
     m: i + 1
     for i, m in enumerate(
         [
-            "january", "february", "march", "april", "may", "june",
-            "july", "august", "september", "october", "november", "december",
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
         ]
     )
 }
@@ -135,9 +145,8 @@ class CatalystAgent(Agent):
             bull, bear, expected = _outcomes_for(fact)
             events.append(
                 CatalystEvent(
-                    event_id="cat_" + hashlib.sha256(
-                        f"{fact.fact_id}{date_jst}".encode()
-                    ).hexdigest()[:12],
+                    event_id="cat_"
+                    + hashlib.sha256(f"{fact.fact_id}{date_jst}".encode()).hexdigest()[:12],
                     horizon=str(horizon_for(date_jst, self.today)),
                     date_jst=date_jst,
                     date_confidence=confidence,

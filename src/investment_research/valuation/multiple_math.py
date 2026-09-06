@@ -106,9 +106,7 @@ def compute_valuation(
                     "multiple is not reachable on the evidence provided."
                 )
             elif required_share is not None and required_share > 40:
-                notes.append(
-                    "Requires a dominant share of the entire addressable market."
-                )
+                notes.append("Requires a dominant share of the entire addressable market.")
             multiples[f"{int(multiple)}x"] = {
                 "required_market_cap": required_cap,
                 "required_enterprise_value": required_ev,

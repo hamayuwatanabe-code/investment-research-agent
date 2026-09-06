@@ -68,9 +68,10 @@ class MicrostructureAgent(Agent):
     def run(self, data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
         facts = list(data.facts_in(FactCategory.MICROSTRUCTURE)) + [
-            f for f in data.facts if any(
-                any(p in f.claim.lower() for p in patterns)
-                for patterns in _FIELD_PATTERNS.values()
+            f
+            for f in data.facts
+            if any(
+                any(p in f.claim.lower() for p in patterns) for patterns in _FIELD_PATTERNS.values()
             )
         ]
 

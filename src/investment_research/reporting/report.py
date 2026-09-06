@@ -249,7 +249,9 @@ class ReportRenderer:
             out.append("Kill Agent findings:")
             for finding in sorted(findings, key=lambda f: -KillLevel(f["level"]).level)[:12]:
                 marker = "PRIMARY" if finding.get("primary_source") else "weak sourcing"
-                out.append(f"  [{finding['level']}] {finding['category']}: {finding['title']} ({marker})")
+                out.append(
+                    f"  [{finding['level']}] {finding['category']}: {finding['title']} ({marker})"
+                )
                 out.append(f"        {self._safe(finding['detail'])[:400]}")
         return "\n".join(out)
 
@@ -296,9 +298,7 @@ class ReportRenderer:
         out.append(
             "Conflicts are reported as conflicts. They are not reconciled into a single story."
         )
-        for contradiction in sorted(
-            self.bus.contradictions, key=lambda c: -c.severity.rank
-        ):
+        for contradiction in sorted(self.bus.contradictions, key=lambda c: -c.severity.rank):
             out.append("")
             out.append(f"  [{contradiction.severity}] {contradiction.kind}")
             out.append(f"    {self._safe(contradiction.description)}")
@@ -343,19 +343,27 @@ class ReportRenderer:
         if not payload:
             out.append("Regulatory agent produced no output.")
             return "\n".join(out)
-        out.append(f"REGULATOR POSITION ON PRIMARY ENDPOINT: {payload.get('endpoint_position', UNKNOWN)}")
+        out.append(
+            f"REGULATOR POSITION ON PRIMARY ENDPOINT: {payload.get('endpoint_position', UNKNOWN)}"
+        )
         out.append("")
         out.append("What the regulator has agreed:")
         agreed = payload.get("agreed", [])
-        out.extend(f"  + {self._safe(a)}" for a in agreed) if agreed else out.append("  (nothing found)")
+        out.extend(f"  + {self._safe(a)}" for a in agreed) if agreed else out.append(
+            "  (nothing found)"
+        )
         out.append("")
         out.append("What the regulator has NOT agreed / adverse findings:")
         not_agreed = payload.get("not_agreed", [])
-        out.extend(f"  - {self._safe(n)}" for n in not_agreed) if not_agreed else out.append("  (nothing found)")
+        out.extend(f"  - {self._safe(n)}" for n in not_agreed) if not_agreed else out.append(
+            "  (nothing found)"
+        )
         out.append("")
         out.append("Unresolved:")
         unresolved = payload.get("unresolved", [])
-        out.extend(f"  ? {self._safe(u)}" for u in unresolved) if unresolved else out.append("  (none recorded)")
+        out.extend(f"  ? {self._safe(u)}" for u in unresolved) if unresolved else out.append(
+            "  (none recorded)"
+        )
         framing = payload.get("company_framing", [])
         if framing:
             out.append("")
@@ -383,7 +391,9 @@ class ReportRenderer:
         out.append(f"  ATM capacity            : {_money(payload.get('atm_capacity'))}")
         out.append(f"  shelf effective         : {payload.get('shelf_effective', UNKNOWN)}")
         out.append(f"  going concern doubt     : {payload.get('going_concern', UNKNOWN)}")
-        out.append(f"  listing compliance issue: {payload.get('listing_compliance_issue', UNKNOWN)}")
+        out.append(
+            f"  listing compliance issue: {payload.get('listing_compliance_issue', UNKNOWN)}"
+        )
         missing = payload.get("unknown_fields", [])
         if missing:
             out.append("")
@@ -448,7 +458,9 @@ class ReportRenderer:
             return "\n".join(out)
         out.append(f"  price                    : {_money(payload.get('price'))}")
         out.append(f"  basic market cap         : {_money(payload.get('basic_market_cap'))}")
-        out.append(f"  fully diluted market cap : {_money(payload.get('fully_diluted_market_cap'))}")
+        out.append(
+            f"  fully diluted market cap : {_money(payload.get('fully_diluted_market_cap'))}"
+        )
         out.append(f"  enterprise value         : {_money(payload.get('enterprise_value'))}")
         out.append(f"  cash-adjusted EV         : {_money(payload.get('cash_adjusted_ev'))}")
         out.append("")
@@ -471,7 +483,9 @@ class ReportRenderer:
         out = [self._header(SECTION_ORDER[13])]
         payload = self._channel(Channel.CATALYSTS)
         events = payload.get("events", [])
-        out.append(f"Timezone: {payload.get('timezone', 'Asia/Tokyo (JST)')}   Today: {payload.get('today_jst', UNKNOWN)}")
+        out.append(
+            f"Timezone: {payload.get('timezone', 'Asia/Tokyo (JST)')}   Today: {payload.get('today_jst', UNKNOWN)}"
+        )
         if not events:
             out.append("No dated forward catalyst found in the evidence.")
             return "\n".join(out)
@@ -543,12 +557,13 @@ class ReportRenderer:
         if verdict is None:
             out.append("No action: the judge did not complete.")
             return "\n".join(out)
-        out.append(f"EVIDENCE CONFIDENCE: {verdict.evidence_confidence} / 10   (shown before the action)")
+        out.append(
+            f"EVIDENCE CONFIDENCE: {verdict.evidence_confidence} / 10   (shown before the action)"
+        )
         out.append(f"ACTION: {verdict.action}")
         if self.result.context.status != RunStatus.COMPLETE:
             out.append(
-                "This action is provisional: the run is marked "
-                f"{self.result.context.status}."
+                f"This action is provisional: the run is marked {self.result.context.status}."
             )
         if self.result.context.use_fixtures:
             out.append("This action is derived from SYNTHETIC data and must not be acted on.")
@@ -589,7 +604,9 @@ class ReportRenderer:
             out.append("BLOCKING -- these prevent a confident conclusion:")
             for question in blocking:
                 out.append(f"  [!] {self._safe(question.question)}")
-                out.append(f"      why: {question.why_it_matters}  (raised by {question.raised_by})")
+                out.append(
+                    f"      why: {question.why_it_matters}  (raised by {question.raised_by})"
+                )
         if others:
             out.append("")
             out.append("Other open questions:")

@@ -56,9 +56,7 @@ class CompetitiveAgent(Agent):
 
     def run(self, data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        competition_facts = list(
-            data.facts_in(FactCategory.COMPETITION, FactCategory.COMMERCIAL)
-        )
+        competition_facts = list(data.facts_in(FactCategory.COMPETITION, FactCategory.COMMERCIAL))
         market_facts = list(data.facts_in(FactCategory.MARKET_SIZE))
 
         competitors = self._extract_competitors(competition_facts)

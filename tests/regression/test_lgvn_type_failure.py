@@ -123,38 +123,95 @@ def raw(claim, source, category, value=UNKNOWN, company_claim=False, unit=UNKNOW
 
 #: The attractive surface. Every one of these is a real, citable positive.
 ATTRACTIVE_SIGNALS = [
-    raw("FDA granted Fast Track designation to the lead programme", PRESS,
-        FactCategory.REGULATORY, "fast_track", True),
-    raw("FDA granted Orphan Drug designation for the rare disease indication", PRESS,
-        FactCategory.REGULATORY, "orphan_drug", True),
+    raw(
+        "FDA granted Fast Track designation to the lead programme",
+        PRESS,
+        FactCategory.REGULATORY,
+        "fast_track",
+        True,
+    ),
+    raw(
+        "FDA granted Orphan Drug designation for the rare disease indication",
+        PRESS,
+        FactCategory.REGULATORY,
+        "orphan_drug",
+        True,
+    ),
     raw(
         "The independent Data Monitoring Committee completed its planned interim review and "
         "recommended continuation of the trial without modification",
-        PRESS, FactCategory.CLINICAL, "dmc_continue", True,
+        PRESS,
+        FactCategory.CLINICAL,
+        "dmc_continue",
+        True,
     ),
-    raw("NIH awarded a research grant supporting work on the mechanism",
-        _source("fixture://nih/GRANT", "NIH award record", SourceTier.TIER_1, "2026-03-01", "2026-03-01"),
-        FactCategory.SCIENCE, "nih_grant", False),
+    raw(
+        "NIH awarded a research grant supporting work on the mechanism",
+        _source(
+            "fixture://nih/GRANT", "NIH award record", SourceTier.TIER_1, "2026-03-01", "2026-03-01"
+        ),
+        FactCategory.SCIENCE,
+        "nih_grant",
+        False,
+    ),
     raw(
         "Company investor presentation states a total addressable market in excess of "
         "$8,000,000,000",
-        PRESS, FactCategory.MARKET_SIZE, "8000000000", True, "USD",
+        PRESS,
+        FactCategory.MARKET_SIZE,
+        "8000000000",
+        True,
+        "USD",
     ),
-    raw("Topline data are guided for the fourth quarter of 2026", PRESS,
-        FactCategory.CATALYST, "2026-12-15", True, "date"),
-    raw("A sell-side analyst maintains a price target of $18.00", BROKER,
-        FactCategory.OTHER, "18.00", False, "USD"),
-    raw("NCT-X is a Phase 2b trial; allocation is Randomized, masking is DOUBLE", REGISTRY,
-        FactCategory.CLINICAL, "Randomized/DOUBLE", True, "design"),
-    raw("NCT-X enrollment is 84 (ACTUAL)", REGISTRY, FactCategory.CLINICAL, "84", True,
-        "participants"),
-    raw("Basic shares outstanding were 41,200,000", FILING_MAIN,
-        FactCategory.CAPITAL_STRUCTURE, "41200000", True, "shares"),
+    raw(
+        "Topline data are guided for the fourth quarter of 2026",
+        PRESS,
+        FactCategory.CATALYST,
+        "2026-12-15",
+        True,
+        "date",
+    ),
+    raw(
+        "A sell-side analyst maintains a price target of $18.00",
+        BROKER,
+        FactCategory.OTHER,
+        "18.00",
+        False,
+        "USD",
+    ),
+    raw(
+        "NCT-X is a Phase 2b trial; allocation is Randomized, masking is DOUBLE",
+        REGISTRY,
+        FactCategory.CLINICAL,
+        "Randomized/DOUBLE",
+        True,
+        "design",
+    ),
+    raw(
+        "NCT-X enrollment is 84 (ACTUAL)",
+        REGISTRY,
+        FactCategory.CLINICAL,
+        "84",
+        True,
+        "participants",
+    ),
+    raw(
+        "Basic shares outstanding were 41,200,000",
+        FILING_MAIN,
+        FactCategory.CAPITAL_STRUCTURE,
+        "41200000",
+        True,
+        "shares",
+    ),
     # The company's own characterization of the regulatory interaction.
     raw(
         "Company press release characterizes the meeting outcome as constructive and states "
         "the company is aligned with the agency on the path forward",
-        PRESS, FactCategory.REGULATORY, "constructive", True, "company_characterization",
+        PRESS,
+        FactCategory.REGULATORY,
+        "constructive",
+        True,
+        "company_characterization",
     ),
 ]
 
@@ -165,26 +222,50 @@ DISQUALIFYING_FACTS = [
         "consider the proposed primary endpoint appropriate to establish effectiveness for the "
         "intended indication, and that an additional adequate and well-controlled trial would "
         "be required to support a marketing application",
-        FILING, FactCategory.REGULATORY, "endpoint_not_accepted", False, "regulatory_position",
+        FILING,
+        FactCategory.REGULATORY,
+        "endpoint_not_accepted",
+        False,
+        "regulatory_position",
     ),
     raw(
         "Existing cash is expected to fund operations into the second quarter of 2027, which is "
         "less than twelve months from the issuance date of these financial statements, raising "
         "substantial doubt about the ability to continue as a going concern",
-        FILING_MAIN, FactCategory.LIQUIDITY, "going_concern_doubt", True, "status",
+        FILING_MAIN,
+        FactCategory.LIQUIDITY,
+        "going_concern_doubt",
+        True,
+        "status",
     ),
     raw(
         "An at-the-market offering program with $50,000,000 of remaining capacity is in effect "
         "under an effective shelf registration statement",
-        FILING_MAIN, FactCategory.CAPITAL_STRUCTURE, "50000000", True, "USD",
+        FILING_MAIN,
+        FactCategory.CAPITAL_STRUCTURE,
+        "50000000",
+        True,
+        "USD",
     ),
 ]
 
 CASH_FACTS = [
-    raw("Cash and cash equivalents were $31,500,000", FILING_MAIN, FactCategory.FINANCIAL,
-        "31500000", True, "USD"),
-    raw("Net cash used in operating activities was $32,800,000 for the six months", FILING_MAIN,
-        FactCategory.FINANCIAL, "32800000", True, "USD"),
+    raw(
+        "Cash and cash equivalents were $31,500,000",
+        FILING_MAIN,
+        FactCategory.FINANCIAL,
+        "31500000",
+        True,
+        "USD",
+    ),
+    raw(
+        "Net cash used in operating activities was $32,800,000 for the six months",
+        FILING_MAIN,
+        FactCategory.FINANCIAL,
+        "32800000",
+        True,
+        "USD",
+    ),
 ]
 
 
@@ -283,7 +364,7 @@ def test_there_is_no_overall_score_to_average_the_problem_away(result):
 
 
 def test_evidence_confidence_is_reported_separately_from_upside(result):
-    """"Explosive 9.5 / Confidence 4" must be expressible."""
+    """ "Explosive 9.5 / Confidence 4" must be expressible."""
     assert result.scorecard.evidence_confidence is not None
     assert result.scorecard.evidence_confidence != result.scorecard.scores["explosive_potential"]
 
@@ -379,9 +460,9 @@ def test_the_two_runs_differ_in_the_way_that_matters(repo):
     assert with_facts.verdict.kill_gate.max_level.level > (
         without_facts.verdict.kill_gate.max_level.level
     )
-    assert any(
-        "disqualifier" in reason.lower() for reason in with_facts.verdict.reasoning
-    ), "only the run containing the decisive fact reports a disqualifier"
+    assert any("disqualifier" in reason.lower() for reason in with_facts.verdict.reasoning), (
+        "only the run containing the decisive fact reports a disqualifier"
+    )
     assert (
         with_facts.scorecard.scores["regulatory_quality"]
         < without_facts.scorecard.scores["regulatory_quality"]

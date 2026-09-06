@@ -62,9 +62,7 @@ def build_scenarios(
             low, high = max(0.005, low - shift * 0.8), max(0.01, high - shift * 0.8)
 
         price_range: tuple[float, float] | None = (
-            (price * _PRICE_MULTIPLE[name][0], price * _PRICE_MULTIPLE[name][1])
-            if price
-            else None
+            (price * _PRICE_MULTIPLE[name][0], price * _PRICE_MULTIPLE[name][1]) if price else None
         )
         price_high = price_range[1] if price_range else None
         shares = fully_diluted_shares or basic_shares
@@ -79,7 +77,9 @@ def build_scenarios(
                 market_cap=market_cap,
                 fully_diluted_market_cap=diluted_cap,
                 time_horizon=_horizon_for(name),
-                required_conditions=_required(name, regulatory_position, bull_points, runway_months),
+                required_conditions=_required(
+                    name, regulatory_position, bull_points, runway_months
+                ),
                 failure_conditions=_failure(name, bear_mechanisms, max_level),
                 confidence=_confidence_label(evidence_confidence),
                 notes=(

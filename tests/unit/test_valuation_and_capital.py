@@ -29,12 +29,36 @@ def test_number_parsing(text, expected):
 # --- capital structure ------------------------------------------------------
 def capital_facts():
     return [
-        make_fact("Basic shares outstanding were 41,200,000", category=FactCategory.CAPITAL_STRUCTURE, value="41200000"),
-        make_fact("Options and RSUs outstanding cover 7,100,000 shares", category=FactCategory.CAPITAL_STRUCTURE, value="7100000"),
-        make_fact("Pre-funded warrants for 9,800,000 shares remain outstanding", category=FactCategory.CAPITAL_STRUCTURE, value="9800000"),
-        make_fact("Public and private warrants for 5,400,000 shares", category=FactCategory.CAPITAL_STRUCTURE, value="5400000"),
-        make_fact("Cash and cash equivalents were $31,500,000", category=FactCategory.FINANCIAL, value="31500000"),
-        make_fact("Net cash used in operating activities was $32,800,000 for the six months", category=FactCategory.FINANCIAL, value="32800000"),
+        make_fact(
+            "Basic shares outstanding were 41,200,000",
+            category=FactCategory.CAPITAL_STRUCTURE,
+            value="41200000",
+        ),
+        make_fact(
+            "Options and RSUs outstanding cover 7,100,000 shares",
+            category=FactCategory.CAPITAL_STRUCTURE,
+            value="7100000",
+        ),
+        make_fact(
+            "Pre-funded warrants for 9,800,000 shares remain outstanding",
+            category=FactCategory.CAPITAL_STRUCTURE,
+            value="9800000",
+        ),
+        make_fact(
+            "Public and private warrants for 5,400,000 shares",
+            category=FactCategory.CAPITAL_STRUCTURE,
+            value="5400000",
+        ),
+        make_fact(
+            "Cash and cash equivalents were $31,500,000",
+            category=FactCategory.FINANCIAL,
+            value="31500000",
+        ),
+        make_fact(
+            "Net cash used in operating activities was $32,800,000 for the six months",
+            category=FactCategory.FINANCIAL,
+            value="32800000",
+        ),
         make_fact("Total debt outstanding was $0", category=FactCategory.FINANCIAL, value="0"),
     ]
 
@@ -178,7 +202,11 @@ def test_no_price_means_no_market_cap_rather_than_a_guess():
 
 def test_multiple_assumptions_are_declared_not_hidden():
     math = compute_valuation(
-        price=1.0, basic_shares=1e6, fully_diluted_shares=1e6, cash=0.0, debt=0.0,
+        price=1.0,
+        basic_shares=1e6,
+        fully_diluted_shares=1e6,
+        cash=0.0,
+        debt=0.0,
         dilution_complete=True,
     )
     assert any("EV/Sales" in a for a in math.assumptions)

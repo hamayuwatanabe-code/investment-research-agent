@@ -1,0 +1,652 @@
+==============================================================================
+INVESTMENT RESEARCH REPORT -- DEMOBIO
+Company: Demobio Therapeutics
+Run ID: 20260906T061443-4eda2f   Mode: standard
+Generated (UTC): 2026-09-06T06:14:43+00:00
+==============================================================================
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+SYNTHETIC FIXTURE DATA -- THIS IS NOT REAL RESEARCH.
+Every source below uses the fixture:// scheme and describes no real issuer.
+This run exists to exercise the pipeline, not to inform a trading decision.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+******************************************************************************
+*** INCOMPLETE_RESEARCH ***
+One or more agents or collectors did not complete. This analysis is partial
+and must not be treated as a finished assessment.
+  - competitive: DEGRADED :: only 1 competitor(s) identified; requirement is at least 3 for a usable comparison
+  - microstructure: DEGRADED :: 15/17 microstructure fields have no data
+  - kill_agent: DEGRADED :: 26 mandatory kill queries were not executed (no search provider configured)
+******************************************************************************
+
+------------------------------------------------------------------------------
+1. Verdict
+------------------------------------------------------------------------------
+Action: AVOID
+Judged blind (identity withheld from the judge): True
+Worst kill level: K5
+Headline: Evidence confidence 1.0/10; worst kill level K5; regulator endpoint position REJECTED; action AVOID.
+CAVEAT: INCOMPLETE RESEARCH: one or more agents or collectors failed. This is not a completed analysis.
+CAVEAT: Evidence confidence is low; the scores describe a possibility, not an established situation.
+CAVEAT: Some kill categories were never searched; their K0 means 'not examined'.
+
+Reasoning:
+  - Evidence confidence is 1.0/10, evaluated before any action label.
+  - A K5 disqualifier is present (REGULATORY_KILL K5). No upside estimate overrides a disqualifying fact.
+  - Contradictions are reported unresolved rather than reconciled into one story.
+
+------------------------------------------------------------------------------
+2. Evidence Confidence
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 1.0 / 10
+
+This is reported before the scores and before the action, and it is a separate question from whether the upside is large.
+
+  facts in evidence set        : 29
+  Tier 1/2 primary sources     : 93%
+  decision-grade evidence      : 17%
+  independently corroborated   : 0%
+  company claims (uncorrob.)   : 76%
+  stale by event date          : 7%
+  blocking unknowns            : 1
+  kill categories not searched : 6
+
+Penalties applied:
+  - 76% of facts are company statements without independent confirmation
+  - 1 blocking unresolved question(s)
+  - 6 kill category/categories were never searched
+  - run used SYNTHETIC FIXTURE data; evidence confidence is capped and this is not real research
+
+------------------------------------------------------------------------------
+3. Critical Red Flags
+------------------------------------------------------------------------------
+  [!] REGULATORY_KILL = K5: Regulator does not accept the primary endpoint as adequate to establish effectiveness [primary source]
+  [!] CAPITAL_KILL = K4: Going concern doubt [primary source]
+  [!] LIQUIDITY_KILL = K3: Delisting or listing non-compliance [primary source]
+  [!] SCIENCE_KILL = K3: Surrogate endpoint contradicted by independent literature [primary source]
+  [!] Kill categories never searched: CAPITAL_KILL, CLINICAL_KILL, COMMERCIAL_KILL, GOVERNANCE_KILL, LIQUIDITY_KILL, REGULATORY_KILL -- reported as unexamined, not clean
+  [!] 2 critical contradiction(s) in the evidence set
+
+Critical risk flags raised by domain agents:
+  [!] FDA does not accept the primary endpoint as adequate to establish effectiveness
+      Regulator position extracted from 'Form 10-Q for the quarter ended 2026-06-30, Risk Factors' (TIER_1): In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required to support a marketing application
+      facts: fact_b5017071c6fb2815e3a3
+  [!] Regulator requires an additional adequate and well-controlled trial
+      Regulator position extracted from 'Form 10-Q for the quarter ended 2026-06-30, Risk Factors' (TIER_1): In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required to support a marketing application
+      facts: fact_b5017071c6fb2815e3a3
+  [!] Going concern doubt disclosed
+      The filing discloses substantial doubt about the ability to continue as a going concern.
+  [!] Cash runway of approximately 5.8 months
+      Cash 31,500,000 against an implied quarterly burn of 16,400,000 gives roughly 5.8 months. Financing before the next major catalyst is likely.
+      facts: fact_f85d130f9459de15f333
+  [!] Independent evidence that the surrogate does not track clinical outcome
+      A peer-reviewed study of the same biomarker composite in the target disease reported that changes in the composite did not correlate with clinical outcome measures over 52 weeks
+      facts: fact_6e65aed4c8c3f0b2075f
+  [!] CAPITAL_KILL = K4
+      Going concern doubt [primary source]
+      facts: fact_b9003651c8427a3c8700, fact_f85d130f9459de15f333, fact_1105dfb3db0877dab769
+  [!] REGULATORY_KILL = K5
+      Regulator does not accept the primary endpoint as adequate to establish effectiveness [primary source]
+      facts: fact_b5017071c6fb2815e3a3, fact_b5017071c6fb2815e3a3, fact_b5017071c6fb2815e3a3
+
+------------------------------------------------------------------------------
+4. What Would Kill The Thesis
+------------------------------------------------------------------------------
+Stated before the bull case on purpose: these are the findings that would invalidate an investment thesis here.
+
+  - Already broken: the regulator does not accept the primary endpoint as adequate to establish effectiveness. No trial result fixes this.
+  - Bear mechanism: The regulator has already rejected the efficacy endpoint
+  - Bear mechanism: Financing before the catalyst pays off (runway 5.8 months)
+  - Bear mechanism: Going concern doubt forces financing on the buyer's terms
+  - Bear mechanism: Independent literature contradicts the surrogate
+
+Kill Agent findings:
+  [K5] REGULATORY_KILL: Regulator does not accept the primary endpoint as adequate to establish effectiveness (PRIMARY)
+        The trial as designed cannot support approval. Every downstream valuation of the programme assumes an approval path that the regulator has said does not exist. Evidence: In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-con
+  [K4] CAPITAL_KILL: Going concern doubt (PRIMARY)
+        The auditor or management states the company may not be able to continue operating. Financing is not optional and will not be on the holder's terms. Evidence: Management states that existing cash is expected to fund operations into the second quarter of 2027, which is less than twelve months from the issuance date of these financial statements, raising substantial doubt about the ability to contin
+  [K4] CAPITAL_KILL: Cash runway under six months (5.8 months) (PRIMARY)
+        Financing is required before or around the next catalyst, which transfers the option value of a good result to new investors.
+  [K4] REGULATORY_KILL: Regulator requires an additional adequate and well-controlled trial (PRIMARY)
+        Adds years and a financing round before any approval is possible. Evidence: In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required to support a marketing a
+  [K3] CAPITAL_KILL: Going concern doubt disclosed (weak sourcing)
+        The filing discloses substantial doubt about the ability to continue as a going concern.
+  [K3] CAPITAL_KILL: Cash runway of approximately 5.8 months (weak sourcing)
+        Cash 31,500,000 against an implied quarterly burn of 16,400,000 gives roughly 5.8 months. Financing before the next major catalyst is likely.
+  [K3] LIQUIDITY_KILL: Delisting or listing non-compliance (PRIMARY)
+        Forced exit of index and institutional holders, and a hard deadline for corrective action. Evidence: The company received a Nasdaq notice of non-compliance with the minimum bid price requirement and has 180 days to regain compliance
+  [K3] REGULATORY_KILL: FDA does not accept the primary endpoint as adequate to establish effectiveness (weak sourcing)
+        Regulator position extracted from 'Form 10-Q for the quarter ended 2026-06-30, Risk Factors' (TIER_1): In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be requir
+  [K3] SCIENCE_KILL: Surrogate endpoint contradicted by independent literature (PRIMARY)
+        The mechanism story does not connect to clinical benefit in independent evidence. Evidence: A peer-reviewed study of the same biomarker composite in the target disease reported that changes in the composite did not correlate with clinical outcome measures over 52 weeks
+  [K3] SCIENCE_KILL: Independent evidence that the surrogate does not track clinical outcome (weak sourcing)
+        A peer-reviewed study of the same biomarker composite in the target disease reported that changes in the composite did not correlate with clinical outcome measures over 52 weeks
+  [K2] CAPITAL_KILL: Active at-the-market program (weak sourcing)
+        An ATM with roughly 50,000,000 of remaining capacity can be drawn without further shareholder action, including into a price spike.
+  [K2] CLINICAL_KILL: Primary endpoint is a surrogate or biomarker measure (weak sourcing)
+        A surrogate primary endpoint only supports approval if the regulator accepts it as reasonably likely to predict clinical benefit. That acceptance is a separate, independently verifiable fact.
+
+------------------------------------------------------------------------------
+5. Verified Facts
+------------------------------------------------------------------------------
+29 fact(s). Class and tier are shown for every one.
+
+[ ] (GOVERNANCE/COMPANY_CLAIM/TIER_1/conf 0.60) The company received a Nasdaq notice of non-compliance with the minimum bid price requirement and has 180 days to regain compliance
+      source: fixture://sec/DEMOBIO/8-K-listing | event_date=2026-06-29 published=2026-07-02 | id=fact_7451b12a6d83408155ed
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_1/conf 0.60) Management states that existing cash is expected to fund operations into the second quarter of 2027, which is less than twelve months from the issuance date of these financial statements, raising substantial doubt about the ability to continue as a going concern
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_b9003651c8427a3c8700
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[V] (REGULATORY/VERIFIED_FACT/TIER_1/conf 0.80) In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required to support a marketing application
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2-riskfactors | event_date=2026-05-19 published=2026-08-07 | id=fact_b5017071c6fb2815e3a3
+      note: collected_by=fixtures
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) FDA granted Orphan Drug designation to DMB-101 for the treatment of the target rare disease
+      source: fixture://ir/DEMOBIO/pr-orphan-2025 | event_date=2025-11-10 published=2025-11-12 | id=fact_f65dabb66c6794f5d7f9
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) FDA granted Fast Track designation to DMB-101
+      source: fixture://ir/DEMOBIO/pr-fasttrack-2026 | event_date=2026-01-20 published=2026-01-22 | id=fact_d703c88c64f36f9d9ece
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) Company press release characterizes the Type C meeting outcome as constructive and states the company is aligned with FDA on the path forward
+      source: fixture://ir/DEMOBIO/pr-typec-2026 | event_date=2026-05-19 published=2026-05-27 | id=fact_f192bb7b0f6030dc8b10
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Basic shares outstanding were 41,200,000 as of the cover date of the most recent Form 10-Q
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_c8b1b3b7e9edfafde711
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Outstanding pre-funded warrants exercisable for 9,800,000 shares at $0.001 per share remain outstanding
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_35068beec11c23de283d
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Options and RSUs outstanding cover 7,100,000 shares
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_1ea10d170e3258c17eea
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) Public and private warrants exercisable for 5,400,000 shares at a weighted average exercise price of $6.50
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_1ace80acc413c9cfe258
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_1/conf 0.60) An at-the-market offering program with $50,000,000 of remaining capacity is in effect under an effective shelf registration statement
+      source: fixture://sec/DEMOBIO/424B5-2026 | event_date=2026-03-14 published=2026-03-14 | id=fact_1105dfb3db0877dab769
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_1/conf 0.60) NCT-FIXTURE-0001 is a Phase 2b trial of DMB-101; allocation is Randomized, masking is DOUBLE
+      source: fixture://ctgov/NCT-FIXTURE-0001 | event_date=2026-11-30 published=2026-04-02 | id=fact_1b043bffaf4eca18e9db
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_1/conf 0.60) NCT-FIXTURE-0001 primary outcome measure is: change from baseline in a biomarker-based composite score at week 24
+      source: fixture://ctgov/NCT-FIXTURE-0001 | event_date=2026-11-30 published=2026-04-02 | id=fact_9a5961624c3dc0131773
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_1/conf 0.60) NCT-FIXTURE-0001 enrollment is 84 (ACTUAL)
+      source: fixture://ctgov/NCT-FIXTURE-0001 | event_date=2026-11-30 published=2026-04-02 | id=fact_98a5b18618e1255a2634
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_1/conf 0.60) NCT-FIXTURE-0001 primary completion date is 2026-11-30 (ESTIMATED)
+      source: fixture://ctgov/NCT-FIXTURE-0001 | event_date=2026-11-30 published=2026-04-02 | id=fact_70a017dc6437edb8b8dc
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) The independent Data Monitoring Committee completed its planned interim safety review and recommended continuation of the trial without modification
+      source: fixture://ir/DEMOBIO/pr-dmc-2026 | event_date=2026-06-16 published=2026-06-18 | id=fact_34d113d51db1f226e9ec
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[P] (COMPETITION/INDEPENDENT_EVIDENCE/TIER_3/conf 0.45) A competitor reported positive Phase 3 results in the same indication using a clinical endpoint accepted by FDA and has submitted a marketing application
+      source: fixture://news/FIXTURE-COMP-1 | event_date=2026-07-08 published=2026-07-09 | id=fact_e23585ace1dfccfa9735
+      note: collected_by=fixtures
+[ ] (COMMERCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) The company has no approved products and reported no product revenue
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_a8920574ab00dafcd0ee
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Cash, cash equivalents and short-term investments were $31,500,000 at 2026-06-30
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_f85d130f9459de15f333
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Net cash used in operating activities was $32,800,000 for the six months ended 2026-06-30
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_7a5e0efd7dbf41f4a5f1
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_1/conf 0.60) Total debt outstanding was $0
+      source: fixture://sec/DEMOBIO/10-Q-2026Q2 | event_date=2026-06-30 published=2026-08-07 | id=fact_326a648e39ff79068a49
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (INSIDER/COMPANY_CLAIM/TIER_1/conf 0.60) Two officers reported open-market sales totalling 310,000 shares under Rule 10b5-1 plans during the quarter
+      source: fixture://sec/DEMOBIO/form4-2026 | event_date=2026-06-24 published=2026-06-30 | id=fact_a6e2c6e149cc3d3e49e9
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (MICROSTRUCTURE/MARKET_INFERENCE/TIER_1/conf 0.80) Short interest was 6,900,000 shares, approximately 16.7 percent of the public float, at the most recent settlement date
+      source: fixture://exchange/DEMOBIO/short-interest | event_date=2026-08-15 published=2026-08-25 | id=fact_24bfb0e08cb28e0ee055
+      note: collected_by=fixtures
+[V] (SCIENCE/VERIFIED_FACT/TIER_1/conf 0.70/STALE) NIH awarded a research grant supporting preclinical work on the DMB-101 mechanism
+      source: fixture://nih/FIXTURE-GRANT-77 | event_date=2025-03-01 published=2025-03-01 | id=fact_185e93778805f2596aff
+      note: collected_by=fixtures; stale: effective date 2025-03-01 older than 400d
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) Topline data from NCT-FIXTURE-0001 are guided for the fourth quarter of 2026
+      source: fixture://ir/DEMOBIO/deck-2026 | event_date=2026-12-15 published=2026-08-12 | id=fact_3de78605e70f8c3c02d5
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[ ] (MARKET_SIZE/COMPANY_CLAIM/TIER_2/conf 0.45) Company investor presentation states a total addressable market in excess of $8,000,000,000 based on global prevalence multiplied by an assumed annual price
+      source: fixture://ir/DEMOBIO/deck-2026 | event_date=2026-08-12 published=2026-08-12 | id=fact_213b75c39873ff365281
+      note: collected_by=fixtures; company statement; no independent confirmation found
+[P] (MARKET_SIZE/INDEPENDENT_EVIDENCE/TIER_2/conf 0.55/STALE) Diagnosed and treated prevalence in the United States is approximately 14,000 patients according to a peer-reviewed epidemiology study
+      source: fixture://pubmed/FIXTURE-444222 | event_date=2024-06-11 published=2024-06-11 | id=fact_fd7b0b5c1bb85efab39b
+      note: collected_by=fixtures; stale: effective date 2024-06-11 older than 400d
+[P] (SCIENCE/INDEPENDENT_EVIDENCE/TIER_2/conf 0.65) A peer-reviewed study of the same biomarker composite in the target disease reported that changes in the composite did not correlate with clinical outcome measures over 52 weeks
+      source: fixture://pubmed/FIXTURE-999111 | event_date=2025-09-04 published=2025-09-04 | id=fact_6e65aed4c8c3f0b2075f
+      note: collected_by=fixtures
+[?] (OTHER/ANALYST_OPINION/TIER_4/conf 0.20) A sell-side analyst maintains a price target of $18.00, implying substantial upside from the current price
+      source: fixture://broker/FIXTURE-NOTE-1 | event_date=2026-08-14 published=2026-08-14 | id=fact_ac062a06e55f1fc5c3cb
+      note: collected_by=fixtures; tier 4/5 source: cannot settle a material question alone
+
+------------------------------------------------------------------------------
+6. Contradictions
+------------------------------------------------------------------------------
+Conflicts are reported as conflicts. They are not reconciled into a single story.
+
+  [CRITICAL] company_vs_regulator
+    The company characterizes the regulatory interaction favourably while a primary-source document records an adverse regulator position. The company's adjective is not evidence about the regulator's view.
+    A: Company press release characterizes the Type C meeting outcome as constructive and states the company is aligned with FDA on the path forward
+    B: In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required 
+
+  [CRITICAL] release_vs_filing
+    A company press release and a statutory filing describe the same matter differently. The filing carries liability; the release does not.
+    A: Company press release characterizes the Type C meeting outcome as constructive and states the company is aligned with FDA on the path forward
+    B: In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required 
+
+  [HIGH] analyst_vs_primary
+    A sell-side view coexists with an adverse primary-source fact. The primary source governs; the price target is Tier 4 and cannot settle the question.
+    A: A sell-side analyst maintains a price target of $18.00, implying substantial upside from the current price
+    B: In written responses following the Type C meeting, FDA stated that it does not consider the proposed primary endpoint appropriate to establish effectiveness for the intended indication, and that an additional adequate and well-controlled trial with a clinically meaningful endpoint would be required 
+
+  [HIGH] tam_vs_population
+    The stated addressable market implies about $571,429 of annual revenue per diagnosed patient against the independent prevalence estimate. The TAM and the serviceable population are not consistent without a price assumption that is not in evidence.
+    A: Company investor presentation states a total addressable market in excess of $8,000,000,000 based on global prevalence multiplied by an assumed annual price
+    B: Diagnosed and treated prevalence in the United States is approximately 14,000 patients according to a peer-reviewed epidemiology study
+
+  [HIGH] basic_vs_fully_diluted
+    Fully diluted shares exceed basic shares by about 54%. Any market cap, per-share or upside figure quoted on basic shares overstates the return available to a new buyer by roughly that margin.
+    A: basic shares 41,200,000
+    B: fully diluted shares 63,500,000
+
+------------------------------------------------------------------------------
+7. Bull Case
+------------------------------------------------------------------------------
+2 evidence-backed argument(s) for undervaluation, resting on 5 decision-grade fact(s).
+
+(Built without sight of the bear case or the kill findings.)
+  + Independent scientific support: NIH awarded a research grant supporting preclinical work on the DMB-101 mechanism
+      facts: fact_185e93778805f2596aff
+  + No debt outstanding, so equity holders are not structurally subordinated.
+      facts: fact_326a648e39ff79068a49
+
+------------------------------------------------------------------------------
+8. Bear Case
+------------------------------------------------------------------------------
+Most likely failure path: The regulator has already rejected the efficacy endpoint. Even a statistically positive readout does not produce an approvable package. The company must run a further adequate and well-controlled trial, which costs years and at least one financing round. The equity value implied by a near-term approval disappears without any new bad news.
+
+(Built without sight of the bull case.)
+  - [CRITICAL] The regulator has already rejected the efficacy endpoint
+      Even a statistically positive readout does not produce an approvable package. The company must run a further adequate and well-controlled trial, which costs years and at least one financing round. The equity value implied by a near-term approval disappears without any new bad news.
+  - [CRITICAL] Financing before the catalyst pays off (runway 5.8 months)
+      With an active ATM and an effective shelf, the company can sell into any strength. A holder who is right about the science can still lose money through the share count.
+  - [CRITICAL] Going concern doubt forces financing on the buyer's terms
+      Structured or discounted financing typically follows, at the expense of existing holders.
+  - [CRITICAL] Independent literature contradicts the surrogate
+      The mechanism does not connect to outcomes that regulators or payers reward.
+  - [CRITICAL] Unresolved contradiction: company_vs_regulator
+      The company characterizes the regulatory interaction favourably while a primary-source document records an adverse regulator position. The company's adjective is not evidence about the regulator's view.
+  - [CRITICAL] Unresolved contradiction: release_vs_filing
+      A company press release and a statutory filing describe the same matter differently. The filing carries liability; the release does not.
+  - [HIGH] Unresolved regulatory item: FDA does not accept the primary endpoint as adequate to establish effectiveness [fact_b5017071c6fb2815e3a3] (source tier TIER_1)
+      Adds cost, delay or an additional evidentiary requirement.
+  - [HIGH] Unresolved regulatory item: Regulator requires an additional adequate and well-controlled trial [fact_b5017071c6fb2815e3a3] (source tier TIER_1)
+      Adds cost, delay or an additional evidentiary requirement.
+  - [HIGH] Dilution overhang of about 54.1% above basic shares
+      Warrants, options and pre-funded warrants convert into supply on any rally, capping the upside the headline market cap suggests.
+  - [HIGH] A surrogate endpoint may move without clinical benefit
+      A positive biomarker result that does not translate into clinical benefit produces a headline pop followed by a durable de-rating once the regulatory implications are understood.
+  - [HIGH] A competitor reaches the market first
+      The first approved product sets the standard of care and the reimbursement anchor, and a later entrant must prove superiority rather than mere activity.
+  - [HIGH] Unresolved contradiction: analyst_vs_primary
+      A sell-side view coexists with an adverse primary-source fact. The primary source governs; the price target is Tier 4 and cannot settle the question.
+  - [MEDIUM] Underpowered trial (n=84)
+      A real but modest effect can miss significance, and a spurious one can reach it.
+
+------------------------------------------------------------------------------
+9. Regulatory
+------------------------------------------------------------------------------
+REGULATOR POSITION ON PRIMARY ENDPOINT: REJECTED
+
+What the regulator has agreed:
+  + Orphan Drug designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_f65dabb66c6794f5d7f9]
+  + Fast Track designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_d703c88c64f36f9d9ece]
+
+What the regulator has NOT agreed / adverse findings:
+  - FDA does not accept the primary endpoint as adequate to establish effectiveness [fact_b5017071c6fb2815e3a3] (source tier TIER_1)
+  - Regulator requires an additional adequate and well-controlled trial [fact_b5017071c6fb2815e3a3] (source tier TIER_1)
+
+Unresolved:
+  ? Company characterization of the regulator interaction conflicts with the regulator position found in primary filings
+
+Company characterizations (NOT regulator statements):
+  ~ Company describes the interaction as ['aligned', 'constructive'] [fact_f192bb7b0f6030dc8b10] -- characterization only, not a regulator statement
+
+------------------------------------------------------------------------------
+10. Capital Structure / Dilution
+------------------------------------------------------------------------------
+As of: 2026-06-30
+  basic shares            : 41,200,000
+  fully diluted shares    : 63,500,000
+  dilution overhang       : 54.1%
+  components:
+      basic_shares          : 41,200,000
+      prefunded_warrants    : 9,800,000
+      public_warrants       : 5,400,000
+      options               : 7,100,000
+      rsus                  : UNKNOWN
+      preferred             : UNKNOWN
+      convertible_debt      : UNKNOWN
+  cash                    : $31.50M
+  debt                    : $0.00
+  implied quarterly burn  : $16.40M
+  runway (months)         : 5.8
+  ATM capacity            : $50.00M
+  shelf effective         : True
+  going concern doubt     : True
+  listing compliance issue: True
+
+  INCOMPLETE: the following dilution components were not found, so the fully diluted figure is a FLOOR: RSUs, preferred stock (as-converted), convertible debt (as-converted)
+
+------------------------------------------------------------------------------
+11. Science / Technology
+------------------------------------------------------------------------------
+Mode biotech. Primary endpoint type: SURROGATE_OR_BIOMARKER; design: randomized, masked, n=84; design quality 3.5/10.
+
+  phase                 : 2b
+  randomized            : True
+  masked                : True
+  enrollment            : 84
+  endpoint_type         : SURROGATE_OR_BIOMARKER
+  primary_endpoint      : NCT-FIXTURE-0001 primary outcome measure is: change from baseline in a biomarker-based composite score at week 24
+  surrogate_validation  : NOT_SUPPORTED
+  design_quality_score  : 3.5
+  - primary endpoint is a surrogate/biomarker rather than a clinical outcome
+  - small trial (n=84); effect estimates will be imprecise
+  - surrogate is contradicted by independent literature
+
+------------------------------------------------------------------------------
+12. Competition
+------------------------------------------------------------------------------
+Competitors identified: 1
+  [AHEAD] A competitor reported positive Phase 3 results in the same indication using a clinical endpoint accepted by FDA and has submitted a marketing application
+
+  TAM: $8.00B
+  SAM: 14,000 (units depend on the source; see notes)
+  SOM: UNKNOWN
+  note: TAM figure is a company claim from 'Corporate investor presentation, August 2026'; prevalence x assumed price is an assumption, not a market.
+  note: Serviceable population evidence: Diagnosed and treated prevalence in the United States is approximately 14,000 patients according to a peer-reviewed epidemiology study (tier TIER_2, independent=True)
+  note: TAM is expressed in currency and SAM in patients; they are not comparable without a verified price assumption, which is not in evidence.
+  note: SOM is UNKNOWN: obtainable share requires competitor share, distribution and payer evidence that is not present.
+  comparison dimensions with no evidence: safety, pricing, market_share, cash, valuation, partnership, distribution, technical_superiority
+
+------------------------------------------------------------------------------
+13. Valuation
+------------------------------------------------------------------------------
+  price                    : $3.40
+  basic market cap         : $140.08M
+  fully diluted market cap : $215.90M
+  enterprise value         : $184.40M
+  cash-adjusted EV         : $184.40M
+
+What each multiple REQUIRES (not what it would be nice to have):
+  - 2x requires a market cap of $431.80M; revenue of about $80.06M; net income of about $16.01M; 1.0% of the stated addressable market.
+  - 3x requires a market cap of $647.70M; revenue of about $123.24M; net income of about $24.65M; 1.54% of the stated addressable market.
+  - 5x requires a market cap of $1.08B; revenue of about $209.60M; net income of about $41.92M; 2.62% of the stated addressable market.
+  - 10x requires a market cap of $2.16B; revenue of about $425.50M; net income of about $85.10M; 5.32% of the stated addressable market.
+  - 20x requires a market cap of $4.32B; revenue of about $857.30M; net income of about $171.46M; 10.72% of the stated addressable market.
+  - 50x requires a market cap of $10.79B; revenue of about $2.15B; net income of about $430.54M; 26.91% of the stated addressable market.
+  - 100x requires a market cap of $21.59B; revenue of about $4.31B; net income of about $862.34M; 53.9% of the stated addressable market. Requires a dominant share of the entire addressable market.
+  - 200x requires a market cap of $43.18B; revenue of about $8.63B; net income of about $1.73B; 107.87% of the stated addressable market. Requires more revenue than the entire stated addressable market: this multiple is not reachable on the evidence provided.
+
+  UNREACHABLE on the stated market size: 200x
+  assumption: Fully diluted share count is incomplete; the diluted market cap below is a FLOOR, and the true figure is higher by an unknown amount.
+  assumption: Required revenue is derived at EV/Sales = 5x and required profit at a 20% net margin. Both are stated assumptions, not evidence about this company.
+
+------------------------------------------------------------------------------
+14. Catalysts (JST)
+------------------------------------------------------------------------------
+Timezone: Asia/Tokyo (JST)   Today: 2026-09-06
+
+  [T2] 2026-11-30 (date confidence HIGH)
+      event   : NCT-FIXTURE-0001 is a Phase 2b trial of DMB-101; allocation is Randomized, masking is DOUBLE
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : Phase 2b study of DMB-101 (registry record) (TIER_1)
+
+  [T2] 2026-11-30 (date confidence HIGH)
+      event   : NCT-FIXTURE-0001 primary outcome measure is: change from baseline in a biomarker-based composite score at week 24
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : Phase 2b study of DMB-101 (registry record) (TIER_1)
+
+  [T2] 2026-11-30 (date confidence HIGH)
+      event   : NCT-FIXTURE-0001 enrollment is 84 (ACTUAL)
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : Phase 2b study of DMB-101 (registry record) (TIER_1)
+
+  [T2] 2026-11-30 (date confidence HIGH)
+      event   : NCT-FIXTURE-0001 primary completion date is 2026-11-30 (ESTIMATED)
+      bull    : Primary endpoint met with an effect size the regulator and payers treat as clinically meaningful
+      bear    : Primary endpoint missed, or met on a measure the regulator has not accepted as adequate to establish effectiveness
+      priced? : UNKNOWN
+      source  : Phase 2b study of DMB-101 (registry record) (TIER_1)
+
+  [T3] 2026-12-15 (date confidence HIGH)
+      event   : Topline data from NCT-FIXTURE-0001 are guided for the fourth quarter of 2026
+      bull    : Primary endpoint met with an effect size the regulator and payers treat as clinically meaningful
+      bear    : Primary endpoint missed, or met on a measure the regulator has not accepted as adequate to establish effectiveness
+      priced? : UNKNOWN
+      source  : Corporate investor presentation, August 2026 (TIER_2)
+
+------------------------------------------------------------------------------
+15. Scenarios
+------------------------------------------------------------------------------
+
+  DISASTER (VERY_LOW_CONFIDENCE)
+    probability   : 35% - 45%
+    price range   : $0.17 - $0.85
+    market cap    : $35.02M
+    FD market cap : $53.98M
+    horizon       : 0-12 months
+    requires      : No further financing available on any terms, or a programme-ending regulatory or clinical outcome
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Financing before the catalyst pays off (runway 5.8 months)
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Independent literature contradicts the surrogate
+
+  BEAR (VERY_LOW_CONFIDENCE)
+    probability   : 50% - 65%
+    price range   : $0.85 - $2.04
+    market cap    : $84.05M
+    FD market cap : $129.54M
+    horizon       : 6-18 months
+    requires      : Dilutive financing before the catalyst, or a disappointing readout
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Financing before the catalyst pays off (runway 5.8 months)
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Independent literature contradicts the surrogate
+
+  BASE (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    price range   : $2.04 - $4.42
+    market cap    : $182.10M
+    FD market cap : $280.67M
+    horizon       : 12-24 months
+    requires      : The programme continues, financing occurs on ordinary terms, and no new disqualifying fact emerges
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Financing before the catalyst pays off (runway 5.8 months)
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Independent literature contradicts the surrogate
+
+  BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 1%
+    price range   : $4.42 - $10.20
+    market cap    : $420.24M
+    FD market cap : $647.70M
+    horizon       : 12-36 months
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Independent scientific support: NIH awarded a research grant supporting preclinical work on the DMB-101 mechanism
+    requires      : No debt outstanding, so equity holders are not structurally subordinated.
+    requires      : Financing is completed without materially diluting holders (runway 5.8 months)
+    fails if      : Worst kill level is K5: this scenario requires the identified disqualifying issue to be resolved first
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Financing before the catalyst pays off (runway 5.8 months)
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Independent literature contradicts the surrogate
+
+  EXTREME_BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 1%
+    price range   : $10.20 - $34.00
+    market cap    : $1.40B
+    FD market cap : $2.16B
+    horizon       : 3-7 years
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Independent scientific support: NIH awarded a research grant supporting preclinical work on the DMB-101 mechanism
+    requires      : No debt outstanding, so equity holders are not structurally subordinated.
+    requires      : Financing is completed without materially diluting holders (runway 5.8 months)
+    requires      : Approval, launch, and capture of a substantial share of the obtainable market
+    fails if      : Worst kill level is K5: this scenario requires the identified disqualifying issue to be resolved first
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Financing before the catalyst pays off (runway 5.8 months)
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Independent literature contradicts the surrogate
+
+------------------------------------------------------------------------------
+16. Scores
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE (read this first): 1.0 / 10
+
+There is deliberately NO overall score. A single number would let a large
+upside estimate outvote a disqualifying fact, which is the failure mode
+this system exists to prevent.
+
+  dimension                     score   conf   note
+  evidence_quality                1.0   1.0   Mirrors the evidence confidence breakdown.
+  management_quality              2.0   1.0   Company framed a regulatory interaction favourably while a primary source records an adverse position.
+  science_technology_quality      3.5   1.0   From checkable design/technology attributes.
+  clinical_quality                1.0   1.0   From checkable design/technology attributes. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  regulatory_quality              1.0   1.0   Regulator position on the primary endpoint: REJECTED.
+  financial_strength              1.0   1.0   About 5.8 months of runway. Going concern doubt disclosed. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  capital_structure_quality       1.0   1.0   Dilution overhang about 54.1% over basic. Active ATM can add supply at any time. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  competitive_moat                2.0   1.0   1 peer(s) identified, 1 further advanced.
+  tam_quality                     4.0   1.0   TAM present; company-sourced TAM is discounted.
+  sam_som_quality                 2.0   1.0   SOM is UNKNOWN: obtainable share is not established.
+  growth_quality                  3.0   1.0   No verified revenue growth series in evidence.
+  valuation                       5.0   1.0   1 of the requested multiples require more revenue than the entire stated addressable market.
+  catalyst_strength              10.0   1.0   5 dated forward catalyst(s).
+  catalyst_timing                 7.0   1.0   A catalyst falls inside three months.
+  market_pricing                  5.0   1.0   UNKNOWN: whether the market has already discounted the catalyst is not in evidence.
+  flow_microstructure             0.5   1.0   15 microstructure field(s) unknown.
+  immediate_buy                   1.0   1.0   Regulatory position, balance sheet and catalyst timing. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  explosive_potential             9.5   1.0   Capacity for a violent move given size, catalyst proximity and positioning. This is NOT a statement that the move will be upward, and it is not capped by the kill gate.
+  long_term_multibagger           1.0   1.0   Mean of moat, obtainable market and regulatory position. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  downside_risk                   9.5   1.0   Higher is worse. Worst kill level K5; 4 category/categories at K3 or above.
+  risk_reward                     1.0   1.0   Upside capacity against downside severity. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  time_efficiency                 6.0   1.0   How soon the thesis is testable.
+
+------------------------------------------------------------------------------
+17. Immediate Action
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 1.0 / 10   (shown before the action)
+ACTION: AVOID
+This action is provisional: the run is marked INCOMPLETE_RESEARCH.
+This action is derived from SYNTHETIC data and must not be acted on.
+
+------------------------------------------------------------------------------
+18. What Changed Since Previous Run
+------------------------------------------------------------------------------
+Thesis version: v1
+
+WHAT_CHANGED:
+  - First recorded thesis for this ticker.
+
+WHY_CHANGED:
+  - No prior run to compare against.
+
+NEW_FACT: 29 new fact id(s)
+REMOVED_ASSUMPTION: 0 fact id(s) no longer present
+
+------------------------------------------------------------------------------
+19. Unresolved Questions
+------------------------------------------------------------------------------
+BLOCKING -- these prevent a confident conclusion:
+  [!] The following kill categories were never searched: CAPITAL_KILL, CLINICAL_KILL, COMMERCIAL_KILL, GOVERNANCE_KILL, LIQUIDITY_KILL, REGULATORY_KILL
+      why: K0 for an unsearched category means 'not examined'. Treating it as 'no problem found' is the failure mode this system is built to prevent.  (raised by kill_agent)
+
+Other open questions:
+  ? No evidence was obtained for: government contracts  (raised by fact_collector)
+  ? No evidence was obtained for: management  (raised by fact_collector)
+  ? Is there a Special Protocol Assessment, and does it remain in force?  (raised by regulatory)
+  ? Has the programme received a Complete Response Letter?  (raised by regulatory)
+  ? Are there open CMC or manufacturing issues?  (raised by regulatory)
+  ? Fully diluted share count is incomplete; missing components: RSUs, preferred stock (as-converted), convertible debt (as-converted)  (raised by capital_structure)
+  ? What is the pre-specified statistical power and assumed effect size?  (raised by science)
+  ? What is the comparator arm and the current standard of care?  (raised by science)
+  ? What competitor clinical data exist in the same indication?  (raised by science)
+  ? What share of the serviceable market is realistically obtainable?  (raised by competitive)
+  ? Only 1 competitor(s) identified; at least 3 are required for a usable comparison  (raised by competitive)
+  ? No comparative evidence on: safety  (raised by competitive)
+  ? No comparative evidence on: pricing  (raised by competitive)
+  ? No comparative evidence on: market_share  (raised by competitive)
+  ? No comparative evidence on: cash  (raised by competitive)
+  ? No comparative evidence on: valuation  (raised by competitive)
+  ? No comparative evidence on: partnership  (raised by competitive)
+  ? No comparative evidence on: distribution  (raised by competitive)
+  ? No comparative evidence on: technical_superiority  (raised by competitive)
+  ? Microstructure fields with no data: days_to_cover, borrow_availability, borrow_fee, options_open_interest, gamma_exposure, average_volume, relative_volume, vwap, atr, rsi, support, resistance, institutional_ownership, insider_ownership, etf_index_exposure  (raised by microstructure)
+
+------------------------------------------------------------------------------
+20. Sources
+------------------------------------------------------------------------------
+  [TIER_1] [FIXTURE] Phase 2b study of DMB-101 (registry record)
+      fixture://ctgov/NCT-FIXTURE-0001
+      date used: 2026-11-30 (event_date) | published=2026-04-02 event=2026-11-30 filed=UNKNOWN
+  [TIER_1] [FIXTURE] Exchange short interest report (fixture)
+      fixture://exchange/DEMOBIO/short-interest
+      date used: 2026-08-15 (event_date) | published=2026-08-25 event=2026-08-15 filed=UNKNOWN
+  [TIER_1] [FIXTURE] NIH RePORTER award record (fixture)
+      fixture://nih/FIXTURE-GRANT-77
+      date used: 2025-03-01 (event_date) | published=2025-03-01 event=2025-03-01 filed=UNKNOWN
+  [TIER_1] [FIXTURE] Form 10-Q for the quarter ended 2026-06-30
+      fixture://sec/DEMOBIO/10-Q-2026Q2
+      date used: 2026-06-30 (event_date) | published=2026-08-07 event=2026-06-30 filed=2026-08-07
+  [TIER_1] [FIXTURE] Form 10-Q for the quarter ended 2026-06-30, Note 1 Liquidity
+      fixture://sec/DEMOBIO/10-Q-2026Q2
+      date used: 2026-06-30 (event_date) | published=2026-08-07 event=2026-06-30 filed=2026-08-07
+  [TIER_1] [FIXTURE] Form 10-Q for the quarter ended 2026-06-30, Risk Factors
+      fixture://sec/DEMOBIO/10-Q-2026Q2-riskfactors
+      date used: 2026-05-19 (event_date) | published=2026-08-07 event=2026-05-19 filed=2026-08-07
+  [TIER_1] [FIXTURE] Prospectus supplement (Form 424B5) establishing an ATM program
+      fixture://sec/DEMOBIO/424B5-2026
+      date used: 2026-03-14 (event_date) | published=2026-03-14 event=2026-03-14 filed=2026-03-14
+  [TIER_1] [FIXTURE] Form 8-K, Item 3.01 notice of non-compliance
+      fixture://sec/DEMOBIO/8-K-listing
+      date used: 2026-06-29 (event_date) | published=2026-07-02 event=2026-06-29 filed=2026-07-02
+  [TIER_1] [FIXTURE] Forms 4 filed during the quarter
+      fixture://sec/DEMOBIO/form4-2026
+      date used: 2026-06-24 (event_date) | published=2026-06-30 event=2026-06-24 filed=2026-06-30
+  [TIER_2] [FIXTURE] Corporate investor presentation, August 2026
+      fixture://ir/DEMOBIO/deck-2026
+      date used: 2026-08-12 (event_date) | published=2026-08-12 event=2026-08-12 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Company press release: DMC recommends trial continuation
+      fixture://ir/DEMOBIO/pr-dmc-2026
+      date used: 2026-06-16 (event_date) | published=2026-06-18 event=2026-06-16 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Company press release: Fast Track designation granted
+      fixture://ir/DEMOBIO/pr-fasttrack-2026
+      date used: 2026-01-20 (event_date) | published=2026-01-22 event=2026-01-20 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Company press release: Orphan Drug designation granted
+      fixture://ir/DEMOBIO/pr-orphan-2025
+      date used: 2025-11-10 (event_date) | published=2025-11-12 event=2025-11-10 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Company press release: Type C meeting outcome
+      fixture://ir/DEMOBIO/pr-typec-2026
+      date used: 2026-05-19 (event_date) | published=2026-05-27 event=2026-05-19 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Epidemiology of the target rare disease in the United States (fixture)
+      fixture://pubmed/FIXTURE-444222
+      date used: 2024-06-11 (event_date) | published=2024-06-11 event=2024-06-11 filed=UNKNOWN
+  [TIER_2] [FIXTURE] Biomarker composite and clinical outcome correlation in the target disease (peer-reviewed, fixture)
+      fixture://pubmed/FIXTURE-999111
+      date used: 2025-09-04 (event_date) | published=2025-09-04 event=2025-09-04 filed=UNKNOWN
+  [TIER_3] [FIXTURE] Competitor reports positive Phase 3 and files marketing application (fixture wire report)
+      fixture://news/FIXTURE-COMP-1
+      date used: 2026-07-08 (event_date) | published=2026-07-09 event=2026-07-08 filed=UNKNOWN
+  [TIER_4] [FIXTURE] Broker research note (fixture)
+      fixture://broker/FIXTURE-NOTE-1
+      date used: 2026-08-14 (event_date) | published=2026-08-14 event=2026-08-14 filed=UNKNOWN
+
+Dates: 'date used' is the event or effective date wherever one exists. A publication date is never treated as the date the event occurred.

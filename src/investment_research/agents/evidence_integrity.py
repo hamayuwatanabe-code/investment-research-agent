@@ -93,8 +93,7 @@ class EvidenceIntegrityAgent(Agent):
         out.metrics["company_claims"] = sum(1 for f in out.facts if f.company_claim)
         out.metrics["stale"] = sum(1 for f in out.facts if f.stale)
         out.metrics["tier_histogram"] = {
-            str(tier): sum(1 for f in out.facts if f.source_tier == tier)
-            for tier in SourceTier
+            str(tier): sum(1 for f in out.facts if f.source_tier == tier) for tier in SourceTier
         }
         return out
 
@@ -165,9 +164,7 @@ class EvidenceIntegrityAgent(Agent):
         if fact.source_tier in (SourceTier.TIER_4, SourceTier.TIER_5):
             notes.append("tier 4/5 source: cannot settle a material question alone")
         if fact.event_date == UNKNOWN and fact.publication_date != UNKNOWN:
-            notes.append(
-                "event date unknown; publication date must not be read as the event date"
-            )
+            notes.append("event date unknown; publication date must not be read as the event date")
 
         return replace(
             fact,
@@ -212,7 +209,9 @@ class EvidenceIntegrityAgent(Agent):
         parsed_pub = parse_iso_date(fact.publication_date)
         if parsed_pub:
             # Publication-only dating is itself a weakness; flag conservatively.
-            return (self.today - parsed_pub) > timedelta(days=self.stale_after_days), fact.publication_date
+            return (self.today - parsed_pub) > timedelta(
+                days=self.stale_after_days
+            ), fact.publication_date
         return False, UNKNOWN
 
     @staticmethod
@@ -222,9 +221,7 @@ class EvidenceIntegrityAgent(Agent):
         if evidence_class == EvidenceClass.INDEPENDENT_EVIDENCE:
             return VerifiedStatus.PARTIALLY_VERIFIED
         if evidence_class == EvidenceClass.COMPANY_CLAIM:
-            return (
-                VerifiedStatus.PARTIALLY_VERIFIED if confirmed else VerifiedStatus.NOT_VERIFIED
-            )
+            return VerifiedStatus.PARTIALLY_VERIFIED if confirmed else VerifiedStatus.NOT_VERIFIED
         if evidence_class in (EvidenceClass.ANALYST_OPINION, EvidenceClass.UNVERIFIED_CLAIM):
             return VerifiedStatus.INSUFFICIENT_EVIDENCE
         return VerifiedStatus.NOT_VERIFIED

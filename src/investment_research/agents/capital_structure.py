@@ -64,22 +64,47 @@ class ShareComponent:
 #: Each component is matched against fact claims.  Order matters only for
 #: reporting; every component is searched independently.
 COMPONENTS: tuple[ShareComponent, ...] = (
-    ShareComponent("basic_shares", "basic shares outstanding", ("basic shares", "shares outstanding", "common stock outstanding"), dilutive=False),
+    ShareComponent(
+        "basic_shares",
+        "basic shares outstanding",
+        ("basic shares", "shares outstanding", "common stock outstanding"),
+        dilutive=False,
+    ),
     # Matched most-specific first, and each source fact may satisfy only one
     # component: "Options and RSUs cover 7,100,000 shares" is one number, not two.
-    ShareComponent("prefunded_warrants", "pre-funded warrants", ("pre-funded warrant", "prefunded warrant")),
-    ShareComponent("public_warrants", "public/private warrants", ("public warrant", "private warrant", "public and private warrant")),
+    ShareComponent(
+        "prefunded_warrants", "pre-funded warrants", ("pre-funded warrant", "prefunded warrant")
+    ),
+    ShareComponent(
+        "public_warrants",
+        "public/private warrants",
+        ("public warrant", "private warrant", "public and private warrant"),
+    ),
     ShareComponent("options", "stock options", ("option",)),
     ShareComponent("rsus", "RSUs", ("rsu", "restricted stock unit")),
-    ShareComponent("preferred", "preferred stock (as-converted)", ("preferred stock", "series a preferred", "convertible preferred")),
-    ShareComponent("convertible_debt", "convertible debt (as-converted)", ("convertible note", "convertible debt", "convertible senior")),
+    ShareComponent(
+        "preferred",
+        "preferred stock (as-converted)",
+        ("preferred stock", "series a preferred", "convertible preferred"),
+    ),
+    ShareComponent(
+        "convertible_debt",
+        "convertible debt (as-converted)",
+        ("convertible note", "convertible debt", "convertible senior"),
+    ),
 )
 
 _ATM_PATTERNS = ("at-the-market", "at the market", "atm program", "atm offering")
 _SHELF_PATTERNS = ("shelf registration", "form s-3", "universal shelf")
 _GOING_CONCERN_PATTERNS = ("going concern", "substantial doubt")
 _REVERSE_SPLIT_PATTERNS = ("reverse split", "reverse stock split")
-_LISTING_PATTERNS = ("minimum bid price", "non-compliance", "noncompliance", "delisting", "listing rule")
+_LISTING_PATTERNS = (
+    "minimum bid price",
+    "non-compliance",
+    "noncompliance",
+    "delisting",
+    "listing rule",
+)
 
 
 @dataclass
@@ -143,18 +168,14 @@ class CapitalStructureAgent(Agent):
                 dilutive_total += value
                 dilutive_known = True
 
-        fully_diluted = (
-            basic + dilutive_total if basic is not None and dilutive_known else None
-        )
+        fully_diluted = basic + dilutive_total if basic is not None and dilutive_known else None
 
         payload: dict[str, Any] = {
             "as_of": self._as_of(facts),
             "basic_shares": basic,
             "fully_diluted_shares": fully_diluted,
             "dilution_components": {c.key: picture.get(c.key) for c in COMPONENTS},
-            "dilution_overhang_pct": (
-                round(100.0 * dilutive_total / basic, 1) if basic else None
-            ),
+            "dilution_overhang_pct": (round(100.0 * dilutive_total / basic, 1) if basic else None),
             "cash": cash,
             "debt": debt,
             "quarterly_burn": quarterly_burn,
@@ -177,7 +198,11 @@ class CapitalStructureAgent(Agent):
                     title="Going concern doubt disclosed",
                     detail="The filing discloses substantial doubt about the ability to continue as a going concern.",
                     severity=Materiality.CRITICAL,
-                    fact_ids=tuple(picture.fact_ids.get("going_concern", "") for _ in [0] if picture.fact_ids.get("going_concern")),
+                    fact_ids=tuple(
+                        picture.fact_ids.get("going_concern", "")
+                        for _ in [0]
+                        if picture.fact_ids.get("going_concern")
+                    ),
                     raised_by=self.agent_id,
                 )
             )

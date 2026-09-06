@@ -69,10 +69,15 @@ def test_reprints_do_not_create_independent_confirmation():
     claim = "The data monitoring committee recommended that the study continue"
     facts = run(
         [
-            make_fact(claim, company_claim=True, url="https://www.globenewswire.com/a",
-                      tier=SourceTier.TIER_2),
-            make_fact(claim, company_claim=True, url="https://finance.yahoo.com/a",
-                      tier=SourceTier.TIER_5),
+            make_fact(
+                claim,
+                company_claim=True,
+                url="https://www.globenewswire.com/a",
+                tier=SourceTier.TIER_2,
+            ),
+            make_fact(
+                claim, company_claim=True, url="https://finance.yahoo.com/a", tier=SourceTier.TIER_5
+            ),
         ]
     )
     for fact in facts:

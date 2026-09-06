@@ -86,15 +86,12 @@ class ScienceAgent(Agent):
         else:
             payload.update(self._assess_technology(technology, out))
 
-        summary = (
-            f"Mode {mode}. "
-            + (
-                f"Primary endpoint type: {payload.get('endpoint_type', UNKNOWN)}; "
-                f"design: {payload.get('design_summary', UNKNOWN)}; "
-                f"design quality {payload.get('design_quality_score', UNKNOWN)}/10."
-                if mode == "biotech"
-                else f"Differentiation evidence found for: {payload.get('signals_present', [])}."
-            )
+        summary = f"Mode {mode}. " + (
+            f"Primary endpoint type: {payload.get('endpoint_type', UNKNOWN)}; "
+            f"design: {payload.get('design_summary', UNKNOWN)}; "
+            f"design quality {payload.get('design_quality_score', UNKNOWN)}/10."
+            if mode == "biotech"
+            else f"Differentiation evidence found for: {payload.get('signals_present', [])}."
         )
         out.evaluation = self.evaluation(
             Channel.SCIENCE, summary, (), payload, self.baseline_from(data)
@@ -106,10 +103,15 @@ class ScienceAgent(Agent):
         text = " ".join(f.claim for f in facts).lower()
 
         endpoint_fact = next(
-            (f for f in facts if "primary outcome measure" in f.claim.lower() or "primary endpoint" in f.claim.lower()),
+            (
+                f
+                for f in facts
+                if "primary outcome measure" in f.claim.lower()
+                or "primary endpoint" in f.claim.lower()
+            ),
             None,
         )
-        endpoint_text = (endpoint_fact.claim.lower() if endpoint_fact else "")
+        endpoint_text = endpoint_fact.claim.lower() if endpoint_fact else ""
         if any(term in endpoint_text for term in _CLINICAL_OUTCOME_TERMS):
             endpoint_type = "CLINICAL_OUTCOME"
         elif any(term in endpoint_text for term in _SURROGATE_TERMS):
@@ -132,7 +134,11 @@ class ScienceAgent(Agent):
             if "correlat" in claim or "predict" in claim:
                 surrogate_validated = (
                     "NOT_SUPPORTED"
-                    if ("did not correlate" in claim or "no correlation" in claim or "not predict" in claim)
+                    if (
+                        "did not correlate" in claim
+                        or "no correlation" in claim
+                        or "not predict" in claim
+                    )
                     else "SUPPORTED"
                 )
                 if surrogate_validated == "NOT_SUPPORTED":
@@ -210,9 +216,18 @@ class ScienceAgent(Agent):
                 )
             )
         for question, why in (
-            ("What is the pre-specified statistical power and assumed effect size?", "An unpowered trial can fail on a real effect."),
-            ("What is the comparator arm and the current standard of care?", "Superiority claims are meaningless without the comparator."),
-            ("What competitor clinical data exist in the same indication?", "A competitor with a clinical endpoint changes the bar."),
+            (
+                "What is the pre-specified statistical power and assumed effect size?",
+                "An unpowered trial can fail on a real effect.",
+            ),
+            (
+                "What is the comparator arm and the current standard of care?",
+                "Superiority claims are meaningless without the comparator.",
+            ),
+            (
+                "What competitor clinical data exist in the same indication?",
+                "A competitor with a clinical endpoint changes the bar.",
+            ),
         ):
             out.unresolved.append(
                 UnresolvedQuestion(

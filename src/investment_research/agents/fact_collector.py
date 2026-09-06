@@ -81,9 +81,7 @@ class FactCollectorAgent(Agent):
 
         for result in self.results:
             for note in result.notes:
-                out.metrics.setdefault("collector_notes", []).append(
-                    f"{result.collector}: {note}"
-                )
+                out.metrics.setdefault("collector_notes", []).append(f"{result.collector}: {note}")
             if result.degraded:
                 out.degraded = True
                 out.errors.append(result.describe())
@@ -106,9 +104,7 @@ class FactCollectorAgent(Agent):
 
         out.metrics["collectors"] = [r.describe() for r in self.results]
         out.metrics["fact_count"] = len(out.facts)
-        out.metrics["fixture_data"] = any(
-            r.provenance == Provenance.FIXTURE for r in self.results
-        )
+        out.metrics["fixture_data"] = any(r.provenance == Provenance.FIXTURE for r in self.results)
 
         for label, category in REQUIRED_COVERAGE:
             if category not in covered:

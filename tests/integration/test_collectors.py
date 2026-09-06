@@ -32,7 +32,14 @@ SUBMISSIONS = {
     "filings": {
         "recent": {
             "form": ["10-Q", "8-K", "424B5", "4", "S-3", "SC 13G"],
-            "filingDate": ["2026-08-07", "2026-07-02", "2026-03-14", "2026-06-30", "2026-02-01", "2026-01-15"],
+            "filingDate": [
+                "2026-08-07",
+                "2026-07-02",
+                "2026-03-14",
+                "2026-06-30",
+                "2026-02-01",
+                "2026-01-15",
+            ],
             "reportDate": ["2026-06-30", "2026-06-29", "", "2026-06-24", "", ""],
             "accessionNumber": [
                 "0001595097-26-000021",
@@ -42,7 +49,14 @@ SUBMISSIONS = {
                 "0001595097-26-000004",
                 "0001595097-26-000002",
             ],
-            "primaryDocument": ["q2.htm", "8k.htm", "424b5.htm", "form4.xml", "s3.htm", "sc13g.htm"],
+            "primaryDocument": [
+                "q2.htm",
+                "8k.htm",
+                "424b5.htm",
+                "form4.xml",
+                "s3.htm",
+                "sc13g.htm",
+            ],
             "primaryDocDescription": ["10-Q", "8-K", "424B5", "FORM 4", "S-3", "SC 13G"],
             "items": ["", "3.01", "", "", "", ""],
         }
@@ -60,7 +74,9 @@ STUDIES = {
                     "lastUpdatePostDateStruct": {"date": "2026-04-02"},
                     "startDateStruct": {"date": "2025-06-01"},
                 },
-                "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Test Company Holdings Inc"}},
+                "sponsorCollaboratorsModule": {
+                    "leadSponsor": {"name": "Test Company Holdings Inc"}
+                },
                 "designModule": {
                     "phases": ["PHASE2"],
                     "enrollmentInfo": {"count": 84, "type": "ACTUAL"},
@@ -73,11 +89,16 @@ STUDIES = {
                 },
                 "outcomesModule": {
                     "primaryOutcomes": [
-                        {"measure": "Change from baseline in a biomarker composite", "timeFrame": "24 weeks"}
+                        {
+                            "measure": "Change from baseline in a biomarker composite",
+                            "timeFrame": "24 weeks",
+                        }
                     ],
                     "secondaryOutcomes": [{"measure": "Overall survival"}],
                 },
-                "armsInterventionsModule": {"armGroups": [{"label": "Active"}, {"label": "Placebo"}]},
+                "armsInterventionsModule": {
+                    "armGroups": [{"label": "Active"}, {"label": "Placebo"}]
+                },
             }
         }
     ]
@@ -166,10 +187,10 @@ def test_filings_become_tier1_facts_with_correct_categories(patched_endpoints, c
     result = SecEdgarCollector(client).collect("TESTCO", "Test Company Holdings Inc")
     assert result.outcome is FetchOutcome.OK
     categories = {f.category for f in result.raw_facts}
-    assert FactCategory.FINANCIAL in categories        # 10-Q
+    assert FactCategory.FINANCIAL in categories  # 10-Q
     assert FactCategory.CAPITAL_STRUCTURE in categories  # 424B5, S-3
-    assert FactCategory.INSIDER in categories          # Form 4
-    assert FactCategory.GOVERNANCE in categories       # SC 13G
+    assert FactCategory.INSIDER in categories  # Form 4
+    assert FactCategory.GOVERNANCE in categories  # SC 13G
     assert all(s.tier is SourceTier.TIER_1 for s in result.sources)
     assert all(f.company_claim for f in result.raw_facts), "a filer authored its own filing"
 

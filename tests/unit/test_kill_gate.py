@@ -23,9 +23,7 @@ ENDPOINT_REJECTED = (
 
 
 def test_endpoint_rejection_from_a_primary_source_is_k5():
-    gate = evaluate_kill_gate(
-        [make_fact(ENDPOINT_REJECTED, category=FactCategory.REGULATORY)], []
-    )
+    gate = evaluate_kill_gate([make_fact(ENDPOINT_REJECTED, category=FactCategory.REGULATORY)], [])
     regulatory = gate.by_category(KillCategory.REGULATORY_KILL)
     assert regulatory.level is KillLevel.K5
     assert gate.max_level is KillLevel.K5
@@ -99,7 +97,11 @@ def test_runway_thresholds(runway, expected):
     [
         ("The study was placed on clinical hold", KillCategory.CLINICAL_KILL, KillLevel.K5),
         ("The trial did not meet its primary endpoint", KillCategory.CLINICAL_KILL, KillLevel.K5),
-        ("The company received a Complete Response Letter", KillCategory.REGULATORY_KILL, KillLevel.K4),
+        (
+            "The company received a Complete Response Letter",
+            KillCategory.REGULATORY_KILL,
+            KillLevel.K4,
+        ),
         (
             "There is substantial doubt about the ability to continue as a going concern",
             KillCategory.CAPITAL_KILL,

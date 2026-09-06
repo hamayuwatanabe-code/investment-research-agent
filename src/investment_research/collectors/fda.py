@@ -54,9 +54,7 @@ class FdaCollector:
             return out
 
         search = f'sponsor_name:"{company_name}"'
-        result = self.http.get(
-            DRUGSFDA_URL, params={"search": search, "limit": self.limit}
-        )
+        result = self.http.get(DRUGSFDA_URL, params={"search": search, "limit": self.limit})
         out.attempted_urls.append(result.url)
         if result.outcome == FetchOutcome.NOT_FOUND:
             out.outcome = FetchOutcome.NOT_FOUND

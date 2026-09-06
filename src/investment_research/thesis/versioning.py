@@ -66,9 +66,7 @@ def diff_against_previous(
     if new_facts:
         changed.append(f"{len(new_facts)} new fact(s) entered the evidence set.")
     if removed:
-        changed.append(
-            f"{len(removed)} previously-held fact(s) are no longer in the evidence set."
-        )
+        changed.append(f"{len(removed)} previously-held fact(s) are no longer in the evidence set.")
         why.append(
             "A fact that disappears is not a fact that was disproven; it may indicate a "
             "collection failure and should be checked."

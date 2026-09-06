@@ -112,9 +112,7 @@ class BullAgent(Agent):
                             f"Trial design quality scores {quality}/10 on checkable design "
                             "attributes (randomization, masking, endpoint type, sample size)."
                         ),
-                        "fact_ids": [
-                            f.fact_id for f in data.facts_in(FactCategory.CLINICAL)[:3]
-                        ],
+                        "fact_ids": [f.fact_id for f in data.facts_in(FactCategory.CLINICAL)[:3]],
                         "category": "asset_quality",
                     }
                 )
@@ -125,9 +123,7 @@ class BullAgent(Agent):
                             "Technical differentiation is evidenced by: "
                             + ", ".join(science.payload["signals_present"])
                         ),
-                        "fact_ids": [
-                            f.fact_id for f in data.facts_in(FactCategory.TECHNOLOGY)[:3]
-                        ],
+                        "fact_ids": [f.fact_id for f in data.facts_in(FactCategory.TECHNOLOGY)[:3]],
                         "category": "asset_quality",
                     }
                 )
@@ -193,9 +189,7 @@ class BullAgent(Agent):
                         f"Roughly {runway} months of runway funds the programme past its next "
                         "catalyst without a forced financing."
                     ),
-                    "fact_ids": [
-                        f.fact_id for f in data.facts_in(FactCategory.FINANCIAL)[:2]
-                    ],
+                    "fact_ids": [f.fact_id for f in data.facts_in(FactCategory.FINANCIAL)[:2]],
                     "category": "structure",
                 }
             )

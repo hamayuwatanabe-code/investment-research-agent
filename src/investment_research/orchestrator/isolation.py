@@ -209,9 +209,7 @@ POLICIES: dict[str, IsolationPolicy] = {
     "valuation": IsolationPolicy(
         agent_id="valuation",
         reads=frozenset({Channel.VERIFIED_EVIDENCE, Channel.CAPITAL_STRUCTURE}),
-        rationale=(
-            "Requirement 4-10: sees share counts (facts) but no other agent's evaluation."
-        ),
+        rationale=("Requirement 4-10: sees share counts (facts) but no other agent's evaluation."),
     ),
     "blind_judge": IsolationPolicy(
         agent_id="blind_judge",
@@ -333,7 +331,9 @@ def _serialize(obj: Any) -> str:
         return str(obj)
 
 
-def identity_markers(ticker: str | None, company_name: str | None, aliases: Sequence[str] = ()) -> list[str]:
+def identity_markers(
+    ticker: str | None, company_name: str | None, aliases: Sequence[str] = ()
+) -> list[str]:
     """Strings whose presence would de-anonymize a blind pack."""
     markers: list[str] = []
     for value in (ticker, company_name, *aliases):
@@ -424,9 +424,7 @@ class IsolationGuard:
         policy = policy_for(agent_id)
         selected_facts = tuple(facts if facts is not None else self.bus.facts)
 
-        channels = {
-            name: ev for name, ev in self.bus.channels.items() if name in policy.reads
-        }
+        channels = {name: ev for name, ev in self.bus.channels.items() if name in policy.reads}
 
         params_out: dict[str, Any] = dict(params or {})
         if policy.sees_user_preferences and user_preferences:
@@ -453,9 +451,7 @@ class IsolationGuard:
             # Everything else in the pack carries prose too, and prose carries
             # the company name.
             risk_flags = anonymize_risk_flags(risk_flags, ticker, company_name, aliases)
-            contradictions = anonymize_contradictions(
-                contradictions, ticker, company_name, aliases
-            )
+            contradictions = anonymize_contradictions(contradictions, ticker, company_name, aliases)
             unresolved = anonymize_unresolved(unresolved, ticker, company_name, aliases)
             # Kept out of band: the map holds real URLs and is used only to
             # restore citations AFTER the blind verdict is fixed.
@@ -518,9 +514,7 @@ class IsolationGuard:
                         f"user preference {key!r} leaked into input to {policy.agent_id!r}"
                     )
             if "user_preferences" in agent_input.params:
-                violations.append(
-                    f"user_preferences present in params for {policy.agent_id!r}"
-                )
+                violations.append(f"user_preferences present in params for {policy.agent_id!r}")
 
         for channel in self.bus.channels:
             if channel not in policy.reads and channel in agent_input.channels:

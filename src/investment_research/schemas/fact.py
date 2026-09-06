@@ -213,8 +213,7 @@ class Fact:
         return (
             self.evidence_class in DECISION_GRADE_CLASSES
             and self.source_tier not in NON_DECISIVE_TIERS
-            and self.verified_status
-            in (VerifiedStatus.VERIFIED, VerifiedStatus.PARTIALLY_VERIFIED)
+            and self.verified_status in (VerifiedStatus.VERIFIED, VerifiedStatus.PARTIALLY_VERIFIED)
         )
 
     def next_version(self, **changes: Any) -> Fact:

@@ -89,7 +89,9 @@ def build_scorecard(
         "UNKNOWN": 4.0,
         "REJECTED": 1.0,
     }.get(endpoint_position, 4.0)
-    rationale["regulatory_quality"] = f"Regulator position on the primary endpoint: {endpoint_position}."
+    rationale["regulatory_quality"] = (
+        f"Regulator position on the primary endpoint: {endpoint_position}."
+    )
 
     # --- financial --------------------------------------------------------
     runway = cap_payload.get("runway_months")
@@ -111,9 +113,7 @@ def build_scorecard(
         scores["capital_structure_quality"] = _clamp(10.0 - overhang / 8.0)
         rationale["capital_structure_quality"] = f"Dilution overhang about {overhang}% over basic."
     if cap_payload.get("atm_capacity"):
-        scores["capital_structure_quality"] = _clamp(
-            scores["capital_structure_quality"] - 1.5
-        )
+        scores["capital_structure_quality"] = _clamp(scores["capital_structure_quality"] - 1.5)
         rationale["capital_structure_quality"] += " Active ATM can add supply at any time."
 
     # --- market -----------------------------------------------------------
@@ -123,13 +123,16 @@ def build_scorecard(
     rationale["competitive_moat"] = f"{competitors} peer(s) identified, {ahead} further advanced."
 
     tam = comp_payload.get("tam")
-    scores["tam_quality"] = 3.0 if tam is None else (4.0 if _tam_is_company_claim(comp_payload) else 7.0)
+    scores["tam_quality"] = (
+        3.0 if tam is None else (4.0 if _tam_is_company_claim(comp_payload) else 7.0)
+    )
     rationale["tam_quality"] = (
         "TAM absent." if tam is None else "TAM present; company-sourced TAM is discounted."
     )
     scores["sam_som_quality"] = 2.0 if comp_payload.get("som") is None else 6.0
     rationale["sam_som_quality"] = (
-        "SOM is UNKNOWN: obtainable share is not established." if comp_payload.get("som") is None
+        "SOM is UNKNOWN: obtainable share is not established."
+        if comp_payload.get("som") is None
         else "SOM estimated from evidence."
     )
 
@@ -153,7 +156,9 @@ def build_scorecard(
     rationale["catalyst_strength"] = f"{catalyst_count} dated forward catalyst(s)."
     scores["catalyst_timing"] = 7.0 if near_term_catalyst else 4.0
     rationale["catalyst_timing"] = (
-        "A catalyst falls inside three months." if near_term_catalyst else "Nothing within three months."
+        "A catalyst falls inside three months."
+        if near_term_catalyst
+        else "Nothing within three months."
     )
     scores["market_pricing"] = 5.0
     rationale["market_pricing"] = (
@@ -169,7 +174,10 @@ def build_scorecard(
     # disqualified company can still be capable of a violent move, and hiding
     # that would be its own distortion. What is capped is investment quality.
     explosive = 5.0
-    if val_payload.get("fully_diluted_market_cap") and val_payload["fully_diluted_market_cap"] < 5e8:
+    if (
+        val_payload.get("fully_diluted_market_cap")
+        and val_payload["fully_diluted_market_cap"] < 5e8
+    ):
         explosive += 2.0
     if near_term_catalyst:
         explosive += 1.5
@@ -182,7 +190,8 @@ def build_scorecard(
     )
 
     scores["long_term_multibagger"] = _clamp(
-        (scores["competitive_moat"] + scores["sam_som_quality"] + scores["regulatory_quality"]) / 3.0
+        (scores["competitive_moat"] + scores["sam_som_quality"] + scores["regulatory_quality"])
+        / 3.0
     )
     rationale["long_term_multibagger"] = "Mean of moat, obtainable market and regulatory position."
 
@@ -215,9 +224,7 @@ def build_scorecard(
         if dimension in scores and scores[dimension] > cap:
             scores[dimension] = cap
             capped.append(dimension)
-            rationale[dimension] += (
-                f" Capped at {cap} by the kill gate (worst level {max_level})."
-            )
+            rationale[dimension] += f" Capped at {cap} by the kill gate (worst level {max_level})."
 
     card.scores = {k: _clamp(v) for k, v in scores.items()}
     card.rationale = rationale

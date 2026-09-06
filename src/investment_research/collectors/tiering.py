@@ -260,7 +260,9 @@ def independent_source_count(
         host = _host(url)
         if host and host in seen_host:
             continue
-        if any(is_reprint(text, prior_text, threshold) for _, prior_text in kept if text and prior_text):
+        if any(
+            is_reprint(text, prior_text, threshold) for _, prior_text in kept if text and prior_text
+        ):
             continue
         if host:
             seen_host.add(host)

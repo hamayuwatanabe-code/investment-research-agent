@@ -198,12 +198,16 @@ def test_second_run_creates_a_new_thesis_version_with_a_diff(repo, fixture_dir):
     pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
 
     first = pipeline.run(
-        "DEMOBIO", metadata["company_name"],
-        [collector.collect("DEMOBIO", metadata["company_name"])], price=metadata["price"],
+        "DEMOBIO",
+        metadata["company_name"],
+        [collector.collect("DEMOBIO", metadata["company_name"])],
+        price=metadata["price"],
     )
     second = pipeline.run(
-        "DEMOBIO", metadata["company_name"],
-        [collector.collect("DEMOBIO", metadata["company_name"])], price=metadata["price"],
+        "DEMOBIO",
+        metadata["company_name"],
+        [collector.collect("DEMOBIO", metadata["company_name"])],
+        price=metadata["price"],
     )
 
     assert first.thesis_version == 1
@@ -221,10 +225,16 @@ def test_facts_are_not_duplicated_across_runs(repo, fixture_dir):
     collector = FixtureCollector(fixture_dir)
     metadata = collector.metadata("DEMOBIO")
     pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
-    first = pipeline.run("DEMOBIO", metadata["company_name"],
-                         [collector.collect("DEMOBIO", metadata["company_name"])])
-    pipeline.run("DEMOBIO", metadata["company_name"],
-                 [collector.collect("DEMOBIO", metadata["company_name"])])
+    first = pipeline.run(
+        "DEMOBIO",
+        metadata["company_name"],
+        [collector.collect("DEMOBIO", metadata["company_name"])],
+    )
+    pipeline.run(
+        "DEMOBIO",
+        metadata["company_name"],
+        [collector.collect("DEMOBIO", metadata["company_name"])],
+    )
     assert len(repo.latest_facts("DEMOBIO")) == len(first.bus.facts)
 
 

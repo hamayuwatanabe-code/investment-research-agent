@@ -48,13 +48,9 @@ class BearAgent(Agent):
                 }
             )
 
-        ordered = sorted(
-            mechanisms, key=lambda m: -Materiality(m["severity"]).rank
-        )
+        ordered = sorted(mechanisms, key=lambda m: -Materiality(m["severity"]).rank)
         primary = ordered[0]
-        narrative = (
-            f"Most likely failure path: {primary['mechanism']}. {primary['path']}"
-        )
+        narrative = f"Most likely failure path: {primary['mechanism']}. {primary['path']}"
         points = tuple(f"{m['mechanism']}: {m['path']}" for m in ordered[:6])
 
         payload = {
@@ -132,9 +128,7 @@ class BearAgent(Agent):
                         "money through the share count."
                     ),
                     "fact_ids": [],
-                    "severity": str(
-                        Materiality.CRITICAL if runway < 12 else Materiality.HIGH
-                    ),
+                    "severity": str(Materiality.CRITICAL if runway < 12 else Materiality.HIGH),
                 }
             )
         overhang = payload.get("dilution_overhang_pct")
@@ -208,7 +202,9 @@ class BearAgent(Agent):
         items: list[dict] = []
         for fact in data.facts_in(FactCategory.COMPETITION, FactCategory.COMMERCIAL):
             text = fact.claim.lower()
-            if "competitor" in text and ("phase 3" in text or "approved" in text or "marketing application" in text):
+            if "competitor" in text and (
+                "phase 3" in text or "approved" in text or "marketing application" in text
+            ):
                 items.append(
                     {
                         "mechanism": "A competitor reaches the market first",

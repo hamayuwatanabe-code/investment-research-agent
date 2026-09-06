@@ -58,7 +58,9 @@ class BlindJudgeAgent(Agent):
         # 1. Kill gate first (requirement 27: kill test before bull case).
         for assessment in sorted(gate.assessments, key=lambda a: -a.level.level):
             if assessment.level.level >= 3:
-                red_flags.append(f"{assessment.category} = {assessment.level}: {assessment.rationale}")
+                red_flags.append(
+                    f"{assessment.category} = {assessment.level}: {assessment.rationale}"
+                )
         if gate.unsearched_categories:
             red_flags.append(
                 "Kill categories never searched: "
@@ -101,9 +103,7 @@ class BlindJudgeAgent(Agent):
             )
 
         if bull and not bull.payload.get("points"):
-            reasoning.append(
-                "No evidence-backed undervaluation argument could be constructed."
-            )
+            reasoning.append("No evidence-backed undervaluation argument could be constructed.")
 
         headline = self._headline(action, gate, endpoint_position, evidence_confidence)
 
@@ -207,9 +207,7 @@ class BlindJudgeAgent(Agent):
         )
 
     @staticmethod
-    def _caveats(
-        run_status: RunStatus, confidence: float, gate: KillGateResult
-    ) -> list[str]:
+    def _caveats(run_status: RunStatus, confidence: float, gate: KillGateResult) -> list[str]:
         caveats: list[str] = []
         if run_status == RunStatus.INCOMPLETE_RESEARCH:
             caveats.append(
@@ -244,7 +242,5 @@ def _rebuild_gate(payload: dict) -> KillGateResult:
         )
         for row in payload.get("kill_gate", [])
     )
-    unsearched = tuple(
-        KillCategory(name) for name in payload.get("unsearched_categories", [])
-    )
+    unsearched = tuple(KillCategory(name) for name in payload.get("unsearched_categories", []))
     return KillGateResult(assessments=assessments, unsearched_categories=unsearched)

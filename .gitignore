@@ -12,6 +12,7 @@ data/cache/
 logs/*.jsonl
 logs/*.log
 reports/
+!docs/examples/
 
 # Python
 __pycache__/

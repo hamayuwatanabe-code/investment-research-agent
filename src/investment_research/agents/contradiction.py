@@ -90,13 +90,9 @@ class ContradictionAgent(Agent):
 
     # -- checks ------------------------------------------------------------
     def _company_vs_regulator(self, ticker: str, facts: list[Fact]) -> list[Contradiction]:
-        positives = [
-            f for f in facts if f.company_claim and _POSITIVE_FRAMING.search(f.claim)
-        ]
+        positives = [f for f in facts if f.company_claim and _POSITIVE_FRAMING.search(f.claim)]
         adverse = [
-            f
-            for f in facts
-            if _ADVERSE_REGULATOR.search(f.claim) and f.source_tier.rank <= 2
+            f for f in facts if _ADVERSE_REGULATOR.search(f.claim) and f.source_tier.rank <= 2
         ]
         results: list[Contradiction] = []
         for positive in positives:
@@ -154,7 +150,9 @@ class ContradictionAgent(Agent):
 
     def _analyst_vs_primary(self, ticker: str, facts: list[Fact]) -> list[Contradiction]:
         analysts = [f for f in facts if f.evidence_class == EvidenceClass.ANALYST_OPINION]
-        adverse = [f for f in facts if _ADVERSE_REGULATOR.search(f.claim) and f.source_tier.rank <= 2]
+        adverse = [
+            f for f in facts if _ADVERSE_REGULATOR.search(f.claim) and f.source_tier.rank <= 2
+        ]
         results: list[Contradiction] = []
         for analyst in analysts:
             for negative in adverse:
@@ -215,9 +213,7 @@ class ContradictionAgent(Agent):
     def _tam_vs_population(self, ticker: str, facts: list[Fact], data) -> list[Contradiction]:
         tam_facts = [f for f in facts if "addressable market" in f.claim.lower()]
         population_facts = [
-            f
-            for f in facts
-            if "prevalence" in f.claim.lower() and not f.company_claim
+            f for f in facts if "prevalence" in f.claim.lower() and not f.company_claim
         ]
         results: list[Contradiction] = []
         for tam in tam_facts:

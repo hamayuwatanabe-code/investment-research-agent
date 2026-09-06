@@ -52,11 +52,7 @@ class CitationValidator:
         self.known_accessions = {
             s.accession for s in sources if s.accession and s.accession != "UNKNOWN"
         }
-        self.known_nct = {
-            match
-            for f in facts
-            for match in _NCT_RE.findall(f.claim)
-        }
+        self.known_nct = {match for f in facts for match in _NCT_RE.findall(f.claim)}
 
     def check(self, text: str) -> CitationReport:
         report = CitationReport()

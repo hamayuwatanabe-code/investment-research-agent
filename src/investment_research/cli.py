@@ -50,16 +50,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("ticker", nargs="?", help="ticker to research, e.g. CRBP")
     parser.add_argument("--full-dd", action="store_true", help="full due diligence (all agents)")
-    parser.add_argument("--update", action="store_true", help="re-run and diff against the last thesis")
-    parser.add_argument("--kill-test", action="store_true", help="kill gate only; skip the bull case")
+    parser.add_argument(
+        "--update", action="store_true", help="re-run and diff against the last thesis"
+    )
+    parser.add_argument(
+        "--kill-test", action="store_true", help="kill gate only; skip the bull case"
+    )
     parser.add_argument("--catalyst", action="store_true", help="catalyst calendar only")
-    parser.add_argument("--compare", nargs="+", metavar="TICKER", help="compare two or more tickers")
-    parser.add_argument("--screen", metavar="MODE", help="screen fixtures/known tickers, e.g. explosive")
-    parser.add_argument("--fixtures", action="store_true", help="use SYNTHETIC fixture data (never real research)")
+    parser.add_argument(
+        "--compare", nargs="+", metavar="TICKER", help="compare two or more tickers"
+    )
+    parser.add_argument(
+        "--screen", metavar="MODE", help="screen fixtures/known tickers, e.g. explosive"
+    )
+    parser.add_argument(
+        "--fixtures", action="store_true", help="use SYNTHETIC fixture data (never real research)"
+    )
     parser.add_argument("--live", action="store_true", help="allow outbound network calls")
-    parser.add_argument("--price", type=float, help="current share price, if not otherwise available")
+    parser.add_argument(
+        "--price", type=float, help="current share price, if not otherwise available"
+    )
     parser.add_argument("--company-name", help="company name (improves registry lookups)")
-    parser.add_argument("--json", dest="as_json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--json", dest="as_json", action="store_true", help="emit machine-readable JSON"
+    )
     parser.add_argument("--report-out", type=Path, help="write the report to a file")
     parser.add_argument("--db", type=Path, help="override the SQLite path")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -98,11 +112,7 @@ def run_one(
 ) -> ResearchResult:
     fixtures = FixtureCollector(settings.fixture_dir)
     metadata = fixtures.metadata(ticker) if args.fixtures else {}
-    company_name = (
-        args.company_name
-        or metadata.get("company_name")
-        or ticker.upper()
-    )
+    company_name = args.company_name or metadata.get("company_name") or ticker.upper()
     price = args.price if args.price is not None else metadata.get("price")
 
     results, _ = collect(
@@ -258,9 +268,7 @@ def _comparison_table(results: list[ResearchResult]) -> str:
     lines.append(f"  {'ticker':<10} {'conf':>5} {'kill':>5} {'action':<18} {'status'}")
     for result in results:
         verdict = result.verdict
-        confidence = (
-            result.confidence_breakdown.score if result.confidence_breakdown else 0.0
-        )
+        confidence = result.confidence_breakdown.score if result.confidence_breakdown else 0.0
         lines.append(
             f"  {result.context.ticker:<10} {confidence:>5.1f} "
             f"{str(verdict.kill_gate.max_level) if verdict else '-':>5} "

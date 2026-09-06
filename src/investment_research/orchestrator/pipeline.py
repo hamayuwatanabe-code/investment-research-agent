@@ -230,9 +230,7 @@ class Pipeline:
             company_name=company_name,
             mode=mode,
             offline=offline,
-            use_fixtures=any(
-                r.provenance == Provenance.FIXTURE for r in collection_results
-            ),
+            use_fixtures=any(r.provenance == Provenance.FIXTURE for r in collection_results),
             started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         bus = EvidenceBus()
@@ -266,7 +264,10 @@ class Pipeline:
 
         # ---- Stage 1: collect (no evaluation) ---------------------------
         collector_output = self._run_agent(
-            FactCollectorAgent(collection_results), guard, result, params=params,
+            FactCollectorAgent(collection_results),
+            guard,
+            result,
+            params=params,
             user_preferences=user_preferences,
         )
         raw_facts = list(collector_output.facts)
@@ -494,7 +495,9 @@ class Pipeline:
                     bear_outcome=e["bear_outcome"],
                     market_pricing=e["market_pricing"],
                     information_source=e["information_source"],
-                    fact_ids=tuple(str(e.get("fact_ids", "")).split(",")) if e.get("fact_ids") else (),
+                    fact_ids=tuple(str(e.get("fact_ids", "")).split(","))
+                    if e.get("fact_ids")
+                    else (),
                 )
                 for e in result.catalysts
             ]

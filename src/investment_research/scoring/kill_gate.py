@@ -366,7 +366,8 @@ def evaluate_kill_gate(
             KillAssessment(
                 category=category,
                 level=worst.level,
-                rationale=worst.title + (" [primary source]" if primary_backed else " [weak sourcing]"),
+                rationale=worst.title
+                + (" [primary source]" if primary_backed else " [weak sourcing]"),
                 findings=tuple(sorted(items, key=lambda f: -f.level.level)),
                 evidence_confidence=0.85 if primary_backed else 0.35,
             )

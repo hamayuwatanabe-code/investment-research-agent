@@ -54,9 +54,7 @@ class SourceTier(StrEnum):
 
     @property
     def rank(self) -> int:
-        return {"TIER_1": 1, "TIER_2": 2, "TIER_3": 3, "TIER_4": 4, "TIER_5": 5}.get(
-            self.value, 9
-        )
+        return {"TIER_1": 1, "TIER_2": 2, "TIER_3": 3, "TIER_4": 4, "TIER_5": 5}.get(self.value, 9)
 
     @property
     def is_primary(self) -> bool:

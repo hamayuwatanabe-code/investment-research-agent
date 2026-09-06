@@ -198,6 +198,7 @@ def anonymize_pack(
         for name, ev in channels.items()
     }
     patterns = _identity_patterns(ticker, company_name, aliases)
+
     def scrub(value: Any) -> Any:
         """Redact recursively: a company name hides just as well inside a list."""
         if isinstance(value, str):

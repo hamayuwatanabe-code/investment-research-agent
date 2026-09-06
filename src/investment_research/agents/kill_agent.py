@@ -73,7 +73,7 @@ class KillAgent(Agent):
         unsearched = self._unsearched_categories(unexecuted)
 
         capital = data.channel(Channel.CAPITAL_STRUCTURE)
-        runway = (capital.payload.get("runway_months") if capital else None)
+        runway = capital.payload.get("runway_months") if capital else None
 
         gate = evaluate_kill_gate(
             list(data.facts),
@@ -95,9 +95,7 @@ class KillAgent(Agent):
                             if assessment.level.level >= 4
                             else Materiality.HIGH
                         ),
-                        fact_ids=tuple(
-                            fid for f in assessment.findings for fid in f.fact_ids
-                        ),
+                        fact_ids=tuple(fid for f in assessment.findings for fid in f.fact_ids),
                         raised_by=self.agent_id,
                     )
                 )

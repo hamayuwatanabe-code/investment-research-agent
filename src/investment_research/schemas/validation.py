@@ -40,7 +40,10 @@ class EvaluationLeak(ValueError):
 # stock" is not.
 _EVAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("rating_scale", re.compile(r"\b(?:10|[0-9](?:\.[0-9])?)\s*/\s*10\b")),
-    ("action_label", re.compile(r"\b(?:strong[_ ]buy|buy the dip|must[- ]buy|table[- ]pounding)\b", re.I)),
+    (
+        "action_label",
+        re.compile(r"\b(?:strong[_ ]buy|buy the dip|must[- ]buy|table[- ]pounding)\b", re.I),
+    ),
     (
         "recommendation",
         re.compile(
@@ -49,8 +52,19 @@ _EVAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.I,
         ),
     ),
-    ("hype", re.compile(r"\b(?:explosive\s+candidate|multi-?bagger|moon\s?shot|to\s+the\s+moon|no-?brainer|slam\s+dunk)\b", re.I)),
-    ("ranking", re.compile(r"\b(?:top\s+pick|best\s+idea|highest\s+conviction|rank(?:ed)?\s*#\s*\d+)\b", re.I)),
+    (
+        "hype",
+        re.compile(
+            r"\b(?:explosive\s+candidate|multi-?bagger|moon\s?shot|to\s+the\s+moon|no-?brainer|slam\s+dunk)\b",
+            re.I,
+        ),
+    ),
+    (
+        "ranking",
+        re.compile(
+            r"\b(?:top\s+pick|best\s+idea|highest\s+conviction|rank(?:ed)?\s*#\s*\d+)\b", re.I
+        ),
+    ),
     ("jp_eval", re.compile(r"(?:買い推奨|強気|爆発候補|大化け|絶対に買|買うべき)")),
 )
 

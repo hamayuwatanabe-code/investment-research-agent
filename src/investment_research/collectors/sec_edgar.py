@@ -95,7 +95,9 @@ class SecEdgarCollector:
         submissions = self.http.get(url)
         if not submissions.ok:
             out.outcome = submissions.outcome
-            out.errors.append(f"submissions fetch failed: {submissions.outcome} {submissions.error}")
+            out.errors.append(
+                f"submissions fetch failed: {submissions.outcome} {submissions.error}"
+            )
             return out
         payload = submissions.json()
         if not isinstance(payload, dict):
@@ -149,9 +151,11 @@ class SecEdgarCollector:
                 provenance=Provenance.LIVE,
             )
             out.sources.append(source)
-            claim = f"{form} filed {filing_date}" + (
-                f" (items {item_codes})" if item_codes else ""
-            ) + (f"; period {report_date}" if report_date else "")
+            claim = (
+                f"{form} filed {filing_date}"
+                + (f" (items {item_codes})" if item_codes else "")
+                + (f"; period {report_date}" if report_date else "")
+            )
             facts.append(
                 RawFact(
                     ticker=ticker.upper(),
