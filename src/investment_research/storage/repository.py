@@ -376,6 +376,175 @@ class Repository:
         )
         self.conn.commit()
 
+    # -- phase 2: checkpoints, coverage, llm calls, escalations -----------
+    def save_checkpoint(self, checkpoint) -> None:
+        from ..orchestrator.resume import serialize_payload
+
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                checkpoint.run_id,
+                checkpoint.stage,
+                checkpoint.stage_index,
+                checkpoint.status,
+                serialize_payload(checkpoint.payload),
+                checkpoint.fact_count,
+                _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def checkpoints(self, run_id: str) -> list:
+        from ..orchestrator.resume import Checkpoint
+
+        rows = self.conn.execute(
+            "SELECT * FROM run_checkpoints WHERE run_id = ? ORDER BY stage_index", (run_id,)
+        ).fetchall()
+        out = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            out.append(
+                Checkpoint(
+                    run_id=row["run_id"],
+                    stage=row["stage"],
+                    stage_index=int(row["stage_index"]),
+                    status=row["status"],
+                    payload=payload if isinstance(payload, dict) else {},
+                    fact_count=int(row["fact_count"]),
+                )
+            )
+        return out
+
+    def facts_for_resume(self, run_id: str) -> list:
+        """Rehydrate the latest version of every fact recorded for a run."""
+        from ..schemas.enums import (
+            EvidenceClass,
+            FactCategory,
+            Materiality,
+            Provenance,
+            SourceTier,
+            VerifiedStatus,
+        )
+        from ..schemas.fact import Fact
+
+        rows = self.conn.execute(
+            """SELECT f.* FROM facts f
+               JOIN (SELECT fact_id, MAX(version) AS v FROM facts WHERE run_id = ?
+                     GROUP BY fact_id) m
+               ON f.fact_id = m.fact_id AND f.version = m.v""",
+            (run_id,),
+        ).fetchall()
+        facts = []
+        for row in rows:
+            facts.append(
+                Fact(
+                    fact_id=row["fact_id"],
+                    ticker=row["ticker"],
+                    category=FactCategory(row["category"]),
+                    claim=row["claim"],
+                    evidence_class=EvidenceClass(row["evidence_class"]),
+                    source_id=row["source_id"],
+                    source_url=row["source_url"],
+                    source_title=row["source_title"] or "",
+                    source_tier=SourceTier(row["source_tier"]),
+                    publication_date=row["publication_date"],
+                    event_date=row["event_date"],
+                    effective_date=row["effective_date"],
+                    filing_date=row["filing_date"],
+                    verified_status=VerifiedStatus(row["verified_status"]),
+                    confidence=float(row["confidence"]),
+                    company_claim=bool(row["company_claim"]),
+                    independent_confirmation=bool(row["independent_confirmation"]),
+                    materiality=Materiality(row["materiality"]),
+                    value=row["value"],
+                    unit=row["unit"],
+                    provenance=Provenance(row["provenance"]),
+                    stale=bool(row["stale"]),
+                    version=int(row["version"]),
+                    run_id=row["run_id"],
+                    notes=row["notes"] or "",
+                )
+            )
+        return facts
+
+    def save_research_coverage(self, run_id: str, ticker: str, coverage) -> int:
+        n = 0
+        for domain, entry in coverage.items():
+            self.conn.execute(
+                """INSERT OR REPLACE INTO research_coverage(run_id, ticker, domain, status,
+                       queries_attempted, queries_executed, documents_found, paths, detail,
+                       created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_id,
+                    ticker.upper(),
+                    str(domain),
+                    str(entry.status),
+                    entry.queries_attempted,
+                    entry.queries_executed,
+                    entry.documents_found,
+                    ",".join(str(p) for p in entry.paths),
+                    entry.detail,
+                    _now(),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def save_llm_calls(self, run_id: str, calls) -> int:
+        n = 0
+        for call in calls:
+            self.conn.execute(
+                """INSERT INTO llm_calls(run_id, agent_id, model, input_tokens, output_tokens,
+                       cache_read_tokens, duration_ms, ok, stop_reason, error, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_id,
+                    call.agent_id,
+                    call.model,
+                    call.input_tokens,
+                    call.output_tokens,
+                    call.cache_read_tokens,
+                    call.duration_ms,
+                    int(call.ok),
+                    call.stop_reason,
+                    call.error[:500],
+                    _now(),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def save_escalations(self, run_id: str, attempts) -> int:
+        n = 0
+        for attempt in attempts:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO escalations(run_id, fact_id, reason, searched,
+                       confirmed, confirming_url, queries, note, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_id,
+                    attempt.fact_id,
+                    attempt.reason,
+                    int(attempt.searched),
+                    int(attempt.confirmed),
+                    attempt.confirming_url,
+                    " | ".join(attempt.queries)[:1000],
+                    attempt.note,
+                    _now(),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
     def log_fetch(
         self,
         run_id: str,

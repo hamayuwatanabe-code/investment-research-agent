@@ -165,9 +165,14 @@ class Scenario:
 
 @dataclass
 class Verdict:
-    """Final output of the Blind Judge, de-anonymized afterwards."""
+    """Final output of the Blind Judge, de-anonymized afterwards.
 
-    action: Action
+    ``action`` is ``None`` when the Search Completeness Gate blocked the run.
+    That is deliberate: an action label asserts a judgement, and there is no
+    honest action to assert over research that never examined a required domain.
+    """
+
+    action: Action | None
     evidence_confidence: float
     headline: str
     reasoning: tuple[str, ...]
@@ -178,6 +183,9 @@ class Verdict:
     judged_blind: bool = True
     anonymized_label: str = "Company X"
     caveats: tuple[str, ...] = ()
+    #: Set by the Search Completeness Gate (requirement P6).
+    blocked: bool = False
+    blocked_reason: str = ""
 
 
 @dataclass

@@ -291,3 +291,67 @@ CREATE TABLE IF NOT EXISTS fetch_log (
     detail              TEXT DEFAULT '',
     created_at          TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- Resume support (requirement P8). A run records a checkpoint after each stage
+-- so an interrupted run restarts from the last successful stage rather than
+-- from the beginning.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS run_checkpoints (
+    run_id              TEXT NOT NULL,
+    stage               TEXT NOT NULL,
+    stage_index         INTEGER NOT NULL,
+    status              TEXT NOT NULL,
+    payload             TEXT DEFAULT '',
+    fact_count          INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (run_id, stage)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON run_checkpoints(run_id, stage_index);
+
+-- Per-run research coverage, so the completeness gate is auditable after the
+-- fact and a resumed run knows which domains it still owes.
+CREATE TABLE IF NOT EXISTS research_coverage (
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    domain              TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    queries_attempted   INTEGER NOT NULL DEFAULT 0,
+    queries_executed    INTEGER NOT NULL DEFAULT 0,
+    documents_found     INTEGER NOT NULL DEFAULT 0,
+    paths               TEXT DEFAULT '',
+    detail              TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (run_id, domain)
+);
+
+-- Every LLM call, for cost accounting and for proving which agents were
+-- model-backed in a given run.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    run_id              TEXT NOT NULL,
+    agent_id            TEXT NOT NULL,
+    model               TEXT NOT NULL,
+    input_tokens        INTEGER NOT NULL DEFAULT 0,
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens   INTEGER NOT NULL DEFAULT 0,
+    duration_ms         INTEGER NOT NULL DEFAULT 0,
+    ok                  INTEGER NOT NULL DEFAULT 1,
+    stop_reason         TEXT DEFAULT '',
+    error               TEXT DEFAULT '',
+    created_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_id);
+
+-- Primary-source escalation attempts (requirement P4).
+CREATE TABLE IF NOT EXISTS escalations (
+    run_id              TEXT NOT NULL,
+    fact_id             TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    searched            INTEGER NOT NULL DEFAULT 0,
+    confirmed           INTEGER NOT NULL DEFAULT 0,
+    confirming_url      TEXT DEFAULT '',
+    queries             TEXT DEFAULT '',
+    note                TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (run_id, fact_id)
+);

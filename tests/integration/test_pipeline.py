@@ -310,7 +310,13 @@ def test_run_with_no_evidence_is_incomplete_and_makes_no_claims(repo):
     assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
     assert result.bus.facts == []
     assert result.confidence_breakdown.score == 0.0
-    assert result.verdict.action in (Action.WAIT_FOR_EVENT, Action.AVOID)
+
+    # Phase 2 (requirement P6): with no evidence, no required research domain
+    # was examined, so the completeness gate withholds the action label
+    # entirely rather than emitting a cautious-sounding one.
+    assert result.blocked
+    assert result.verdict.action is None
+    assert result.verdict.blocked
 
     report = render_report(result)
     assert "INCOMPLETE_RESEARCH" in report

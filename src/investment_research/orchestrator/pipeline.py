@@ -38,17 +38,26 @@ from ..agents.regulatory import RegulatoryAgent
 from ..agents.science import ScienceAgent
 from ..agents.valuation import ValuationAgent
 from ..collectors.base import CollectionResult
+from ..collectors.documents import Chunk
+from ..llm.client import LLMBudget, LLMClient
 from ..collectors.search import SearchProvider
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
     FactCategory,
+    ResearchDomain,
     KillCategory,
     KillLevel,
     Provenance,
     RunStatus,
 )
 from ..schemas.evaluation import KillAssessment, KillGateResult, ScoreCard, Verdict
+from ..scoring.completeness import CompletenessResult, assess_completeness
+from ..research.adversarial import AdversarialOutcome
+from ..research.escalation import EscalationReport, escalate
+from ..research.provider import NullResearchProvider, ResearchProvider
+from ..reporting.traceability import TraceabilityIndex, build_index
+from .resume import Checkpoint, ResumePlan, STAGES, build_plan, stage_index
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
@@ -86,6 +95,21 @@ class ResearchResult:
     collection_results: list[CollectionResult] = field(default_factory=list)
     #: Populated only when the caller supplied portfolio information.
     portfolio_guidance: dict[str, Any] = field(default_factory=dict)
+    #: Phase 2 additions.
+    completeness: CompletenessResult | None = None
+    escalation: EscalationReport | None = None
+    adversarial: AdversarialOutcome | None = None
+    traceability: TraceabilityIndex | None = None
+    chunks: list[Chunk] = field(default_factory=list)
+    llm_budget: LLMBudget | None = None
+    llm_agents_used: list[str] = field(default_factory=list)
+    capture_info: dict[str, Any] = field(default_factory=dict)
+    resume_plan: ResumePlan | None = None
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the completeness gate withheld a verdict (requirement P6)."""
+        return bool(self.completeness and self.completeness.blocked)
 
     @property
     def incomplete(self) -> bool:
@@ -103,12 +127,61 @@ class Pipeline:
         today: date | None = None,
         strict_isolation: bool = True,
         stale_after_days: int = 400,
+        research: ResearchProvider | None = None,
+        llm: LLMClient | None = None,
+        adversarial: AdversarialOutcome | None = None,
+        chunks: Sequence[Chunk] = (),
+        capture_info: dict[str, Any] | None = None,
     ) -> None:
         self.repo = repository
         self.search = search
         self.today = today or date.today()
         self.strict_isolation = strict_isolation
         self.stale_after_days = stale_after_days
+        self.research = research or NullResearchProvider()
+        self.llm = llm
+        self.adversarial = adversarial
+        self.chunks = list(chunks)
+        self.capture_info = capture_info or {}
+
+    def _agent_for(self, stage: str, deterministic: Agent, llm_cls: Any, guard_bus) -> Agent:
+        """Return the LLM agent when one is usable, else the deterministic one.
+
+        The deterministic agent is always constructed and always available as the
+        fallback, so a missing key or a refused request degrades the run rather
+        than failing it -- and the report records which agents were model-backed.
+        """
+        if self.llm is None or llm_cls is None:
+            return deterministic
+        usable, _ = self.llm.available()
+        if not usable:
+            return deterministic
+        from ..agents.llm_base import PromptGuard
+        from .isolation import policy_for
+
+        policy = policy_for(deterministic.agent_id)
+        denied = {
+            name: tuple(evaluation.fingerprint_tokens)
+            for name, evaluation in guard_bus.channels.items()
+            if name not in policy.reads
+        }
+        forbidden: tuple[str, ...] = ()
+        if not policy.sees_identity:
+            from .anonymize import ANON_LABEL
+            from .isolation import identity_markers
+
+            forbidden = tuple(
+                marker
+                for marker in identity_markers(
+                    self._identity[0], self._identity[1], self._identity[2]
+                )
+                if marker.strip().lower() != ANON_LABEL.lower()
+            )
+        return llm_cls(
+            self.llm,
+            fallback=deterministic,
+            guard=PromptGuard(denied_fingerprints=denied, forbidden_identity=forbidden),
+        )
 
     # -- helpers -----------------------------------------------------------
     def _record(self, output: AgentOutput, run_id: str, started: str) -> AgentRunRecord:
@@ -287,11 +360,39 @@ class Pipeline:
                     detail="; ".join(collection.errors)[:400],
                 )
 
+        self._identity = (ctx.ticker, company_name, tuple(aliases))
+        result.capture_info = dict(self.capture_info)
+        result.adversarial = self.adversarial
+        result.chunks = list(self.chunks)
+        if self.llm is not None:
+            result.llm_budget = self.llm.budget
+
         params: dict[str, Any] = {
             "price": price,
             "aliases": tuple(aliases),
             "mode": mode,
+            # Chunks travel as a private param so each agent can build its own
+            # bounded evidence pack (requirement P9). They are already filtered
+            # to this run's documents; per-agent selection happens in the agent.
+            "_chunks": self.chunks,
         }
+        if self.adversarial is not None:
+            params["_bear_search_summary"] = "\n".join(
+                f"- [{d.doc_id}] {d.title} ({d.url})"
+                for d in self.adversarial.bear_documents()[:40]
+            )
+
+        def checkpoint(stage: str, payload: dict[str, Any] | None = None) -> None:
+            self.repo.save_checkpoint(
+                Checkpoint(
+                    run_id=ctx.run_id,
+                    stage=stage,
+                    stage_index=stage_index(stage),
+                    status="OK",
+                    payload=payload or {},
+                    fact_count=len(bus.facts),
+                )
+            )
 
         # ---- Stage 1: collect (no evaluation) ---------------------------
         collector_output = self._run_agent(
@@ -323,28 +424,95 @@ class Pipeline:
                 result.failures.append(f"fact persistence failed for {fact.fact_id}: {exc}")
                 ctx.status = RunStatus.INCOMPLETE_RESEARCH
 
+        checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
+        checkpoint("verify", {"verified": len(verified_facts)})
+
+        # ---- Stage 2b: primary-source escalation (requirement P4) --------
+        usable_research, research_reason = self.research.available()
+        if usable_research:
+            verified_facts, escalation = escalate(
+                verified_facts, self.research, company=company_name
+            )
+            bus.facts = verified_facts
+            result.escalation = escalation
+            self.repo.save_escalations(ctx.run_id, escalation.attempts)
+            for fact in verified_facts:
+                try:
+                    self.repo.save_fact(fact)
+                except Exception:  # noqa: BLE001 - already reported above
+                    pass
+            if escalation.unconfirmed:
+                result.failures.append(
+                    f"escalation: {len(escalation.unconfirmed)} material claim(s) could not be "
+                    "confirmed in a primary source"
+                )
+        else:
+            result.failures.append(f"escalation skipped: {research_reason}")
+        checkpoint("escalate", {"attempts": len(result.escalation.attempts) if result.escalation else 0})
+
         # ---- Stage 3: domain agents (facts only) ------------------------
-        for agent in (
-            RegulatoryAgent(),
-            CapitalStructureAgent(),
-            ScienceAgent(),
-            CompetitiveAgent(),
-            CatalystAgent(today=self.today),
-            MicrostructureAgent(),
+        from ..agents.llm_agents import (
+            LLMCompetitiveAgent,
+            LLMContradictionAgent,
+            LLMRegulatoryAgent,
+            LLMScienceAgent,
+        )
+        from ..agents.llm_agents2 import (
+            LLMBearAgent,
+            LLMBlindJudgeAgent,
+            LLMBullAgent,
+            LLMKillAgent,
+        )
+
+        for deterministic, llm_cls in (
+            (RegulatoryAgent(), LLMRegulatoryAgent),
+            (CapitalStructureAgent(), None),  # arithmetic stays deterministic
+            (ScienceAgent(), LLMScienceAgent),
+            (CompetitiveAgent(), LLMCompetitiveAgent),
+            (CatalystAgent(today=self.today), None),  # date normalisation is rule-based
+            (MicrostructureAgent(), None),  # positioning data is not interpretive
         ):
-            self._run_agent(agent, guard, result, params=params, user_preferences=user_preferences)
+            agent = self._agent_for(deterministic.agent_id, deterministic, llm_cls, bus)
+            output = self._run_agent(
+                agent, guard, result, params=params, user_preferences=user_preferences
+            )
+            if output.metrics.get("llm_backed"):
+                result.llm_agents_used.append(deterministic.agent_id)
+        checkpoint("domain")
 
         # ---- Stage 4: contradictions ------------------------------------
-        self._run_agent(
-            ContradictionAgent(), guard, result, params=params, user_preferences=user_preferences
+        contradiction_output = self._run_agent(
+            self._agent_for("contradiction", ContradictionAgent(), LLMContradictionAgent, bus),
+            guard,
+            result,
+            params=params,
+            user_preferences=user_preferences,
         )
+        if contradiction_output.metrics.get("llm_backed"):
+            result.llm_agents_used.append("contradiction")
         self.repo.save_contradictions(bus.contradictions)
+        checkpoint("contradiction")
 
         # ---- Stage 5: KILL BEFORE BULL (requirement 27) ------------------
+        # The LLM kill agent proposes findings; the deterministic gate below
+        # computes the binding assessment from the same evidence. A model can
+        # surface a lethal fact, but it cannot argue a kill level down.
+        llm_kill = self._agent_for("kill_agent", KillAgent(self.search), LLMKillAgent, bus)
         kill_output = self._run_agent(
-            KillAgent(self.search), guard, result, params=params, user_preferences=user_preferences
+            llm_kill, guard, result, params=params, user_preferences=user_preferences
         )
-        gate = _gate_from_output(kill_output)
+        if kill_output.metrics.get("llm_backed"):
+            result.llm_agents_used.append("kill_agent")
+            deterministic_kill = self._run_agent(
+                KillAgent(self.search),
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+            )
+            gate = _gate_from_output(deterministic_kill)
+        else:
+            gate = _gate_from_output(kill_output)
         self.repo.save_kill_gate(ctx.run_id, ctx.ticker, gate)
 
         # ---- Stage 6: bear and bull, mutually blind ----------------------
@@ -354,13 +522,20 @@ class Pipeline:
         # a case for it would only invite the reader to weigh one against the
         # other, which is exactly the trade this system refuses to make.
         if mode != "catalyst":
-            self._run_agent(
-                BearAgent(), guard, result, params=params, user_preferences=user_preferences
+            bear = self._agent_for("bear_agent", BearAgent(), LLMBearAgent, bus)
+            bear_output = self._run_agent(
+                bear, guard, result, params=params, user_preferences=user_preferences
             )
+            if bear_output.metrics.get("llm_backed"):
+                result.llm_agents_used.append("bear_agent")
         if mode not in ("kill-test", "catalyst"):
-            self._run_agent(
-                BullAgent(), guard, result, params=params, user_preferences=user_preferences
+            bull = self._agent_for("bull_agent", BullAgent(), LLMBullAgent, bus)
+            bull_output = self._run_agent(
+                bull, guard, result, params=params, user_preferences=user_preferences
             )
+            if bull_output.metrics.get("llm_backed"):
+                result.llm_agents_used.append("bull_agent")
+        checkpoint("bear_bull")
 
         # ---- Stage 7: valuation ------------------------------------------
         self._run_agent(
@@ -466,6 +641,59 @@ class Pipeline:
         # ---- Persist the structured domain tables ------------------------
         self._persist_domain_tables(ctx, bus, regulatory_payload, verified_facts)
 
+        # ---- Stage 8b: search completeness gate (requirement P6) ---------
+        # Assessed BEFORE the judgement, because whether a verdict may be issued
+        # at all is a precondition of judging, not a caveat on the result.
+        domain_fact_counts: dict[ResearchDomain, int] = {
+            ResearchDomain.REGULATORY: len(
+                [f for f in verified_facts if f.category is FactCategory.REGULATORY]
+            ),
+            ResearchDomain.CAPITAL_STRUCTURE: len(
+                [
+                    f
+                    for f in verified_facts
+                    if f.category
+                    in (
+                        FactCategory.CAPITAL_STRUCTURE,
+                        FactCategory.FINANCIAL,
+                        FactCategory.LIQUIDITY,
+                    )
+                ]
+            ),
+            ResearchDomain.SCIENCE_TECHNOLOGY: len(
+                [
+                    f
+                    for f in verified_facts
+                    if f.category in (FactCategory.CLINICAL, FactCategory.SCIENCE,
+                                      FactCategory.TECHNOLOGY)
+                ]
+            ),
+            ResearchDomain.COMPETITION: len(
+                [
+                    f
+                    for f in verified_facts
+                    if f.category in (FactCategory.COMPETITION, FactCategory.MARKET_SIZE)
+                ]
+            ),
+            ResearchDomain.CATALYST: len(catalysts),
+            ResearchDomain.CONTRADICTION: len(bus.contradictions),
+        }
+        search_results = []
+        if self.adversarial is not None:
+            search_results = [*self.adversarial.bear_results, *self.adversarial.bull_results]
+        agents_run = {record.agent_id for record in result.agent_records if record.status != "FAILED"}
+        completeness = assess_completeness(
+            search_results=search_results,
+            facts_by_domain=domain_fact_counts,
+            agents_run=agents_run,
+        )
+        result.completeness = completeness
+        self.repo.save_research_coverage(ctx.run_id, ctx.ticker, completeness.coverage)
+        if completeness.blocked:
+            ctx.status = RunStatus.INCOMPLETE_RESEARCH
+            result.failures.append(f"search completeness gate: {completeness.reason()}")
+        checkpoint("score", {"blocked": completeness.blocked})
+
         # ---- Stage 9: blind judgement ------------------------------------
         judge_params = {
             **params,
@@ -477,15 +705,30 @@ class Pipeline:
             ),
         }
         judge_output = self._run_agent(
-            BlindJudgeAgent(),
+            self._agent_for("blind_judge", BlindJudgeAgent(), LLMBlindJudgeAgent, bus),
             guard,
             result,
             params=judge_params,
             user_preferences=user_preferences,
         )
+        if judge_output.metrics.get("llm_backed"):
+            result.llm_agents_used.append("blind_judge")
         verdict = judge_output.metrics.get("_verdict_object")
         result.verdict = verdict
         result.source_ref_map = guard.source_ref_maps.get("blind_judge")
+
+        # Requirement P6: an incomplete search withholds the action label
+        # entirely. Not AVOID, not WAIT_FOR_EVENT -- no label, because an action
+        # asserts a judgement and there is not enough research to support one.
+        if verdict is not None and completeness.blocked:
+            verdict.blocked = True
+            verdict.blocked_reason = completeness.reason()
+            verdict.action = None
+            verdict.caveats = (
+                *verdict.caveats,
+                "FINAL VERDICT: BLOCKED -- " + completeness.reason(),
+            )
+        checkpoint("judge")
 
         if result.failures and ctx.status == RunStatus.COMPLETE:
             ctx.status = RunStatus.INCOMPLETE_RESEARCH
@@ -559,6 +802,13 @@ class Pipeline:
             ]
             self.repo.save_catalysts(ctx.run_id, ctx.ticker, events)
 
+        # ---- Traceability index (requirement P7) --------------------------
+        result.traceability = build_index(verified_facts, bus.sources, self.chunks)
+
+        if self.llm is not None and self.llm.budget.calls:
+            self.repo.save_llm_calls(ctx.run_id, self.llm.budget.calls)
+
+        checkpoint("report")
         self.repo.finish_run(ctx)
         return result
 
