@@ -114,6 +114,14 @@ most, since a rule that fires on benign text destroys the gate's usefulness.
 - Widening an isolation policy to fix a leakage error. The error is usually
   correct; fix the leak.
 
+## Not implemented (do not report these as working)
+
+- Resume of an interrupted run. Re-run from the start; deduplication makes it cheap.
+- Any agent actually calling an LLM. The provider interface exists; nothing uses it.
+- Live-universe screening. `--screen` covers the fixture set only.
+- Dedicated TDnet / EDINET collectors for Japanese equities.
+- Form 4 XML parsing (insider name, role and price stay UNKNOWN).
+
 ## Data provenance
 
 Fixture data is **synthetic**. `DEMOBIO` is not a real issuer. Fixture sources

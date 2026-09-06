@@ -11,7 +11,9 @@ never reported as a successful analysis.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import time
 import uuid
 from collections.abc import Sequence
@@ -40,6 +42,7 @@ from ..collectors.search import SearchProvider
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
+    FactCategory,
     KillCategory,
     KillLevel,
     Provenance,
@@ -120,6 +123,31 @@ class Pipeline:
             error_count=len(output.errors),
             errors=" | ".join(output.errors)[:2000],
         )
+
+    def _persist_domain_tables(
+        self,
+        ctx: RunContext,
+        bus: EvidenceBus,
+        regulatory_payload: dict[str, Any],
+        facts: Sequence[Any],
+    ) -> None:
+        """Write the structured per-domain tables (requirement 11).
+
+        These are derived from facts that are already stored, but keeping them
+        in queryable form is what makes "has this trial's design changed since
+        last quarter?" answerable without re-parsing prose.
+        """
+        events = regulatory_payload.get("regulatory_events") or []
+        if events:
+            self.repo.save_regulatory_events(ctx.run_id, ctx.ticker, events)
+
+        trials = _clinical_trials_from_facts(facts)
+        if trials:
+            self.repo.save_clinical_trials(ctx.run_id, ctx.ticker, trials)
+
+        trades = _insider_trades_from_facts(facts)
+        if trades:
+            self.repo.save_insider_trades(ctx.run_id, ctx.ticker, trades)
 
     @staticmethod
     def _shared_baseline(bus: EvidenceBus, output: AgentOutput) -> list[str]:
@@ -435,6 +463,9 @@ class Pipeline:
                 },
             )
 
+        # ---- Persist the structured domain tables ------------------------
+        self._persist_domain_tables(ctx, bus, regulatory_payload, verified_facts)
+
         # ---- Stage 9: blind judgement ------------------------------------
         judge_params = {
             **params,
@@ -532,6 +563,9 @@ class Pipeline:
         return result
 
 
+_NCT_RE = re.compile(r"\b(NCT[-A-Z0-9]{4,})\b")
+
+
 def _gate_from_output(output: AgentOutput) -> KillGateResult:
     payload = output.evaluation.payload if output.evaluation else {}
     assessments = tuple(
@@ -545,3 +579,101 @@ def _gate_from_output(output: AgentOutput) -> KillGateResult:
     )
     unsearched = tuple(KillCategory(c) for c in payload.get("unsearched_categories", []))
     return KillGateResult(assessments=assessments, unsearched_categories=unsearched)
+
+
+def _clinical_trials_from_facts(facts: Sequence[Any]) -> list[dict[str, Any]]:
+    """Group clinical facts by registry id into one row per trial.
+
+    Fields with no evidence stay UNKNOWN rather than being inferred from the
+    other fields of the same trial.
+    """
+    by_nct: dict[str, dict[str, Any]] = {}
+    for fact in facts:
+        if fact.category is not FactCategory.CLINICAL:
+            continue
+        match = _NCT_RE.search(fact.claim)
+        if not match:
+            continue
+        nct = match.group(1)
+        row = by_nct.setdefault(
+            nct,
+            {
+                "nct_id": nct,
+                "title": UNKNOWN,
+                "phase": UNKNOWN,
+                "status": UNKNOWN,
+                "enrollment": None,
+                "randomized": UNKNOWN,
+                "blinding": UNKNOWN,
+                "control_arm": UNKNOWN,
+                "primary_endpoint": UNKNOWN,
+                "secondary_endpoints": "",
+                "primary_completion": UNKNOWN,
+                "sponsor": UNKNOWN,
+                "fact_ids": [],
+            },
+        )
+        row["fact_ids"].append(fact.fact_id)
+        claim = fact.claim.lower()
+        value = fact.value if fact.value != UNKNOWN else None
+
+        if "phase is" in claim or "is a phase" in claim:
+            phase = re.search(r"phase\s+(?:is\s+)?(?:phase\s*)?([0-4](?:/[0-4])?[ab]?)", claim)
+            if phase:
+                row["phase"] = phase.group(1)
+        if "overall status is" in claim and value:
+            row["status"] = str(value)
+        if "enrollment is" in claim:
+            number = re.search(r"enrollment is (\d+)", claim)
+            if number:
+                row["enrollment"] = int(number.group(1))
+        if "allocation is" in claim:
+            allocation = re.search(r"allocation is ([a-z\-]+)", claim)
+            masking = re.search(r"masking is ([a-z]+)", claim)
+            if allocation:
+                row["randomized"] = allocation.group(1).upper()
+            if masking:
+                row["blinding"] = masking.group(1).upper()
+        if "primary outcome measure is" in claim or "primary endpoint" in claim:
+            row["primary_endpoint"] = fact.claim.split(":", 1)[-1].strip()[:500]
+        if "primary completion date is" in claim and value:
+            row["primary_completion"] = str(value)
+
+    for row in by_nct.values():
+        row["fact_ids"] = ",".join(row["fact_ids"])
+    return list(by_nct.values())
+
+
+def _insider_trades_from_facts(facts: Sequence[Any]) -> list[dict[str, Any]]:
+    """One row per insider-transaction fact.
+
+    Deliberately shallow: without Form 4 XML the individual, the role and the
+    transaction code are usually not in the text, and they stay UNKNOWN rather
+    than being guessed from context.
+    """
+    trades: list[dict[str, Any]] = []
+    for fact in facts:
+        if fact.category is not FactCategory.INSIDER:
+            continue
+        shares = None
+        match = re.search(r"([\d,]{4,})\s+shares", fact.claim)
+        if match:
+            shares = float(match.group(1).replace(",", ""))
+        trades.append(
+            {
+                "trade_id": "trade_" + hashlib.sha256(fact.fact_id.encode()).hexdigest()[:16],
+                "insider": UNKNOWN,
+                "role": "officer" if "officer" in fact.claim.lower() else UNKNOWN,
+                "transaction_date": fact.event_date,
+                "transaction_code": (
+                    "S"
+                    if "sale" in fact.claim.lower() or "sold" in fact.claim.lower()
+                    else ("P" if "purchase" in fact.claim.lower() else UNKNOWN)
+                ),
+                "shares": shares,
+                "price": None,
+                "is_10b5_1": ("true" if "10b5-1" in fact.claim.lower() else UNKNOWN),
+                "source_url": fact.source_url,
+            }
+        )
+    return trades

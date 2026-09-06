@@ -323,6 +323,18 @@ Stated plainly rather than left to be discovered:
   ranges on purpose; narrower ones would imply precision the evidence lacks.
 - `--screen` requires a candidate universe and currently screens only the fixture
   set; no live universe source is configured.
+- **There is no resume.** A run has a `run_id`, structured JSONL logs and
+  per-agent records in `agent_runs`, and a failing agent degrades the run rather
+  than aborting it — but an interrupted run is re-run from the start rather than
+  continued. Facts are deduplicated by content hash, so re-running is cheap and
+  safe.
+- **Insider detail is shallow.** Without Form 4 XML parsing, the individual, the
+  role and the price are usually not in the filing text; they are stored as
+  `UNKNOWN` rather than inferred.
+- **The LLM provider is wired as an optional interface but no agent currently
+  calls it.** Every agent in this build is deterministic. This is deliberate
+  (ADR 0003) and is stated here so the interface is not mistaken for an active
+  integration.
 
 ## Licence
 

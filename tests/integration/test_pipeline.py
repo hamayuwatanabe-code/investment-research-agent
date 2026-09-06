@@ -115,6 +115,62 @@ def test_fetch_attempts_are_logged(run_result, repo):
     assert repo.conn.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"] == 1
 
 
+def test_structured_domain_tables_are_populated_not_merely_declared(run_result, repo):
+    """A declared-but-never-written table is dead schema, not persistence."""
+    trials = repo.conn.execute("SELECT * FROM clinical_trials").fetchall()
+    assert len(trials) == 1
+    trial = trials[0]
+    assert trial["nct_id"] == "NCT-FIXTURE-0001"
+    assert trial["enrollment"] == 84
+    assert trial["randomized"] == "RANDOMIZED"
+    assert trial["blinding"] == "DOUBLE"
+    assert trial["phase"] == "2b"
+    assert "biomarker" in trial["primary_endpoint"]
+
+    events = repo.conn.execute("SELECT * FROM regulatory_events").fetchall()
+    assert events
+    adverse = [e for e in events if e["event_type"] == "endpoint_not_acceptable"]
+    assert adverse, "the decisive regulatory event must be queryable, not only narrated"
+    assert adverse[0]["regulator"] == "FDA"
+    assert adverse[0]["not_agreed"] != "UNKNOWN"
+    assert adverse[0]["event_date"] == "2026-05-19"
+
+    trades = repo.conn.execute("SELECT * FROM insider_trades").fetchall()
+    assert len(trades) == 1
+    assert trades[0]["shares"] == 310_000
+    assert trades[0]["transaction_code"] == "S"
+    assert trades[0]["is_10b5_1"] == "true"
+
+
+def test_unavailable_insider_details_stay_unknown(run_result, repo):
+    """Without Form 4 XML the individual is not in the text; do not guess one."""
+    trade = repo.conn.execute("SELECT * FROM insider_trades").fetchone()
+    assert trade["insider"] == "UNKNOWN"
+    assert trade["price"] is None
+
+
+def test_blocked_collector_still_records_its_attempts(repo):
+    """The fetch log is how a blocked run proves what it tried."""
+    from investment_research.collectors.base import CollectionResult
+    from investment_research.schemas.enums import FetchOutcome
+
+    blocked = CollectionResult(
+        collector="sec_edgar",
+        outcome=FetchOutcome.BLOCKED,
+        errors=["egress policy denied the request"],
+        attempted_urls=["https://data.sec.gov/submissions/CIK0000000001.json"],
+    )
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    result = pipeline.run("BLOCKED", "Blocked Corp", [blocked], price=1.0)
+
+    rows = repo.conn.execute(
+        "SELECT * FROM fetch_log WHERE run_id = ?", (result.context.run_id,)
+    ).fetchall()
+    assert rows
+    assert rows[0]["outcome"] == str(FetchOutcome.BLOCKED)
+    assert "data.sec.gov" in rows[0]["url"]
+
+
 # --- isolation held throughout ---------------------------------------------
 def test_no_isolation_violation_occurred(run_result):
     """The guard raises on breach, so a completed run is itself the assertion."""
