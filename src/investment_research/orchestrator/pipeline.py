@@ -71,6 +71,7 @@ from .isolation import (
     derive_fingerprints,
 )
 from .resume import Checkpoint, ResumePlan, stage_index
+from .resume import build_plan as build_resume_plan
 
 log = logging.getLogger(__name__)
 
@@ -333,6 +334,7 @@ class Pipeline:
         user_preferences: dict[str, Any] | None = None,
         offline: bool = True,
         run_id: str | None = None,
+        resume: bool = False,
     ) -> ResearchResult:
         ctx = RunContext(
             run_id=run_id or new_run_id(),
@@ -352,6 +354,16 @@ class Pipeline:
             scorecard=None,
             collection_results=list(collection_results),
         )
+
+        # ---- Resume (requirement P8) --------------------------------------
+        resume_plan = None
+        if resume:
+            checkpoints = self.repo.checkpoints(ctx.run_id)
+            restored = self.repo.facts_for_resume(ctx.run_id)
+            resume_plan = build_resume_plan(ctx.run_id, checkpoints, restored, today=self.today)
+            result.resume_plan = resume_plan
+            ctx.notes.append(f"resume: {resume_plan.reason}")
+            log.info("resume plan for %s: %s", ctx.run_id, resume_plan.reason)
 
         self.repo.upsert_company(ctx.ticker, company_name, aliases=list(aliases))
         self.repo.start_run(ctx)
@@ -397,25 +409,43 @@ class Pipeline:
             )
 
         # ---- Stage 1: collect (no evaluation) ---------------------------
-        collector_output = self._run_agent(
-            FactCollectorAgent(collection_results),
-            guard,
-            result,
-            params=params,
-            user_preferences=user_preferences,
-        )
+        if resume_plan is not None and not resume_plan.should_run("collect"):
+            # Collection is the expensive stage; a resumed run reuses the facts
+            # it already obtained, and they keep their original run_id and
+            # provenance so the report still shows when each was collected.
+            log.info(
+                "resume: skipping collection, reusing %d fact(s)",
+                len(resume_plan.restored_facts),
+            )
+            bus.add_facts(resume_plan.restored_facts)
+            verified_facts = list(resume_plan.restored_facts)
+            ctx.notes.append(f"resumed with {len(verified_facts)} previously-collected fact(s)")
+            result.failures.append(
+                "RESUMED RUN: collection and verification were not re-executed; "
+                f"{len(verified_facts)} fact(s) were restored from run {ctx.run_id}"
+            )
+            collector_output = None
+        else:
+            collector_output = self._run_agent(
+                FactCollectorAgent(collection_results),
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+            )
         raw_facts = list(collector_output.facts)
 
         # ---- Stage 2: verify --------------------------------------------
-        integrity = self._run_agent(
-            EvidenceIntegrityAgent(today=self.today, stale_after_days=self.stale_after_days),
-            guard,
-            result,
-            params=params,
-            user_preferences=user_preferences,
-            facts=raw_facts,
-        )
-        verified_facts = list(integrity.facts) or raw_facts
+        if collector_output is not None:
+            integrity = self._run_agent(
+                EvidenceIntegrityAgent(today=self.today, stale_after_days=self.stale_after_days),
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+                facts=raw_facts,
+            )
+            verified_facts = list(integrity.facts) or raw_facts
         # The verified set replaces the raw set on the bus.
         bus.facts = verified_facts
         self.repo.save_sources(bus.sources)

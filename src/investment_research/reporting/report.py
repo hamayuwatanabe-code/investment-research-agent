@@ -885,5 +885,3 @@ def _section_cost(self: ReportRenderer) -> str:
             )
         )
     return "\n".join(out)
-
-

@@ -278,6 +278,7 @@ def run_one(
         user_preferences=load_portfolio(args.portfolio),
         offline=not args.live,
         run_id=args.resume or None,
+        resume=bool(args.resume),
     )
 
 
