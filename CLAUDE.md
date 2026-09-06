@@ -114,13 +114,55 @@ most, since a rule that fires on benign text destroys the gate's usefulness.
 - Widening an isolation policy to fix a leakage error. The error is usually
   correct; fix the leak.
 
+## Phase 2: live research and LLM agents
+
+Eight agents — Regulatory, Science, Kill, Bear, Bull, Competitive,
+Contradiction, Blind Judge — have LLM implementations in `agents/llm_agents*.py`.
+They **propose**; the deterministic core still **disposes**. A model cannot lower
+a kill level, raise a capped score, or choose the final action label.
+
+What must stay rule-based, always: share counts, fully diluted maths, cash
+runway, market cap, valuation arithmetic, Kill Gate enforcement, source tiering,
+evidence routing, isolation.
+
+Isolation now holds at **two** levels. Projection guards the `AgentInput`;
+`PromptGuard` scans the *rendered prompt* before transmission. The guard and the
+evidence chunks are held out of band — putting either into `AgentInput` would
+place un-anonymised prose in the Blind Judge's own input.
+
+### Data provenance has three states, not two
+
+| Provenance | Meaning |
+|---|---|
+| `LIVE` | fetched at run time |
+| `CAPTURED` | real documents about a real issuer, captured at a stated time, replayed |
+| `FIXTURE` | synthetic; never real research |
+
+And `ContentKind` records how much of a document is actually in hand.
+`SEARCH_SUMMARY` is a search engine's summary *about* a document, not the
+document: confidence-capped, and its material claims go to primary-source
+escalation. Never treat the two as equivalent.
+
+### Gates added in Phase 2
+
+- **Search Completeness Gate** — six domains must be searched or the run emits
+  `FINAL VERDICT: BLOCKED` and **no action label at all**.
+- **Primary-source escalation** — a material claim on weak sourcing becomes
+  `UNVERIFIED_MATERIAL_CLAIM` when it cannot be confirmed. A company press
+  release is *not* confirmation of what a regulator said.
+- **Citation traceability** — an attributed sentence ("the FDA said") with no
+  resolvable citation is a report violation.
+
 ## Not implemented (do not report these as working)
 
-- Resume of an interrupted run. Re-run from the start; deduplication makes it cheap.
-- Any agent actually calling an LLM. The provider interface exists; nothing uses it.
+- Any *executed* live LLM or live web run in this repository's CI environment.
+  The code paths exist and are tested against a mock Anthropic API; they have
+  never been run against the real one from here, because no credential is
+  available to the program and the egress policy blocks the research hosts.
 - Live-universe screening. `--screen` covers the fixture set only.
 - Dedicated TDnet / EDINET collectors for Japanese equities.
 - Form 4 XML parsing (insider name, role and price stay UNKNOWN).
+- Corpus capture is a manual step, not an automated collector.
 
 ## Data provenance
 

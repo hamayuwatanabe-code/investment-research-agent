@@ -1,6 +1,48 @@
 # Example outputs
 
-Two real runs of this system, committed verbatim.
+Runs of this system, committed verbatim.
+
+## `LGVN-captured-corpus-run.txt` — the real 2026 case
+
+`python main.py LGVN --corpus --adversarial`
+
+Longeveron, on real documents captured 2026-09-06. This is the live instance of
+the failure the whole system was built after, and the system catches it:
+
+```
+REGULATOR POSITION ON PRIMARY ENDPOINT: REJECTED
+[K5] REGULATORY_KILL: Regulator states the primary endpoint is not sufficient
+     to demonstrate efficacy
+[K5] REGULATORY_KILL: Regulator no longer treats the trial as pivotal
+[K4] CAPITAL_KILL   : Going concern doubt
+ACTION: AVOID       EVIDENCE CONFIDENCE: 0.0 / 10
+```
+
+The company's own press release is headlined **"Constructive Type C Meeting"**.
+The report records that adjective under *Company characterizations (NOT
+regulator statements)* and puts the regulator's actual position — that RVEF
+"is not sufficient to demonstrate efficacy", and that the FDA "no longer refers
+to the ELPIS II trial as pivotal" — in the refused list.
+
+Five FDA designations (Orphan Drug, Fast Track, Rare Pediatric Disease, RMAT,
+Priority Review) appear under "what the regulator has agreed", every one
+labelled *procedural designation only — says nothing about whether the efficacy
+evidence or endpoint will be accepted*. That is the exact conflation that
+produced the original loss.
+
+Note what the report does **not** claim: evidence confidence is 0.0/10, seven
+material claims are marked `UNVERIFIED_MATERIAL_CLAIM` because the captured
+documents are search summaries that could not be escalated to a filing, and the
+run is `INCOMPLETE_RESEARCH`. The verdict is AVOID and the system is explicit
+that it reached it on thin, unconfirmed sourcing.
+
+## `CNTB-captured-corpus-run.txt` and `CRBP-captured-corpus-run.txt`
+
+The same pipeline on two other real issuers, both returning
+`WAIT_FOR_EVENT` at K2 rather than AVOID — the discrimination that shows the
+LGVN result comes from LGVN's evidence and not from blanket pessimism. CRBP in
+particular reports share count and cash as `UNKNOWN` rather than guessing,
+because sec.gov was unreachable at capture time.
 
 ## `DEMOBIO-fixture-run.txt`
 

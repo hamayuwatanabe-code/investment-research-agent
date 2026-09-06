@@ -433,7 +433,7 @@ class Pipeline:
                 params=params,
                 user_preferences=user_preferences,
             )
-        raw_facts = list(collector_output.facts)
+        raw_facts = list(collector_output.facts) if collector_output else []
 
         # ---- Stage 2: verify --------------------------------------------
         if collector_output is not None:

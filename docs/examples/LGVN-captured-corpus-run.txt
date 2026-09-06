@@ -1,0 +1,843 @@
+==============================================================================
+INVESTMENT RESEARCH REPORT -- LGVN
+Company: Longeveron Inc.
+Run ID: 20260906T114656-bb4c70   Mode: standard
+Generated (UTC): 2026-09-06T11:46:56+00:00
+==============================================================================
+
+******************************************************************************
+*** INCOMPLETE_RESEARCH ***
+One or more agents or collectors did not complete. This analysis is partial
+and must not be treated as a finished assessment.
+  - escalation: 7 material claim(s) could not be confirmed in a primary source
+  - capital_structure: DEGRADED :: basic share count not found; market cap cannot be computed
+  - competitive: DEGRADED :: only 0 competitor(s) identified; requirement is at least 3 for a usable comparison
+  - microstructure: DEGRADED :: 16/17 microstructure fields have no data
+  - kill_agent: DEGRADED :: 7 mandatory kill queries were not executed (no search provider configured)
+  - valuation: DEGRADED :: fully diluted market cap unavailable; valuation is incomplete
+******************************************************************************
+
+------------------------------------------------------------------------------
+1. Verdict
+------------------------------------------------------------------------------
+Action: AVOID
+Judged blind (identity withheld from the judge): True
+Worst kill level: K5
+Headline: Evidence confidence 0.0/10; worst kill level K5; regulator endpoint position REJECTED; action AVOID.
+CAVEAT: INCOMPLETE RESEARCH: one or more agents or collectors failed. This is not a completed analysis.
+CAVEAT: Evidence confidence is low; the scores describe a possibility, not an established situation.
+CAVEAT: Some kill categories were never searched; their K0 means 'not examined'.
+
+Reasoning:
+  - Evidence confidence is 0.0/10, evaluated before any action label.
+  - A K5 disqualifier is present (REGULATORY_KILL K5). No upside estimate overrides a disqualifying fact.
+  - No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+2. Evidence Confidence
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10
+
+This is reported before the scores and before the action, and it is a separate question from whether the upside is large.
+
+  facts in evidence set        : 31
+  Tier 1/2 primary sources     : 52%
+  decision-grade evidence      : 0%
+  independently corroborated   : 0%
+  company claims (uncorrob.)   : 74%
+  stale by event date          : 10%
+  blocking unknowns            : 2
+  kill categories not searched : 4
+
+Penalties applied:
+  - 74% of facts are company statements without independent confirmation
+  - 2 blocking unresolved question(s)
+  - 4 kill category/categories were never searched
+
+------------------------------------------------------------------------------
+3. Critical Red Flags
+------------------------------------------------------------------------------
+  [!] REGULATORY_KILL = K5: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [primary source]
+  [!] CAPITAL_KILL = K4: Going concern doubt [primary source]
+  [!] Kill categories never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL -- reported as unexamined, not clean
+
+Critical risk flags raised by domain agents:
+  [!] Regulator states the primary endpoint is not sufficient to demonstrate efficacy
+      Regulator position extracted from 'Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)' (TIER_2): The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fraction (RVEF), is not sufficient to demonstrate efficacy.
+      facts: fact_82e6892b0772c429c704
+  [!] Regulator no longer treats the trial as pivotal or registrational
+      Regulator position extracted from 'Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)' (TIER_2): Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically discussed in the company's Type C meeting in 2024.
+      facts: fact_eca1d75a209a39ddb230
+  [!] Regulator names different endpoints as the only likely acceptable ones
+      Regulator position extracted from 'Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)' (TIER_2): The FDA recommended that only the most objective measures, such as all-cause mortality, cardiac transplant-free survival, cardiac transplantation, and major adverse cardiac events (MACE), are likely to be acceptable for demonstrating efficacy.
+      facts: fact_5bc74e35184734113864
+  [!] Regulator no longer treats the trial as pivotal or registrational
+      Regulator position extracted from 'Longeveron: FDA no longer calls ELPIS II pivotal' (UNKNOWN): Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal.
+      facts: fact_f83e6fab83dd606dee03
+  [!] Regulator states the primary endpoint is not sufficient to demonstrate efficacy
+      Regulator position extracted from 'Longeveron: FDA no longer calls ELPIS II pivotal' (UNKNOWN): The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy.
+      facts: fact_1b9e938dfa8206cd22c1
+  [!] Regulator states the primary endpoint is not sufficient to demonstrate efficacy
+      Regulator position extracted from "FDA tells Longeveron its HLHS trial's endpoint can't prove efficacy, mid-study" (UNKNOWN): Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot prove efficacy.
+      facts: fact_ed741b111789240cf2e2
+  [!] Going concern doubt disclosed
+      The filing discloses substantial doubt about the ability to continue as a going concern.
+  [!] CAPITAL_KILL = K4
+      Going concern doubt [primary source]
+      facts: fact_f60182b2c65d4d1b780b, fact_51ba3830b6d7926abce3
+  [!] REGULATORY_KILL = K5
+      Regulator states the primary endpoint is not sufficient to demonstrate efficacy [primary source]
+      facts: fact_82e6892b0772c429c704, fact_eca1d75a209a39ddb230, fact_f83e6fab83dd606dee03, fact_1b9e938dfa8206cd22c1, fact_ed741b111789240cf2e2, fact_5bc74e35184734113864
+
+------------------------------------------------------------------------------
+4. What Would Kill The Thesis
+------------------------------------------------------------------------------
+Stated before the bull case on purpose: these are the findings that would invalidate an investment thesis here.
+
+  - Already broken: the regulator does not accept the primary endpoint as adequate to establish effectiveness. No trial result fixes this.
+  - Bear mechanism: The regulator has already rejected the efficacy endpoint
+  - Bear mechanism: Going concern doubt forces financing on the buyer's terms
+  - Bear mechanism: Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+  - Bear mechanism: Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+Kill Agent findings:
+  [K5] REGULATORY_KILL: Regulator states the primary endpoint is not sufficient to demonstrate efficacy (PRIMARY)
+        The trial as designed cannot support approval on its primary endpoint. Every valuation of the programme assumes a registrational path the regulator has said does not exist. Evidence: The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fraction (RVEF), is not sufficient to demonstrate efficacy.
+  [K5] REGULATORY_KILL: Regulator no longer treats the trial as pivotal or registrational (PRIMARY)
+        A trial that was registrational and no longer is has lost the status the equity value rested on, without any trial result having changed. This is the regulator withdrawing the premise rather than the company failing a test. Evidence: Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically discussed in the 
+  [K4] CAPITAL_KILL: Going concern doubt (PRIMARY)
+        The auditor or management states the company may not be able to continue operating. Financing is not optional and will not be on the holder's terms. Evidence: Management's forecast shows insufficient cash to cover minimum commitments for twelve months, and the company discloses substantial doubt about its ability to continue as a going concern, indicating it must secure additional financing or rev
+  [K3] CAPITAL_KILL: Going concern doubt (weak sourcing)
+        The auditor or management states the company may not be able to continue operating. Financing is not optional and will not be on the holder's terms. Evidence: The company disclosed substantial doubt about its ability to continue as a going concern.
+  [K3] CAPITAL_KILL: Going concern doubt disclosed (weak sourcing)
+        The filing discloses substantial doubt about the ability to continue as a going concern.
+  [K3] REGULATORY_KILL: Regulator no longer treats the trial as pivotal or registrational (weak sourcing)
+        A trial that was registrational and no longer is has lost the status the equity value rested on, without any trial result having changed. This is the regulator withdrawing the premise rather than the company failing a test. Evidence: Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal.
+  [K3] REGULATORY_KILL: Regulator states the primary endpoint is not sufficient to demonstrate efficacy (weak sourcing)
+        The trial as designed cannot support approval on its primary endpoint. Every valuation of the programme assumes a registrational path the regulator has said does not exist. Evidence: The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy.
+  [K3] REGULATORY_KILL: Regulator states the primary endpoint is not sufficient to demonstrate efficacy (weak sourcing)
+        The trial as designed cannot support approval on its primary endpoint. Every valuation of the programme assumes a registrational path the regulator has said does not exist. Evidence: Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot prove efficacy.
+  [K3] REGULATORY_KILL: Regulator names different endpoints as the only likely acceptable ones (weak sourcing)
+        Regulator position extracted from 'Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)' (TIER_2): The FDA recommended that only the most objective measures, such as all-cause mortality, cardiac transplant-free survival, cardiac transplantation, and major adverse car
+
+------------------------------------------------------------------------------
+5. Verified Facts
+------------------------------------------------------------------------------
+31 fact(s). Class and tier are shown for every one.
+
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_2/conf 0.30) Management's forecast shows insufficient cash to cover minimum commitments for twelve months, and the company discloses substantial doubt about its ability to continue as a going concern, indicating it must secure additional financing or revise its operating plan.
+      source: https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html | event_date=2026-06-30 published=2026-08-12 | id=fact_f60182b2c65d4d1b780b
+      note: collected_by=extraction:going_concern; company statement; no independent confirmation found; material claim; primary-source confirmation attempted and not found
+[ ] (LIQUIDITY/COMPANY_CLAIM/UNKNOWN/conf 0.00) The company disclosed substantial doubt about its ability to continue as a going concern.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html | event_date=2026-03-31 published=2026-05-12 | id=fact_51ba3830b6d7926abce3
+      note: collected_by=extraction:going_concern; company statement; no independent confirmation found; material claim; primary-source confirmation attempted and not found
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_2/conf 0.45) Cash and cash equivalents were $10.1 million at June 30, 2026, which the company expects will fund operations into the fourth quarter of 2026.
+      source: https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html | event_date=2026-06-30 published=2026-08-12 | id=fact_7001e668c600e8097364
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) Longeveron held a Type C meeting with the U.S. FDA in late March 2026 to discuss the ongoing development of laromestrocel (Lomecel-B), being evaluated in the Phase 2b ELPIS II clinical trial for hypoplastic left heart syndrome (HLHS).
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_3d20184960081762332e
+      note: collected_by=extraction:regulator_meeting; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) The company's headline describes the meeting as constructive.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_f854d19e2abcd6e91218
+      note: collected_by=extraction:company_framing; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.30) The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fraction (RVEF), is not sufficient to demonstrate efficacy.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_82e6892b0772c429c704
+      note: collected_by=extraction:endpoint_not_sufficient; company statement; no independent confirmation found; material claim; primary-source confirmation attempted and not found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.30) Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically discussed in the company's Type C meeting in 2024.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_eca1d75a209a39ddb230
+      note: collected_by=extraction:no_longer_pivotal; company statement; no independent confirmation found; material claim; primary-source confirmation attempted and not found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) The FDA recommended that only the most objective measures, such as all-cause mortality, cardiac transplant-free survival, cardiac transplantation, and major adverse cardiac events (MACE), are likely to be acceptable for demonstrating efficacy.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_5bc74e35184734113864
+      note: collected_by=extraction:regulator_recommends_endpoints; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.35/STALE) The FDA has granted laromestrocel Orphan Drug designation, Fast Track designation, and Rare Pediatric Disease designation for the treatment of hypoplastic left heart syndrome.
+      source: https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx | event_date=2025-07-08 published=2025-07-08 | id=fact_43cc4afcfbfb75d6b4fa
+      note: collected_by=extraction:designation; company statement; no independent confirmation found; stale: effective date 2025-07-08 older than 400d
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.35/STALE) Under the Rare Pediatric Disease designation, if Longeveron were to receive FDA marketing approval for laromestrocel for HLHS, the company could be eligible to receive a Priority Review Voucher, which allows priority review of another drug application, reducing review time from the standard ten months to six months.
+      source: https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx | event_date=2025-07-08 published=2025-07-08 | id=fact_11bc4ef72294340c5963
+      note: collected_by=extraction:designation; company statement; no independent confirmation found; stale: effective date 2025-07-08 older than 400d
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.35/STALE) The laromestrocel development programs have received five FDA designations in total: for the HLHS program, Orphan Drug, Fast Track and Rare Pediatric Disease designations; and for the Alzheimer's disease program, Regenerative Medicine Advanced Therapy (RMAT) designation and Fast Track designation.
+      source: https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx | event_date=2025-07-08 published=2025-07-08 | id=fact_05cc585e993be523eea4
+      note: collected_by=extraction:designation; company statement; no independent confirmation found; stale: effective date 2025-07-08 older than 400d
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_5/conf 0.00) Longeveron expects ELPIS II hypoplastic left heart syndrome data in mid-September 2026, while its cash runway extends into the fourth quarter of 2026.
+      source: https://seekingalpha.com/news/4632091-longeveron-expects-elpis-ii-hlhs-data-in-mid-september-while-cash-runway-extends-into-q4-2026 | event_date=2026-09-15 published=2026-08-13 | id=fact_296b94dc7fdb121d2414
+      note: collected_by=extraction:runway; company statement; no independent confirmation found; tier 4/5 source: cannot settle a material question alone
+[ ] (LIQUIDITY/COMPANY_CLAIM/UNKNOWN/conf 0.00) Cash runway was guided into the fourth quarter of 2026.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html | event_date=2026-03-31 published=2026-05-12 | id=fact_923ea6b52d7fa02fcf66
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[ ] (LIQUIDITY/COMPANY_CLAIM/UNKNOWN/conf 0.00) The company had previously implemented 25% to 50% pay cuts in February 2026 because of cash runway concerns.
+      source: https://microcapalerts.org/ticker/LGVN | event_date=2026-03-13 published=2026-03-20 | id=fact_331b05430410c51fd4b6
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[ ] (REGULATORY/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html | event_date=2026-03-31 published=2026-05-08 | id=fact_f83e6fab83dd606dee03
+      note: collected_by=extraction:no_longer_pivotal; material claim; primary-source confirmation attempted and not found
+[?] (REGULATORY/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The trial had previously been described as pivotal following a 2024 Type C meeting.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html | event_date=2026-03-31 published=2026-05-08 | id=fact_41817c2078d630c7cd16
+      note: collected_by=extraction:regulator_meeting
+[ ] (REGULATORY/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html | event_date=2026-03-31 published=2026-05-08 | id=fact_1b9e938dfa8206cd22c1
+      note: collected_by=extraction:endpoint_not_sufficient; material claim; primary-source confirmation attempted and not found
+[ ] (REGULATORY/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot prove efficacy.
+      source: https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout | event_date=2026-03-31 published=2026-05-09 | id=fact_ed741b111789240cf2e2
+      note: collected_by=extraction:endpoint_not_sufficient; material claim; primary-source confirmation attempted and not found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_1/conf 0.60) NCT04925024 is the ELPIS II Phase 2b randomized controlled trial of laromestrocel (Lomecel-B) in hypoplastic left heart syndrome.
+      source: https://clinicaltrials.gov/study/NCT04925024 | event_date=2026-09-30 published=2026-05-01 | id=fact_872c137be080171a428f
+      note: collected_by=extraction:trial_design; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) Top-line results from the randomized, controlled Phase 2b ELPIS II trial are anticipated in August 2026.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_74457ca8ecc8bb7d8b2d
+      note: collected_by=extraction:trial_design; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/UNKNOWN/conf 0.00) Longeveron posted a first quarter 2026 net loss of $4.7 million on $0.4 million of revenue, raised $15.9 million via private placement, and ended the quarter with $15.8 million of cash.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html | event_date=2026-03-31 published=2026-05-12 | id=fact_757191f1f4a4414f51e6
+      note: collected_by=extraction:financing; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/UNKNOWN/conf 0.00) Longeveron closed a private placement of up to $30 million, including $15 million initially funded, raising concerns about shareholder dilution.
+      source: https://microcapalerts.org/ticker/LGVN | event_date=2026-03-13 published=2026-03-20 | id=fact_5058c6f80dbc97ac6c3b
+      note: collected_by=extraction:financing; company statement; no independent confirmation found
+[?] (CAPITAL_STRUCTURE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) Large equity grants, including 500,000 restricted stock units for the chief executive, were issued immediately following the capital raise, which may lead to further shareholder dilution.
+      source: https://microcapalerts.org/ticker/LGVN | event_date=2026-03-13 published=2026-03-20 | id=fact_77d97be618c2d71150f3
+      note: collected_by=extraction:dilution
+[?] (CLINICAL/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The trial referenced is NCT04925024, the ELPIS II Phase 2b study of laromestrocel (Lomecel-B).
+      source: https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout | event_date=2026-03-31 published=2026-05-09 | id=fact_d6de6d024bc10b358578
+      note: collected_by=extraction:nct_id
+[?] (GOVERNANCE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The company had previously implemented 25% to 50% pay cuts in February 2026 because of cash runway concerns.
+      source: https://microcapalerts.org/ticker/LGVN | event_date=2026-03-13 published=2026-03-20 | id=fact_b5d5014957dbec393824
+      note: collected_by=extraction:pay_cut
+[?] (GOVERNANCE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) Large equity grants, including 500,000 restricted stock units for the chief executive, were issued immediately following the capital raise, which may lead to further shareholder dilution.
+      source: https://microcapalerts.org/ticker/LGVN | event_date=2026-03-13 published=2026-03-20 | id=fact_ee576868cc9a53bfa90c
+      note: collected_by=extraction:equity_grant
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) Top-line results from the randomized, controlled Phase 2b ELPIS II trial are anticipated in August 2026.
+      source: https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html | event_date=2026-03-31 published=2026-05-08 | id=fact_40fec3297f2ff0d4d0d7
+      note: collected_by=extraction:readout_timing; company statement; no independent confirmation found
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) ELPIS II top-line data are expected in September 2026.
+      source: https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html | event_date=2026-06-30 published=2026-08-12 | id=fact_4307d1647f416294b7b5
+      note: collected_by=extraction:readout_timing; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_2/conf 0.45) Longeveron reported a second quarter 2026 net loss of $6.1 million.
+      source: https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html | event_date=2026-06-30 published=2026-08-12 | id=fact_83b8f6a5b20b3a4e7f81
+      note: collected_by=extraction:net_loss; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/TIER_2/conf 0.45) Cash and cash equivalents were $10.1 million at June 30, 2026, which the company expects will fund operations into the fourth quarter of 2026.
+      source: https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html | event_date=2026-06-30 published=2026-08-12 | id=fact_91395128861e236f97df
+      note: collected_by=extraction:cash_position; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/UNKNOWN/conf 0.00) Longeveron posted a first quarter 2026 net loss of $4.7 million on $0.4 million of revenue, raised $15.9 million via private placement, and ended the quarter with $15.8 million of cash.
+      source: https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html | event_date=2026-03-31 published=2026-05-12 | id=fact_90fb663ff047f35b7b3b
+      note: collected_by=extraction:net_loss; company statement; no independent confirmation found
+
+------------------------------------------------------------------------------
+6. Contradictions
+------------------------------------------------------------------------------
+No contradictions detected by the mechanical checks.
+Checks run: company_vs_regulator, company_vs_filing, analyst_vs_primary, guidance_change, tam_vs_population, basic_vs_fully_diluted
+
+------------------------------------------------------------------------------
+7. Bull Case
+------------------------------------------------------------------------------
+No verified evidence supports an undervaluation case. This is a finding, not a failure of imagination: the bull case would have to rest on unverified claims.
+
+(Built without sight of the bear case or the kill findings.)
+
+  No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+8. Bear Case
+------------------------------------------------------------------------------
+Most likely failure path: The regulator has already rejected the efficacy endpoint. Even a statistically positive readout does not produce an approvable package. The company must run a further adequate and well-controlled trial, which costs years and at least one financing round. The equity value implied by a near-term approval disappears without any new bad news.
+
+(Built without sight of the bull case.)
+  - [CRITICAL] The regulator has already rejected the efficacy endpoint
+      Even a statistically positive readout does not produce an approvable package. The company must run a further adequate and well-controlled trial, which costs years and at least one financing round. The equity value implied by a near-term approval disappears without any new bad news.
+  - [CRITICAL] Going concern doubt forces financing on the buyer's terms
+      Structured or discounted financing typically follows, at the expense of existing holders.
+  - [HIGH] Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+      Adds cost, delay or an additional evidentiary requirement.
+  - [HIGH] Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+      Adds cost, delay or an additional evidentiary requirement.
+  - [HIGH] Unresolved regulatory item: Regulator names different endpoints as the only likely acceptable ones [fact_5bc74e35184734113864] (source tier TIER_2)
+      Adds cost, delay or an additional evidentiary requirement.
+
+------------------------------------------------------------------------------
+9. Regulatory
+------------------------------------------------------------------------------
+REGULATOR POSITION ON PRIMARY ENDPOINT: REJECTED
+
+What the regulator has agreed:
+  + Fast Track designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_43cc4afcfbfb75d6b4fa]
+  + Orphan Drug designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_43cc4afcfbfb75d6b4fa]
+  + Rare Pediatric Disease designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_43cc4afcfbfb75d6b4fa]
+  + Rare Pediatric Disease designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_11bc4ef72294340c5963]
+  + Priority Review -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_11bc4ef72294340c5963]
+  + Fast Track designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_05cc585e993be523eea4]
+  + Orphan Drug designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_05cc585e993be523eea4]
+  + Rare Pediatric Disease designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_05cc585e993be523eea4]
+  + RMAT designation -- procedural designation only: says nothing about whether the efficacy evidence or endpoint will be accepted [fact_05cc585e993be523eea4]
+
+What the regulator has NOT agreed / adverse findings:
+  - Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+  - Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+  - Regulator names different endpoints as the only likely acceptable ones [fact_5bc74e35184734113864] (source tier TIER_2)
+  - Regulator no longer treats the trial as pivotal or registrational [fact_f83e6fab83dd606dee03] (source tier UNKNOWN)
+  - Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_1b9e938dfa8206cd22c1] (source tier UNKNOWN)
+  - Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_ed741b111789240cf2e2] (source tier UNKNOWN)
+
+Unresolved:
+  ? Company characterization of the regulator interaction conflicts with the regulator position found in primary filings
+
+Company characterizations (NOT regulator statements):
+  ~ Company describes the interaction as ['constructive'] [fact_f854d19e2abcd6e91218] -- characterization only, not a regulator statement
+
+------------------------------------------------------------------------------
+10. Capital Structure / Dilution
+------------------------------------------------------------------------------
+As of: 2026-09-15
+  basic shares            : UNKNOWN
+  fully diluted shares    : UNKNOWN
+  dilution overhang       : None%
+  components:
+      basic_shares          : UNKNOWN
+      prefunded_warrants    : UNKNOWN
+      public_warrants       : UNKNOWN
+      options               : UNKNOWN
+      rsus                  : UNKNOWN
+      preferred             : UNKNOWN
+      convertible_debt      : UNKNOWN
+  cash                    : $10.10M
+  debt                    : UNKNOWN
+  implied quarterly burn  : UNKNOWN
+  runway (months)         : None
+  ATM capacity            : UNKNOWN
+  shelf effective         : False
+  going concern doubt     : True
+  listing compliance issue: False
+
+  INCOMPLETE: the following dilution components were not found, so the fully diluted figure is a FLOOR: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+
+------------------------------------------------------------------------------
+11. Science / Technology
+------------------------------------------------------------------------------
+Mode biotech. Primary endpoint type: UNKNOWN; design: randomized, open-label/unknown masking, n=UNKNOWN; design quality 4.5/10.
+
+  phase                 : 2b
+  randomized            : True
+  masked                : False
+  enrollment            : None
+  endpoint_type         : UNKNOWN
+  primary_endpoint      : UNKNOWN
+  surrogate_validation  : UNKNOWN
+  design_quality_score  : 4.5
+  - not double-blinded (or masking not evidenced)
+  - primary endpoint type could not be determined
+  - enrollment unknown
+
+------------------------------------------------------------------------------
+12. Competition
+------------------------------------------------------------------------------
+Competitors identified: 0
+
+  TAM: UNKNOWN
+  SAM: UNKNOWN (units depend on the source; see notes)
+  SOM: UNKNOWN
+  note: SOM is UNKNOWN: obtainable share requires competitor share, distribution and payer evidence that is not present.
+  comparison dimensions with no evidence: product, clinical_efficacy, safety, pricing, sales, approval_status, market_share, cash, valuation, partnership, distribution, technical_superiority
+
+------------------------------------------------------------------------------
+13. Valuation
+------------------------------------------------------------------------------
+  price                    : $0.97
+  basic market cap         : UNKNOWN
+  fully diluted market cap : UNKNOWN
+  enterprise value         : UNKNOWN
+  cash-adjusted EV         : UNKNOWN
+
+What each multiple REQUIRES (not what it would be nice to have):
+  assumption: Debt unknown; enterprise value treats debt as zero, understating EV.
+  unknown inputs: basic_shares, fully_diluted_shares, debt, market_cap (price or share count missing)
+
+------------------------------------------------------------------------------
+14. Catalysts (JST)
+------------------------------------------------------------------------------
+Timezone: Asia/Tokyo (JST)   Today: 2026-09-06
+
+  [T1] 2026-09-15 (date confidence HIGH)
+      event   : Longeveron expects ELPIS II hypoplastic left heart syndrome data in mid-September 2026, while its cash runway extends into the fourth quarter of 2026.
+      bull    : Primary endpoint met with an effect size the regulator and payers treat as clinically meaningful
+      bear    : Primary endpoint missed, or met on a measure the regulator has not accepted as adequate to establish effectiveness
+      priced? : UNKNOWN
+      source  : Longeveron expects ELPIS II HLHS data in mid-September while cash runway extends into Q4 2026 (TIER_5)
+
+  [T2] 2026-09-30 (date confidence HIGH)
+      event   : NCT04925024 is the ELPIS II Phase 2b randomized controlled trial of laromestrocel (Lomecel-B) in hypoplastic left heart syndrome.
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : ELPIS II registry record (NCT04925024) (TIER_1)
+
+------------------------------------------------------------------------------
+15. Scenarios
+------------------------------------------------------------------------------
+
+  DISASTER (VERY_LOW_CONFIDENCE)
+    probability   : 35% - 45%
+    price range   : $0.05 - $0.24
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 0-12 months
+    requires      : No further financing available on any terms, or a programme-ending regulatory or clinical outcome
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+    fails if      : Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+  BEAR (VERY_LOW_CONFIDENCE)
+    probability   : 50% - 65%
+    price range   : $0.24 - $0.58
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 6-18 months
+    requires      : Dilutive financing before the catalyst, or a disappointing readout
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+    fails if      : Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+  BASE (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    price range   : $0.58 - $1.26
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-24 months
+    requires      : The programme continues, financing occurs on ordinary terms, and no new disqualifying fact emerges
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+    fails if      : Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+  BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 1%
+    price range   : $1.26 - $2.91
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-36 months
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    fails if      : Worst kill level is K5: this scenario requires the identified disqualifying issue to be resolved first
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+    fails if      : Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+  EXTREME_BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 1%
+    price range   : $2.91 - $9.70
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 3-7 years
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Approval, launch, and capture of a substantial share of the obtainable market
+    fails if      : Worst kill level is K5: this scenario requires the identified disqualifying issue to be resolved first
+    fails if      : The regulator has already rejected the efficacy endpoint
+    fails if      : Going concern doubt forces financing on the buyer's terms
+    fails if      : Unresolved regulatory item: Regulator states the primary endpoint is not sufficient to demonstrate efficacy [fact_82e6892b0772c429c704] (source tier TIER_2)
+    fails if      : Unresolved regulatory item: Regulator no longer treats the trial as pivotal or registrational [fact_eca1d75a209a39ddb230] (source tier TIER_2)
+
+------------------------------------------------------------------------------
+16. Scores
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE (read this first): 0.0 / 10
+
+There is deliberately NO overall score. A single number would let a large
+upside estimate outvote a disqualifying fact, which is the failure mode
+this system exists to prevent.
+
+  dimension                     score   conf   note
+  evidence_quality                0.0   0.0   Mirrors the evidence confidence breakdown.
+  management_quality              2.0   0.0   Company framed a regulatory interaction favourably while a primary source records an adverse position.
+  science_technology_quality      4.5   0.0   From checkable design/technology attributes.
+  clinical_quality                1.0   0.0   From checkable design/technology attributes. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  regulatory_quality              1.0   0.0   Regulator position on the primary endpoint: REJECTED.
+  financial_strength              1.0   0.0   Runway unknown; scored low because it is unverified. Going concern doubt disclosed. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  capital_structure_quality       1.0   0.0   Dilution overhang could not be computed. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  competitive_moat                4.0   0.0   0 peer(s) identified, 0 further advanced.
+  tam_quality                     3.0   0.0   TAM absent.
+  sam_som_quality                 2.0   0.0   SOM is UNKNOWN: obtainable share is not established.
+  growth_quality                  3.0   0.0   No verified revenue growth series in evidence.
+  valuation                       2.0   0.0   Fully diluted market cap could not be computed.
+  catalyst_strength               6.0   0.0   2 dated forward catalyst(s).
+  catalyst_timing                 7.0   0.0   A catalyst falls inside three months.
+  market_pricing                  5.0   0.0   UNKNOWN: whether the market has already discounted the catalyst is not in evidence.
+  flow_microstructure             0.2   0.0   16 microstructure field(s) unknown.
+  immediate_buy                   1.0   0.0   Regulatory position, balance sheet and catalyst timing. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  explosive_potential             6.5   0.0   Capacity for a violent move given size, catalyst proximity and positioning. This is NOT a statement that the move will be upward, and it is not capped by the kill gate.
+  long_term_multibagger           1.0   0.0   Mean of moat, obtainable market and regulatory position. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  downside_risk                   9.5   0.0   Higher is worse. Worst kill level K5; 2 category/categories at K3 or above.
+  risk_reward                     1.0   0.0   Upside capacity against downside severity. Capped at 1.0 by the kill gate (worst level K5). [CAPPED BY KILL GATE]
+  time_efficiency                 6.0   0.0   How soon the thesis is testable.
+
+------------------------------------------------------------------------------
+17. Immediate Action
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10   (shown before the action)
+ACTION: AVOID
+This action is provisional: the run is marked INCOMPLETE_RESEARCH.
+
+------------------------------------------------------------------------------
+18. What Changed Since Previous Run
+------------------------------------------------------------------------------
+Thesis version: v1
+
+WHAT_CHANGED:
+  - First recorded thesis for this ticker.
+
+WHY_CHANGED:
+  - No prior run to compare against.
+
+NEW_FACT: 31 new fact id(s)
+REMOVED_ASSUMPTION: 0 fact id(s) no longer present
+
+------------------------------------------------------------------------------
+19. Unresolved Questions
+------------------------------------------------------------------------------
+BLOCKING -- these prevent a confident conclusion:
+  [!] Fully diluted share count is incomplete; missing components: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+      why: Every per-share and market-cap figure below is understated by an unknown amount until these are obtained.  (raised by capital_structure)
+  [!] The following kill categories were never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL
+      why: K0 for an unsearched category means 'not examined'. Treating it as 'no problem found' is the failure mode this system is built to prevent.  (raised by kill_agent)
+
+Other open questions:
+  ? No evidence was obtained for: current reports (8-K)  (raised by fact_collector)
+  ? No evidence was obtained for: insider transactions (Form 4)  (raised by fact_collector)
+  ? No evidence was obtained for: government contracts  (raised by fact_collector)
+  ? No evidence was obtained for: peer-reviewed literature  (raised by fact_collector)
+  ? No evidence was obtained for: company IR materials  (raised by fact_collector)
+  ? No evidence was obtained for: management  (raised by fact_collector)
+  ? No evidence was obtained for: competition  (raised by fact_collector)
+  ? No evidence was obtained for: market size  (raised by fact_collector)
+  ? No evidence was obtained for: customer concentration / backlog  (raised by fact_collector)
+  ? Is there a Special Protocol Assessment, and does it remain in force?  (raised by regulatory)
+  ? Has the programme received a Complete Response Letter?  (raised by regulatory)
+  ? Are there open CMC or manufacturing issues?  (raised by regulatory)
+  ? What is the pre-specified statistical power and assumed effect size?  (raised by science)
+  ? What is the comparator arm and the current standard of care?  (raised by science)
+  ? What competitor clinical data exist in the same indication?  (raised by science)
+  ? What share of the serviceable market is realistically obtainable?  (raised by competitive)
+  ? Only 0 competitor(s) identified; at least 3 are required for a usable comparison  (raised by competitive)
+  ? No comparative evidence on: product  (raised by competitive)
+  ? No comparative evidence on: clinical_efficacy  (raised by competitive)
+  ? No comparative evidence on: safety  (raised by competitive)
+  ? No comparative evidence on: pricing  (raised by competitive)
+  ? No comparative evidence on: sales  (raised by competitive)
+  ? No comparative evidence on: approval_status  (raised by competitive)
+  ? No comparative evidence on: market_share  (raised by competitive)
+  ? No comparative evidence on: cash  (raised by competitive)
+  ? No comparative evidence on: valuation  (raised by competitive)
+  ? No comparative evidence on: partnership  (raised by competitive)
+  ? No comparative evidence on: distribution  (raised by competitive)
+  ? No comparative evidence on: technical_superiority  (raised by competitive)
+  ? Microstructure fields with no data: short_interest, short_percent_float, days_to_cover, borrow_availability, borrow_fee, options_open_interest, gamma_exposure, average_volume, relative_volume, vwap, rsi, support, resistance, institutional_ownership, insider_ownership, etf_index_exposure  (raised by microstructure)
+  ? What verifiable evidence would support an undervaluation case?  (raised by bull_agent)
+
+------------------------------------------------------------------------------
+20. Sources
+------------------------------------------------------------------------------
+  [TIER_1] ELPIS II registry record (NCT04925024)
+      https://clinicaltrials.gov/study/NCT04925024
+      date used: 2026-09-30 (event_date) | published=2026-05-01 event=2026-09-30 filed=UNKNOWN
+  [TIER_2] Longeveron FDA designations for laromestrocel
+      https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx
+      date used: 2025-07-08 (event_date) | published=2025-07-08 event=2025-07-08 filed=UNKNOWN
+  [TIER_2] Longeveron Announces Completion of Enrollment of Pivotal Phase 2b Clinical Trial Evaluating Laromestrocel as a Treatment for Hypoplastic Left Heart Syndrome (HLHS)
+      https://www.globenewswire.com/news-release/2025/06/24/3104065/0/en/Longeveron-Announces-Completion-of-Enrollment-of-Pivotal-Phase-2b-Clinical-Trial-Evaluating-Laromestrocel-as-a-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HLHS.html
+      date used: 2025-06-24 (event_date) | published=2025-06-24 event=2025-06-24 filed=UNKNOWN
+  [TIER_2] Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)
+      https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      date used: 2026-03-31 (event_date) | published=2026-05-08 event=2026-03-31 filed=UNKNOWN
+  [TIER_2] Longeveron Announces 2026 Second Quarter Financial Results and Provides Business Update
+      https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      date used: 2026-06-30 (event_date) | published=2026-08-12 event=2026-06-30 filed=UNKNOWN
+  [TIER_5] Longeveron expects ELPIS II HLHS data in mid-September while cash runway extends into Q4 2026
+      https://seekingalpha.com/news/4632091-longeveron-expects-elpis-ii-hlhs-data-in-mid-september-while-cash-runway-extends-into-q4-2026
+      date used: 2026-09-15 (event_date) | published=2026-08-13 event=2026-09-15 filed=UNKNOWN
+  [UNKNOWN] LGVN private placement and dilution coverage
+      https://microcapalerts.org/ticker/LGVN
+      date used: 2026-03-13 (event_date) | published=2026-03-20 event=2026-03-13 filed=UNKNOWN
+  [UNKNOWN] FDA tells Longeveron its HLHS trial's endpoint can't prove efficacy, mid-study
+      https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout
+      date used: 2026-03-31 (event_date) | published=2026-05-09 event=2026-03-31 filed=UNKNOWN
+  [UNKNOWN] Longeveron Q1 loss $4.7M, cash runway to Q4 2026
+      https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html
+      date used: 2026-03-31 (event_date) | published=2026-05-12 event=2026-03-31 filed=UNKNOWN
+  [UNKNOWN] Longeveron: FDA no longer calls ELPIS II pivotal
+      https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html
+      date used: 2026-03-31 (event_date) | published=2026-05-08 event=2026-03-31 filed=UNKNOWN
+
+Dates: 'date used' is the event or effective date wherever one exists. A publication date is never treated as the date the event occurred.
+
+==============================================================================
+APPENDIX -- A. RESEARCH PROVENANCE -- how this evidence was obtained
+==============================================================================
+CAPTURED CORPUS REPLAY
+This run replayed 10 document(s) about a real issuer, captured at
+2026-09-06T06:00:00+00:00 via anthropic_websearch. The URLs are real and the
+documents are real. They were NOT fetched live at run time, so anything
+published after the capture time is absent from this analysis by
+construction.
+
+Source provenance:
+  CAPTURED     10
+
+10 source(s) are search-engine summaries rather than the document itself. A
+summary about a filing is not the filing: quotations drawn from it have not
+been checked against the original.
+
+==============================================================================
+APPENDIX -- B. SEARCH COMPLETENESS GATE
+==============================================================================
+6 of 6 required research domains examined.
+
+  domain                 status      queries  docs  paths
+  REGULATORY             [searched]        4    22  CORPUS
+  CAPITAL_STRUCTURE      [searched]        6    36  CORPUS
+  SCIENCE_TECHNOLOGY     [searched]        4    24  CORPUS
+  COMPETITION            [searched]        3    18  CORPUS
+  CATALYST               [searched]        1     6  CORPUS
+  CONTRADICTION          [searched]        4    24  CORPUS
+
+All required domains were examined; a verdict is permitted.
+
+==============================================================================
+APPENDIX -- C. PRIMARY-SOURCE ESCALATION
+==============================================================================
+A material claim carried only by weak sourcing is escalated to a primary
+source. A company press release does not count as confirmation of what a
+regulator said; only a statutory filing or the regulator's own document
+does.
+
+  attempted : 7
+  confirmed : 0
+  UNCONFIRMED: 7
+
+  [UNVERIFIED_MATERIAL_CLAIM] (regulator_position)
+      The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fraction (RVEF), is not sufficient to demonstrate efficacy.
+      searched: Longeveron Inc. acknowledged disease unmet advised trial primary endpoint right ventricular ejection site:sec.gov; Longeveron Inc. acknowledged disease unmet advised trial primary endpoint right ventricular ejection site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (regulator_position)
+      Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically discussed in the company's Type C meeting in 2024.
+      searched: Longeveron Inc. Without agreed primary endpoint sufficient efficacy longer refers ELPIS trial site:sec.gov; Longeveron Inc. Without agreed primary endpoint sufficient efficacy longer refers ELPIS trial site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (regulator_position)
+      Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal.
+      searched: Longeveron Inc. Coverage Longeveron meeting announcement headlines change characterisation longer calls ELPIS site:sec.gov; Longeveron Inc. Coverage Longeveron meeting announcement headlines change characterisation longer calls ELPIS site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (regulator_position)
+      The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy.
+      searched: Longeveron Inc. change follows position primary endpoint sufficient demonstrate efficacy site:sec.gov; Longeveron Inc. change follows position primary endpoint sufficient demonstrate efficacy site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (endpoint)
+      Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot prove efficacy.
+      searched: Longeveron Inc. Independent reporting states Longeveron mid-study primary endpoint hypoplastic heart syndrome site:sec.gov; Longeveron Inc. Independent reporting states Longeveron mid-study primary endpoint hypoplastic heart syndrome site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (going_concern)
+      Management's forecast shows insufficient cash to cover minimum commitments for twelve months, and the company discloses substantial doubt about its ability to continue as a going concern, indicating it must secure additional financing or revise its operating plan.
+      searched: Longeveron Inc. Management forecast shows insufficient cover minimum commitments twelve months company site:sec.gov; Longeveron Inc. Management forecast shows insufficient cover minimum commitments twelve months company site:fda.gov
+
+  [UNVERIFIED_MATERIAL_CLAIM] (going_concern)
+      The company disclosed substantial doubt about its ability to continue as a going concern.
+      searched: Longeveron Inc. company disclosed substantial doubt about ability continue going concern site:sec.gov; Longeveron Inc. company disclosed substantial doubt about ability continue going concern site:fda.gov
+
+==============================================================================
+APPENDIX -- D. CITATION TRACEABILITY INDEX
+==============================================================================
+Every material claim above resolves through this chain: claim -> fact_id -> source_id -> URL -> publication date -> event date.
+
+  fact_872c137be080171a428f
+      claim    : NCT04925024 is the ELPIS II Phase 2b randomized controlled trial of laromestrocel (Lomecel-B) in hypoplastic left heart syndrome.
+      source   : lgvn_ctgov_elpis2
+      url      : https://clinicaltrials.gov/study/NCT04925024
+      published: 2026-05-01   event: 2026-09-30
+      tier     : TIER_1   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_05cc585e993be523eea4
+      claim    : The laromestrocel development programs have received five FDA designations in total: for the HLHS program, Orphan Drug, Fast Track and Rare Pediatric 
+      source   : lgvn_designations
+      url      : https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx
+      published: 2025-07-08   event: 2025-07-08
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_11bc4ef72294340c5963
+      claim    : Under the Rare Pediatric Disease designation, if Longeveron were to receive FDA marketing approval for laromestrocel for HLHS, the company could be el
+      source   : lgvn_designations
+      url      : https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx
+      published: 2025-07-08   event: 2025-07-08
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_3d20184960081762332e
+      claim    : Longeveron held a Type C meeting with the U.S. FDA in late March 2026 to discuss the ongoing development of laromestrocel (Lomecel-B), being evaluated
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_40fec3297f2ff0d4d0d7
+      claim    : Top-line results from the randomized, controlled Phase 2b ELPIS II trial are anticipated in August 2026.
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_4307d1647f416294b7b5
+      claim    : ELPIS II top-line data are expected in September 2026.
+      source   : lgvn_q2_2026_results
+      url      : https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      published: 2026-08-12   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_43cc4afcfbfb75d6b4fa
+      claim    : The FDA has granted laromestrocel Orphan Drug designation, Fast Track designation, and Rare Pediatric Disease designation for the treatment of hypopla
+      source   : lgvn_designations
+      url      : https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx
+      published: 2025-07-08   event: 2025-07-08
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_5bc74e35184734113864
+      claim    : The FDA recommended that only the most objective measures, such as all-cause mortality, cardiac transplant-free survival, cardiac transplantation, and
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_7001e668c600e8097364
+      claim    : Cash and cash equivalents were $10.1 million at June 30, 2026, which the company expects will fund operations into the fourth quarter of 2026.
+      source   : lgvn_q2_2026_results
+      url      : https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      published: 2026-08-12   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_74457ca8ecc8bb7d8b2d
+      claim    : Top-line results from the randomized, controlled Phase 2b ELPIS II trial are anticipated in August 2026.
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_82e6892b0772c429c704
+      claim    : The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fract
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_83b8f6a5b20b3a4e7f81
+      claim    : Longeveron reported a second quarter 2026 net loss of $6.1 million.
+      source   : lgvn_q2_2026_results
+      url      : https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      published: 2026-08-12   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_91395128861e236f97df
+      claim    : Cash and cash equivalents were $10.1 million at June 30, 2026, which the company expects will fund operations into the fourth quarter of 2026.
+      source   : lgvn_q2_2026_results
+      url      : https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      published: 2026-08-12   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_eca1d75a209a39ddb230
+      claim    : Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically d
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_f60182b2c65d4d1b780b
+      claim    : Management's forecast shows insufficient cash to cover minimum commitments for twelve months, and the company discloses substantial doubt about its ab
+      source   : lgvn_q2_2026_results
+      url      : https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html
+      published: 2026-08-12   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_f854d19e2abcd6e91218
+      claim    : The company's headline describes the meeting as constructive.
+      source   : lgvn_typec_pr_20260508
+      url      : https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_296b94dc7fdb121d2414
+      claim    : Longeveron expects ELPIS II hypoplastic left heart syndrome data in mid-September 2026, while its cash runway extends into the fourth quarter of 2026.
+      source   : lgvn_seekingalpha_runway
+      url      : https://seekingalpha.com/news/4632091-longeveron-expects-elpis-ii-hlhs-data-in-mid-september-while-cash-runway-extends-into-q4-2026
+      published: 2026-08-13   event: 2026-09-15
+      tier     : TIER_5   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_1b9e938dfa8206cd22c1
+      claim    : The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy.
+      source   : lgvn_stocktitan_pivotal_20260508
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_331b05430410c51fd4b6
+      claim    : The company had previously implemented 25% to 50% pay cuts in February 2026 because of cash runway concerns.
+      source   : lgvn_pipe_2026
+      url      : https://microcapalerts.org/ticker/LGVN
+      published: 2026-03-20   event: 2026-03-13
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_41817c2078d630c7cd16
+      claim    : The trial had previously been described as pivotal following a 2024 Type C meeting.
+      source   : lgvn_stocktitan_pivotal_20260508
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_5058c6f80dbc97ac6c3b
+      claim    : Longeveron closed a private placement of up to $30 million, including $15 million initially funded, raising concerns about shareholder dilution.
+      source   : lgvn_pipe_2026
+      url      : https://microcapalerts.org/ticker/LGVN
+      published: 2026-03-20   event: 2026-03-13
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_51ba3830b6d7926abce3
+      claim    : The company disclosed substantial doubt about its ability to continue as a going concern.
+      source   : lgvn_q1_2026_results
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_757191f1f4a4414f51e6
+      claim    : Longeveron posted a first quarter 2026 net loss of $4.7 million on $0.4 million of revenue, raised $15.9 million via private placement, and ended the 
+      source   : lgvn_q1_2026_results
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_77d97be618c2d71150f3
+      claim    : Large equity grants, including 500,000 restricted stock units for the chief executive, were issued immediately following the capital raise, which may 
+      source   : lgvn_pipe_2026
+      url      : https://microcapalerts.org/ticker/LGVN
+      published: 2026-03-20   event: 2026-03-13
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_90fb663ff047f35b7b3b
+      claim    : Longeveron posted a first quarter 2026 net loss of $4.7 million on $0.4 million of revenue, raised $15.9 million via private placement, and ended the 
+      source   : lgvn_q1_2026_results
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_923ea6b52d7fa02fcf66
+      claim    : Cash runway was guided into the fourth quarter of 2026.
+      source   : lgvn_q1_2026_results
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_b5d5014957dbec393824
+      claim    : The company had previously implemented 25% to 50% pay cuts in February 2026 because of cash runway concerns.
+      source   : lgvn_pipe_2026
+      url      : https://microcapalerts.org/ticker/LGVN
+      published: 2026-03-20   event: 2026-03-13
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_d6de6d024bc10b358578
+      claim    : The trial referenced is NCT04925024, the ELPIS II Phase 2b study of laromestrocel (Lomecel-B).
+      source   : lgvn_appliedxl_endpoint_2026
+      url      : https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout
+      published: 2026-05-09   event: 2026-03-31
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_ed741b111789240cf2e2
+      claim    : Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot pr
+      source   : lgvn_appliedxl_endpoint_2026
+      url      : https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout
+      published: 2026-05-09   event: 2026-03-31
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+  fact_ee576868cc9a53bfa90c
+      claim    : Large equity grants, including 500,000 restricted stock units for the chief executive, were issued immediately following the capital raise, which may 
+      source   : lgvn_pipe_2026
+      url      : https://microcapalerts.org/ticker/LGVN
+      published: 2026-03-20   event: 2026-03-13
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_f83e6fab83dd606dee03
+      claim    : Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal.
+      source   : lgvn_stocktitan_pivotal_20260508
+      url      : https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html
+      published: 2026-05-08   event: 2026-03-31
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: UNVERIFIED_MATERIAL_CLAIM
+
+==============================================================================
+APPENDIX -- E. ANALYSIS PROVENANCE AND COST
+==============================================================================
+No agent was model-backed in this run. Every analysis below came from the
+deterministic rule-based agents. This is stated plainly because a rule-based
+reading and a model reading are different things, and the reader is entitled
+to know which one produced the text.
+
+Evidence was chunked into 10 chunk(s) and each agent received only the
+chunks relevant to it, within a token budget. No agent read the whole
+corpus.

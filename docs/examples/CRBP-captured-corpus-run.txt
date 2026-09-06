@@ -1,0 +1,559 @@
+==============================================================================
+INVESTMENT RESEARCH REPORT -- CRBP
+Company: Corbus Pharmaceuticals Holdings, Inc.
+Run ID: 20260906T114657-8e11fe   Mode: standard
+Generated (UTC): 2026-09-06T11:46:57+00:00
+==============================================================================
+
+******************************************************************************
+*** INCOMPLETE_RESEARCH ***
+One or more agents or collectors did not complete. This analysis is partial
+and must not be treated as a finished assessment.
+  - capital_structure: DEGRADED :: basic share count not found; market cap cannot be computed
+  - competitive: DEGRADED :: only 0 competitor(s) identified; requirement is at least 3 for a usable comparison
+  - microstructure: DEGRADED :: 16/17 microstructure fields have no data
+  - kill_agent: DEGRADED :: 7 mandatory kill queries were not executed (no search provider configured)
+  - valuation: DEGRADED :: fully diluted market cap unavailable; valuation is incomplete
+******************************************************************************
+
+------------------------------------------------------------------------------
+1. Verdict
+------------------------------------------------------------------------------
+Action: WAIT_FOR_EVENT
+Judged blind (identity withheld from the judge): True
+Worst kill level: K2
+Headline: Evidence confidence 0.0/10; worst kill level K2; regulator endpoint position UNKNOWN; action WAIT_FOR_EVENT.
+CAVEAT: INCOMPLETE RESEARCH: one or more agents or collectors failed. This is not a completed analysis.
+CAVEAT: Evidence confidence is low; the scores describe a possibility, not an established situation.
+CAVEAT: Some kill categories were never searched; their K0 means 'not examined'.
+
+Reasoning:
+  - Evidence confidence is 0.0/10, evaluated before any action label.
+  - Research is incomplete: parts of the mandatory evidence set were not obtained, so no buy-side action is available yet.
+  - No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+2. Evidence Confidence
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10
+
+This is reported before the scores and before the action, and it is a separate question from whether the upside is large.
+
+  facts in evidence set        : 15
+  Tier 1/2 primary sources     : 73%
+  decision-grade evidence      : 7%
+  independently corroborated   : 0%
+  company claims (uncorrob.)   : 67%
+  stale by event date          : 0%
+  blocking unknowns            : 7
+  kill categories not searched : 4
+
+Penalties applied:
+  - 67% of facts are company statements without independent confirmation
+  - 7 blocking unresolved question(s)
+  - 4 kill category/categories were never searched
+
+------------------------------------------------------------------------------
+3. Critical Red Flags
+------------------------------------------------------------------------------
+  [!] Kill categories never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL -- reported as unexamined, not clean
+
+------------------------------------------------------------------------------
+4. What Would Kill The Thesis
+------------------------------------------------------------------------------
+Stated before the bull case on purpose: these are the findings that would invalidate an investment thesis here.
+
+  - Evidence that the regulator does not accept the primary endpoint. This is currently unverified in either direction and would invalidate the thesis.
+  - Bear mechanism: The regulator's position on the endpoint is unverified
+
+Kill Agent findings:
+  [K2] REGULATORY_KILL: Regulator position on primary endpoint is unknown (weak sourcing)
+        No primary-source evidence of the regulator's view on endpoint acceptability was obtained. Treated as unexamined, not as clean.
+
+------------------------------------------------------------------------------
+5. Verified Facts
+------------------------------------------------------------------------------
+15 fact(s). Class and tier are shown for every one.
+
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_2/conf 0.45) Cash, runway and share count are therefore NOT in evidence for this ticker.
+      source: https://www.sec.gov/Archives/edgar/data/1595097/000119312526153923/crbp-ex99_1.htm | event_date=2026-06-01 published=2026-06-01 | id=fact_1bfa891a9d61b5f8ba04
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) The company's headline describes a favorable safety profile and emerging evidence of weight loss.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_e6c516ac4168042091d9
+      note: collected_by=extraction:company_framing; company statement; no independent confirmation found
+[ ] (REGULATORY/COMPANY_CLAIM/TIER_2/conf 0.45) The study is on track for a topline data readout in September 2026.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity | event_date=2026-08-05 published=2026-08-05 | id=fact_c1bf39e66c9058fcd0d4
+      note: collected_by=extraction:company_framing; company statement; no independent confirmation found
+[V] (CLINICAL/VERIFIED_FACT/TIER_1/conf 0.80) The Corbus pipeline includes CRB-701, a next-generation antibody drug conjugate for the treatment of Nectin-4-expressing tumors, and CRB-913, an orally delivered highly peripherally restricted CB1 inverse agonist for the treatment of obesity.
+      source: https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb | event_date=2025-12-11 published=2025-12-11 | id=fact_7be9a0f85e5e2877a207
+      note: collected_by=extraction:programme_code
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) Corbus reported results from a double-blinded placebo-controlled single ascending dose and multiple ascending dose Phase 1a study of CRB-913, conducted in the United States, assessing safety, tolerability and pharmacokinetics of escalating once-daily doses.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_985d1a2c4e6e7888eea4
+      note: collected_by=extraction:trial_design; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) The single ascending dose portion of the study enrolled 64 participants across 8 cohorts receiving ascending doses of CRB-913 up to a maximal dose of 600 mg per day, or placebo, dosed orally once.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_37aaf8db08ff03178f49
+      note: collected_by=extraction:enrollment; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) Corbus announced last patient last visit in the CANYON-1 study of CRB-913 for the treatment of obesity.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity | event_date=2026-08-05 published=2026-08-05 | id=fact_07edc4382604d317238d
+      note: collected_by=extraction:programme_code; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) CANYON-1 is a Phase 1b, 16-week, double-blind, placebo-controlled, dose-ranging study in 240 obese, non-diabetic participants, with a placebo cohort and three CRB-913 cohorts at 20 mg, 40 mg and 60 mg dosed orally once daily.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity | event_date=2026-08-05 published=2026-08-05 | id=fact_a6dd307290ccdadc06c3
+      note: collected_by=extraction:trial_design; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/TIER_2/conf 0.45) Corbus announced last patient first visit in the CANYON-1 Phase 1b dose-range finding study of CRB-913 for the treatment of obesity, with study completion expected in summer 2026.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/464/corbus-pharmaceuticals-announces-last-patient-first-visit-in-canyon-1-study-of-crb-913-for-the-treatment-for-obesity | event_date=2026-04-14 published=2026-04-14 | id=fact_baec20efa690764463b6
+      note: collected_by=extraction:programme_code; company statement; no independent confirmation found
+[?] (CLINICAL/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) CRB-913 is described as a highly peripherally restricted oral small molecule CB1 inverse agonist, and yielded 15 times lower brain penetration than monlunabant in mice.
+      source: https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_db76d64dacf4b91e25ee
+      note: collected_by=extraction:programme_code
+[?] (COMPETITION/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) CRB-913 is described as a highly peripherally restricted oral small molecule CB1 inverse agonist, and yielded 15 times lower brain penetration than monlunabant in mice.
+      source: https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_557d27069ec69727e805
+      note: collected_by=extraction:competitor
+[?] (COMPETITION/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) CANYON-1 is expected to provide clarifying insights as to its safety and efficacy and to allow contextualisation of the data in comparison to both oral GLP-1 agonists and the CB1 inverse agonist monlunabant.
+      source: https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_9765e83d050ba0ef4c6b
+      note: collected_by=extraction:competitor
+[ ] (SCIENCE/COMPANY_CLAIM/TIER_1/conf 0.60) The Corbus pipeline includes CRB-701, a next-generation antibody drug conjugate for the treatment of Nectin-4-expressing tumors, and CRB-913, an orally delivered highly peripherally restricted CB1 inverse agonist for the treatment of obesity.
+      source: https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb | event_date=2025-12-11 published=2025-12-11 | id=fact_fadb9c722043a979fc12
+      note: collected_by=extraction:pipeline_asset; company statement; no independent confirmation found
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) The study is on track for a topline data readout in September 2026.
+      source: https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity | event_date=2026-08-05 published=2026-08-05 | id=fact_30f9c06a6777eccf9be6
+      note: collected_by=extraction:readout_timing; company statement; no independent confirmation found
+[?] (SCIENCE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The first generation of experimental drugs in the CB1 class was abandoned because of potential neuropsychiatric adverse event risks.
+      source: https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss | event_date=2025-12-11 published=2025-12-11 | id=fact_f15e2073f0a9d6cd1a7c
+      note: collected_by=extraction:safety_class_history
+
+------------------------------------------------------------------------------
+6. Contradictions
+------------------------------------------------------------------------------
+No contradictions detected by the mechanical checks.
+Checks run: company_vs_regulator, company_vs_filing, analyst_vs_primary, guidance_change, tam_vs_population, basic_vs_fully_diluted
+
+------------------------------------------------------------------------------
+7. Bull Case
+------------------------------------------------------------------------------
+No verified evidence supports an undervaluation case. This is a finding, not a failure of imagination: the bull case would have to rest on unverified claims.
+
+(Built without sight of the bear case or the kill findings.)
+
+  No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+8. Bear Case
+------------------------------------------------------------------------------
+Most likely failure path: The regulator's position on the endpoint is unverified. The market may be pricing an approval path that has never been confirmed by the regulator. Disclosure of an adverse position would re-rate the equity immediately.
+
+(Built without sight of the bull case.)
+  - [HIGH] The regulator's position on the endpoint is unverified
+      The market may be pricing an approval path that has never been confirmed by the regulator. Disclosure of an adverse position would re-rate the equity immediately.
+
+------------------------------------------------------------------------------
+9. Regulatory
+------------------------------------------------------------------------------
+REGULATOR POSITION ON PRIMARY ENDPOINT: UNKNOWN
+
+What the regulator has agreed:
+  (nothing found)
+
+What the regulator has NOT agreed / adverse findings:
+  (nothing found)
+
+Unresolved:
+  ? No evidence found stating whether the regulator accepts the primary endpoint as adequate to establish effectiveness
+
+Company characterizations (NOT regulator statements):
+  ~ Company describes the interaction as ['favorable'] [fact_e6c516ac4168042091d9] -- characterization only, not a regulator statement
+  ~ Company describes the interaction as ['on track'] [fact_c1bf39e66c9058fcd0d4] -- characterization only, not a regulator statement
+
+------------------------------------------------------------------------------
+10. Capital Structure / Dilution
+------------------------------------------------------------------------------
+As of: 2026-06-01
+  basic shares            : UNKNOWN
+  fully diluted shares    : UNKNOWN
+  dilution overhang       : None%
+  components:
+      basic_shares          : UNKNOWN
+      prefunded_warrants    : UNKNOWN
+      public_warrants       : UNKNOWN
+      options               : UNKNOWN
+      rsus                  : UNKNOWN
+      preferred             : UNKNOWN
+      convertible_debt      : UNKNOWN
+  cash                    : UNKNOWN
+  debt                    : UNKNOWN
+  implied quarterly burn  : UNKNOWN
+  runway (months)         : None
+  ATM capacity            : UNKNOWN
+  shelf effective         : False
+  going concern doubt     : False
+  listing compliance issue: False
+
+  INCOMPLETE: the following dilution components were not found, so the fully diluted figure is a FLOOR: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+
+------------------------------------------------------------------------------
+11. Science / Technology
+------------------------------------------------------------------------------
+Mode biotech. Primary endpoint type: UNKNOWN; design: not randomized, masked, n=UNKNOWN; design quality 3.5/10.
+
+  phase                 : 1a
+  randomized            : False
+  masked                : True
+  enrollment            : None
+  endpoint_type         : UNKNOWN
+  primary_endpoint      : UNKNOWN
+  surrogate_validation  : UNKNOWN
+  design_quality_score  : 3.5
+  - not randomized (or randomization not evidenced)
+  - primary endpoint type could not be determined
+  - enrollment unknown
+
+------------------------------------------------------------------------------
+12. Competition
+------------------------------------------------------------------------------
+Competitors identified: 0
+
+  TAM: UNKNOWN
+  SAM: UNKNOWN (units depend on the source; see notes)
+  SOM: UNKNOWN
+  note: SOM is UNKNOWN: obtainable share requires competitor share, distribution and payer evidence that is not present.
+  comparison dimensions with no evidence: product, pricing, sales, approval_status, market_share, cash, valuation, partnership, distribution, technical_superiority
+
+------------------------------------------------------------------------------
+13. Valuation
+------------------------------------------------------------------------------
+  price                    : UNKNOWN
+  basic market cap         : UNKNOWN
+  fully diluted market cap : UNKNOWN
+  enterprise value         : UNKNOWN
+  cash-adjusted EV         : UNKNOWN
+
+What each multiple REQUIRES (not what it would be nice to have):
+  assumption: Cash unknown; enterprise value treats cash as zero, overstating EV.
+  assumption: Debt unknown; enterprise value treats debt as zero, understating EV.
+  unknown inputs: price, basic_shares, fully_diluted_shares, cash, debt, market_cap (price or share count missing)
+
+------------------------------------------------------------------------------
+14. Catalysts (JST)
+------------------------------------------------------------------------------
+Timezone: Asia/Tokyo (JST)   Today: 2026-09-06
+No dated forward catalyst found in the evidence.
+
+------------------------------------------------------------------------------
+15. Scenarios
+------------------------------------------------------------------------------
+
+  DISASTER (VERY_LOW_CONFIDENCE)
+    probability   : 10% - 20%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 0-12 months
+    requires      : No further financing available on any terms, or a programme-ending regulatory or clinical outcome
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BEAR (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 6-18 months
+    requires      : Dilutive financing before the catalyst, or a disappointing readout
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BASE (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-24 months
+    requires      : The programme continues, financing occurs on ordinary terms, and no new disqualifying fact emerges
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BULL (VERY_LOW_CONFIDENCE)
+    probability   : 6% - 21%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-36 months
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    fails if      : The regulator's position on the endpoint is unverified
+
+  EXTREME_BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 4%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 3-7 years
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Approval, launch, and capture of a substantial share of the obtainable market
+    fails if      : The regulator's position on the endpoint is unverified
+
+------------------------------------------------------------------------------
+16. Scores
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE (read this first): 0.0 / 10
+
+There is deliberately NO overall score. A single number would let a large
+upside estimate outvote a disqualifying fact, which is the failure mode
+this system exists to prevent.
+
+  dimension                     score   conf   note
+  evidence_quality                0.0   0.0   Mirrors the evidence confidence breakdown.
+  management_quality              5.0   0.0   Neutral by default: management quality was not independently assessed.
+  science_technology_quality      3.5   0.0   From checkable design/technology attributes.
+  clinical_quality                3.5   0.0   From checkable design/technology attributes.
+  regulatory_quality              4.0   0.0   Regulator position on the primary endpoint: UNKNOWN.
+  financial_strength              3.0   0.0   Runway unknown; scored low because it is unverified.
+  capital_structure_quality       3.0   0.0   Dilution overhang could not be computed.
+  competitive_moat                4.0   0.0   0 peer(s) identified, 0 further advanced.
+  tam_quality                     3.0   0.0   TAM absent.
+  sam_som_quality                 2.0   0.0   SOM is UNKNOWN: obtainable share is not established.
+  growth_quality                  3.0   0.0   No verified revenue growth series in evidence.
+  valuation                       2.0   0.0   Fully diluted market cap could not be computed.
+  catalyst_strength               3.0   0.0   0 dated forward catalyst(s).
+  catalyst_timing                 4.0   0.0   Nothing within three months.
+  market_pricing                  5.0   0.0   UNKNOWN: whether the market has already discounted the catalyst is not in evidence.
+  flow_microstructure             0.2   0.0   16 microstructure field(s) unknown.
+  immediate_buy                   3.7   0.0   Regulatory position, balance sheet and catalyst timing.
+  explosive_potential             5.0   0.0   Capacity for a violent move given size, catalyst proximity and positioning. This is NOT a statement that the move will be upward, and it is not capped by the kill gate.
+  long_term_multibagger           3.3   0.0   Mean of moat, obtainable market and regulatory position.
+  downside_risk                   5.0   0.0   Higher is worse. Worst kill level K2; 0 category/categories at K3 or above.
+  risk_reward                     5.0   0.0   Upside capacity against downside severity.
+  time_efficiency                 3.5   0.0   How soon the thesis is testable.
+
+------------------------------------------------------------------------------
+17. Immediate Action
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10   (shown before the action)
+ACTION: WAIT_FOR_EVENT
+This action is provisional: the run is marked INCOMPLETE_RESEARCH.
+
+------------------------------------------------------------------------------
+18. What Changed Since Previous Run
+------------------------------------------------------------------------------
+Thesis version: v1
+
+WHAT_CHANGED:
+  - First recorded thesis for this ticker.
+
+WHY_CHANGED:
+  - No prior run to compare against.
+
+NEW_FACT: 15 new fact id(s)
+REMOVED_ASSUMPTION: 0 fact id(s) no longer present
+
+------------------------------------------------------------------------------
+19. Unresolved Questions
+------------------------------------------------------------------------------
+BLOCKING -- these prevent a confident conclusion:
+  [!] No evidence was obtained for: registration / prospectus (S-1, S-3, 424B)
+      why: This is a required collection target. Absence of evidence here is an unexamined area, not a clean result.  (raised by fact_collector)
+  [!] No evidence was obtained for: financing, warrants, convertibles, ATM
+      why: This is a required collection target. Absence of evidence here is an unexamined area, not a clean result.  (raised by fact_collector)
+  [!] No evidence was obtained for: cash, debt, share count, fully diluted securities
+      why: This is a required collection target. Absence of evidence here is an unexamined area, not a clean result.  (raised by fact_collector)
+  [!] Has the regulator agreed that the primary endpoint is adequate to establish effectiveness for the intended indication?
+      why: This single question has more power to invalidate a clinical-stage thesis than every designation, DMC continuation and analyst target combined. Absence of evidence here is not a favourable answer.  (raised by regulatory)
+  [!] Fully diluted share count is incomplete; missing components: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+      why: Every per-share and market-cap figure below is understated by an unknown amount until these are obtained.  (raised by capital_structure)
+  [!] The following kill categories were never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL
+      why: K0 for an unsearched category means 'not examined'. Treating it as 'no problem found' is the failure mode this system is built to prevent.  (raised by kill_agent)
+  [!] Current share price is not in evidence
+      why: No market capitalization can be computed without it.  (raised by valuation)
+
+Other open questions:
+  ? No evidence was obtained for: annual report (10-K)  (raised by fact_collector)
+  ? No evidence was obtained for: quarterly report (10-Q)  (raised by fact_collector)
+  ? No evidence was obtained for: current reports (8-K)  (raised by fact_collector)
+  ? No evidence was obtained for: proxy statement (DEF 14A)  (raised by fact_collector)
+  ? No evidence was obtained for: beneficial ownership (13D/13G)  (raised by fact_collector)
+  ? No evidence was obtained for: insider transactions (Form 4)  (raised by fact_collector)
+  ? No evidence was obtained for: government contracts  (raised by fact_collector)
+  ? No evidence was obtained for: company IR materials  (raised by fact_collector)
+  ? No evidence was obtained for: earnings call transcript  (raised by fact_collector)
+  ? No evidence was obtained for: management  (raised by fact_collector)
+  ? No evidence was obtained for: market size  (raised by fact_collector)
+  ? No evidence was obtained for: customer concentration / backlog  (raised by fact_collector)
+  ? What was discussed and decided at the most recent Type A/B/C meeting?  (raised by regulatory)
+  ? Is there a Special Protocol Assessment, and does it remain in force?  (raised by regulatory)
+  ? Has the programme received a Complete Response Letter?  (raised by regulatory)
+  ? Are there open CMC or manufacturing issues?  (raised by regulatory)
+  ? What is the pre-specified statistical power and assumed effect size?  (raised by science)
+  ? What is the comparator arm and the current standard of care?  (raised by science)
+  ? What competitor clinical data exist in the same indication?  (raised by science)
+  ? What share of the serviceable market is realistically obtainable?  (raised by competitive)
+  ? Only 0 competitor(s) identified; at least 3 are required for a usable comparison  (raised by competitive)
+  ? No comparative evidence on: product  (raised by competitive)
+  ? No comparative evidence on: pricing  (raised by competitive)
+  ? No comparative evidence on: sales  (raised by competitive)
+  ? No comparative evidence on: approval_status  (raised by competitive)
+  ? No comparative evidence on: market_share  (raised by competitive)
+  ? No comparative evidence on: cash  (raised by competitive)
+  ? No comparative evidence on: valuation  (raised by competitive)
+  ? No comparative evidence on: partnership  (raised by competitive)
+  ? No comparative evidence on: distribution  (raised by competitive)
+  ? No comparative evidence on: technical_superiority  (raised by competitive)
+  ? Microstructure fields with no data: short_interest, short_percent_float, days_to_cover, borrow_availability, borrow_fee, options_open_interest, gamma_exposure, average_volume, relative_volume, vwap, rsi, support, resistance, institutional_ownership, insider_ownership, etf_index_exposure  (raised by microstructure)
+  ? What verifiable evidence would support an undervaluation case?  (raised by bull_agent)
+
+------------------------------------------------------------------------------
+20. Sources
+------------------------------------------------------------------------------
+  [TIER_1] Corbus pipeline: CRB-701 and CRB-913
+      https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb
+      date used: 2025-12-11 (event_date) | published=2025-12-11 event=2025-12-11 filed=UNKNOWN
+  [TIER_2] Corbus Pharmaceuticals Reports Results from Phase 1a Study of Oral CB1 Inverse Agonist CRB-913 for the Treatment for Obesity Demonstrating Favorable Safety Profile and Emerging Evidence of Weight Loss
+      https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      date used: 2025-12-11 (event_date) | published=2025-12-11 event=2025-12-11 filed=UNKNOWN
+  [TIER_2] Corbus Pharmaceuticals Announces Last Patient First Visit in CANYON-1 Study of CRB-913 for the Treatment for Obesity
+      https://ir.corbuspharma.com/news-events/press-releases/detail/464/corbus-pharmaceuticals-announces-last-patient-first-visit-in-canyon-1-study-of-crb-913-for-the-treatment-for-obesity
+      date used: 2026-04-14 (event_date) | published=2026-04-14 event=2026-04-14 filed=UNKNOWN
+  [TIER_2] Corbus Pharmaceuticals Announces Last Patient Last Visit in CANYON-1 Study of CRB-913 for the Treatment of Obesity
+      https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity
+      date used: 2026-08-05 (event_date) | published=2026-08-05 event=2026-08-05 filed=UNKNOWN
+  [TIER_2] Corbus Pharmaceuticals Holdings, Inc. - Form 8-K exhibit 99.1 (FY2026)
+      https://www.sec.gov/Archives/edgar/data/1595097/000119312526153923/crbp-ex99_1.htm
+      date used: 2026-06-01 (event_date) | published=2026-06-01 event=2026-06-01 filed=UNKNOWN
+  [UNKNOWN] CB1 class history and CRB-913 brain penetration versus monlunabant
+      https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      date used: 2025-12-11 (event_date) | published=2025-12-11 event=2025-12-11 filed=UNKNOWN
+
+Dates: 'date used' is the event or effective date wherever one exists. A publication date is never treated as the date the event occurred.
+
+==============================================================================
+APPENDIX -- A. RESEARCH PROVENANCE -- how this evidence was obtained
+==============================================================================
+CAPTURED CORPUS REPLAY
+This run replayed 6 document(s) about a real issuer, captured at
+2026-09-06T06:10:00+00:00 via anthropic_websearch. The URLs are real and the
+documents are real. They were NOT fetched live at run time, so anything
+published after the capture time is absent from this analysis by
+construction.
+
+Source provenance:
+  CAPTURED     6
+
+6 source(s) are search-engine summaries rather than the document itself. A
+summary about a filing is not the filing: quotations drawn from it have not
+been checked against the original.
+
+==============================================================================
+APPENDIX -- B. SEARCH COMPLETENESS GATE
+==============================================================================
+6 of 6 required research domains examined.
+
+  domain                 status      queries  docs  paths
+  REGULATORY             [searched]        4    16  CORPUS
+  CAPITAL_STRUCTURE      [searched]        6    30  CORPUS
+  SCIENCE_TECHNOLOGY     [searched]        4    23  CORPUS
+  COMPETITION            [searched]        3    15  CORPUS
+  CATALYST               [searched]        1     5  CORPUS
+  CONTRADICTION          [searched]        4    20  CORPUS
+
+All required domains were examined; a verdict is permitted.
+
+==============================================================================
+APPENDIX -- C. PRIMARY-SOURCE ESCALATION
+==============================================================================
+No material claim required escalation.
+
+==============================================================================
+APPENDIX -- D. CITATION TRACEABILITY INDEX
+==============================================================================
+Every material claim above resolves through this chain: claim -> fact_id -> source_id -> URL -> publication date -> event date.
+
+  fact_7be9a0f85e5e2877a207
+      claim    : The Corbus pipeline includes CRB-701, a next-generation antibody drug conjugate for the treatment of Nectin-4-expressing tumors, and CRB-913, an orall
+      source   : crbp_pipeline_crb701
+      url      : https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb
+      published: 2025-12-11   event: 2025-12-11
+      tier     : TIER_1   class: VERIFIED_FACT   status: VERIFIED
+  fact_fadb9c722043a979fc12
+      claim    : The Corbus pipeline includes CRB-701, a next-generation antibody drug conjugate for the treatment of Nectin-4-expressing tumors, and CRB-913, an orall
+      source   : crbp_pipeline_crb701
+      url      : https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb
+      published: 2025-12-11   event: 2025-12-11
+      tier     : TIER_1   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_07edc4382604d317238d
+      claim    : Corbus announced last patient last visit in the CANYON-1 study of CRB-913 for the treatment of obesity.
+      source   : crbp_canyon1_lplv
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity
+      published: 2026-08-05   event: 2026-08-05
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_1bfa891a9d61b5f8ba04
+      claim    : Cash, runway and share count are therefore NOT in evidence for this ticker.
+      source   : crbp_8k_2026
+      url      : https://www.sec.gov/Archives/edgar/data/1595097/000119312526153923/crbp-ex99_1.htm
+      published: 2026-06-01   event: 2026-06-01
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_30f9c06a6777eccf9be6
+      claim    : The study is on track for a topline data readout in September 2026.
+      source   : crbp_canyon1_lplv
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity
+      published: 2026-08-05   event: 2026-08-05
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_37aaf8db08ff03178f49
+      claim    : The single ascending dose portion of the study enrolled 64 participants across 8 cohorts receiving ascending doses of CRB-913 up to a maximal dose of 
+      source   : crbp_phase1a_results
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_985d1a2c4e6e7888eea4
+      claim    : Corbus reported results from a double-blinded placebo-controlled single ascending dose and multiple ascending dose Phase 1a study of CRB-913, conducte
+      source   : crbp_phase1a_results
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_a6dd307290ccdadc06c3
+      claim    : CANYON-1 is a Phase 1b, 16-week, double-blind, placebo-controlled, dose-ranging study in 240 obese, non-diabetic participants, with a placebo cohort a
+      source   : crbp_canyon1_lplv
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity
+      published: 2026-08-05   event: 2026-08-05
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_baec20efa690764463b6
+      claim    : Corbus announced last patient first visit in the CANYON-1 Phase 1b dose-range finding study of CRB-913 for the treatment of obesity, with study comple
+      source   : crbp_canyon1_lpfv
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/464/corbus-pharmaceuticals-announces-last-patient-first-visit-in-canyon-1-study-of-crb-913-for-the-treatment-for-obesity
+      published: 2026-04-14   event: 2026-04-14
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_c1bf39e66c9058fcd0d4
+      claim    : The study is on track for a topline data readout in September 2026.
+      source   : crbp_canyon1_lplv
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity
+      published: 2026-08-05   event: 2026-08-05
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_e6c516ac4168042091d9
+      claim    : The company's headline describes a favorable safety profile and emerging evidence of weight loss.
+      source   : crbp_phase1a_results
+      url      : https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_557d27069ec69727e805
+      claim    : CRB-913 is described as a highly peripherally restricted oral small molecule CB1 inverse agonist, and yielded 15 times lower brain penetration than mo
+      source   : crbp_cb1_class_safety
+      url      : https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_9765e83d050ba0ef4c6b
+      claim    : CANYON-1 is expected to provide clarifying insights as to its safety and efficacy and to allow contextualisation of the data in comparison to both ora
+      source   : crbp_cb1_class_safety
+      url      : https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_db76d64dacf4b91e25ee
+      claim    : CRB-913 is described as a highly peripherally restricted oral small molecule CB1 inverse agonist, and yielded 15 times lower brain penetration than mo
+      source   : crbp_cb1_class_safety
+      url      : https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_f15e2073f0a9d6cd1a7c
+      claim    : The first generation of experimental drugs in the CB1 class was abandoned because of potential neuropsychiatric adverse event risks.
+      source   : crbp_cb1_class_safety
+      url      : https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss
+      published: 2025-12-11   event: 2025-12-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+
+==============================================================================
+APPENDIX -- E. ANALYSIS PROVENANCE AND COST
+==============================================================================
+No agent was model-backed in this run. Every analysis below came from the
+deterministic rule-based agents. This is stated plainly because a rule-based
+reading and a model reading are different things, and the reader is entitled
+to know which one produced the text.
+
+Evidence was chunked into 6 chunk(s) and each agent received only the chunks
+relevant to it, within a token budget. No agent read the whole corpus.

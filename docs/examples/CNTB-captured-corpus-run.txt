@@ -1,0 +1,554 @@
+==============================================================================
+INVESTMENT RESEARCH REPORT -- CNTB
+Company: Connect Biopharma Holdings Limited
+Run ID: 20260906T114657-61bf51   Mode: standard
+Generated (UTC): 2026-09-06T11:46:57+00:00
+==============================================================================
+
+******************************************************************************
+*** INCOMPLETE_RESEARCH ***
+One or more agents or collectors did not complete. This analysis is partial
+and must not be treated as a finished assessment.
+  - capital_structure: DEGRADED :: basic share count not found; market cap cannot be computed
+  - competitive: DEGRADED :: only 0 competitor(s) identified; requirement is at least 3 for a usable comparison
+  - microstructure: DEGRADED :: 17/17 microstructure fields have no data
+  - kill_agent: DEGRADED :: 7 mandatory kill queries were not executed (no search provider configured)
+  - valuation: DEGRADED :: fully diluted market cap unavailable; valuation is incomplete
+******************************************************************************
+
+------------------------------------------------------------------------------
+1. Verdict
+------------------------------------------------------------------------------
+Action: WAIT_FOR_EVENT
+Judged blind (identity withheld from the judge): True
+Worst kill level: K2
+Headline: Evidence confidence 0.0/10; worst kill level K2; regulator endpoint position UNKNOWN; action WAIT_FOR_EVENT.
+CAVEAT: INCOMPLETE RESEARCH: one or more agents or collectors failed. This is not a completed analysis.
+CAVEAT: Evidence confidence is low; the scores describe a possibility, not an established situation.
+CAVEAT: Some kill categories were never searched; their K0 means 'not examined'.
+
+Reasoning:
+  - Evidence confidence is 0.0/10, evaluated before any action label.
+  - Research is incomplete: parts of the mandatory evidence set were not obtained, so no buy-side action is available yet.
+  - No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+2. Evidence Confidence
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10
+
+This is reported before the scores and before the action, and it is a separate question from whether the upside is large.
+
+  facts in evidence set        : 14
+  Tier 1/2 primary sources     : 43%
+  decision-grade evidence      : 7%
+  independently corroborated   : 0%
+  company claims (uncorrob.)   : 79%
+  stale by event date          : 0%
+  blocking unknowns            : 5
+  kill categories not searched : 4
+
+Penalties applied:
+  - 79% of facts are company statements without independent confirmation
+  - 5 blocking unresolved question(s)
+  - 4 kill category/categories were never searched
+  - thin evidence set (14 facts)
+
+------------------------------------------------------------------------------
+3. Critical Red Flags
+------------------------------------------------------------------------------
+  [!] Kill categories never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL -- reported as unexamined, not clean
+
+------------------------------------------------------------------------------
+4. What Would Kill The Thesis
+------------------------------------------------------------------------------
+Stated before the bull case on purpose: these are the findings that would invalidate an investment thesis here.
+
+  - Evidence that the regulator does not accept the primary endpoint. This is currently unverified in either direction and would invalidate the thesis.
+  - Bear mechanism: The regulator's position on the endpoint is unverified
+
+Kill Agent findings:
+  [K2] REGULATORY_KILL: Regulator position on primary endpoint is unknown (weak sourcing)
+        No primary-source evidence of the regulator's view on endpoint acceptability was obtained. Treated as unexamined, not as clean.
+
+------------------------------------------------------------------------------
+5. Verified Facts
+------------------------------------------------------------------------------
+14 fact(s). Class and tier are shown for every one.
+
+[ ] (LIQUIDITY/COMPANY_CLAIM/TIER_2/conf 0.45) Cash runway is expected to extend for a period of at least one year from the date of the Q2 2026 earnings release, with current cash runway extending into the second half of 2027.
+      source: https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/ | event_date=2026-06-30 published=2026-08-11 | id=fact_e5f027fa24e228705577
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[ ] (LIQUIDITY/COMPANY_CLAIM/UNKNOWN/conf 0.00) Connect Biopharma reported a first quarter 2026 net loss of $19.4 million and ended the quarter with $46.0 million in cash, guiding runway into the second half of 2027.
+      source: https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html | event_date=2026-03-31 published=2026-05-12 | id=fact_b12f0b689122eee0e661
+      note: collected_by=extraction:runway; company statement; no independent confirmation found
+[V] (CLINICAL/VERIFIED_FACT/TIER_1/conf 0.80) NCT07705737 is a registry record for intravenous rademikibart in acute asthma and COPD exacerbation.
+      source: https://clinicaltrials.gov/study/NCT07705737 | event_date=2026-09-30 published=2026-01-15 | id=fact_292b4a0c336f359f8381
+      note: collected_by=extraction:nct_id
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/TIER_2/conf 0.45) A Form 8-K exhibit on SEC EDGAR relating to a private placement press release.
+      source: https://www.sec.gov/Archives/edgar/data/1835268/000183526826000006/exhibit993-pipepressrelease.htm | event_date=2026-03-31 published=2026-03-31 | id=fact_3895436e5c853f78ccf7
+      note: collected_by=extraction:financing; company statement; no independent confirmation found
+[ ] (CAPITAL_STRUCTURE/COMPANY_CLAIM/UNKNOWN/conf 0.00) A $20.2 million private placement financing closed on March 31, 2026.
+      source: https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html | event_date=2026-03-31 published=2026-05-12 | id=fact_3338b7ab4ee88724effe
+      note: collected_by=extraction:financing; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/UNKNOWN/conf 0.00) The independent Data Monitoring Committee overseeing the Phase 2 Seabreeze STAT asthma and COPD trials completed its review of the pre-specified interim analysis of efficacy with no recommendation for change in the sample size.
+      source: https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update | event_date=2026-08-11 published=2026-08-11 | id=fact_b75fa9c36b891b455130
+      note: collected_by=extraction:dmc; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/UNKNOWN/conf 0.00) The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and the change from baseline in FEV1 following treatment of a minimum of 50 patients in each study with at least 28 days of follow-up.
+      source: https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update | event_date=2026-08-11 published=2026-08-11 | id=fact_223dc5ac1811d35d92cb
+      note: collected_by=extraction:dmc; company statement; no independent confirmation found
+[ ] (CLINICAL/COMPANY_CLAIM/UNKNOWN/conf 0.00) The DMC also conducts a review of the safety data for both studies on a regular basis and indicated that it has no safety concerns.
+      source: https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update | event_date=2026-08-11 published=2026-08-11 | id=fact_0b407a31850430ce0cb5
+      note: collected_by=extraction:dmc; company statement; no independent confirmation found
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) Topline data from the Phase 2 Seabreeze STAT asthma and Seabreeze STAT COPD studies are expected in September 2026.
+      source: https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/ | event_date=2026-06-30 published=2026-08-11 | id=fact_506fc636f3a4b09af2d9
+      note: collected_by=extraction:readout_timing; company statement; no independent confirmation found
+[ ] (CATALYST/COMPANY_CLAIM/TIER_2/conf 0.45) The company's strategy centres on the acute exacerbation setting, and topline data from the asthma and COPD studies are expected to help determine a potential Phase 3 endpoint and sample size requirements.
+      source: https://www.globenewswire.com/news-release/2026/06/17/3313482/0/en/Connect-Biopharma-Announces-Completion-of-Enrollment-of-Phase-2-Seabreeze-STAT-Asthma-Study-Evaluating-Rademikibart-for-the-Treatment-of-Acute-Exacerbations-in-Asthma.html | event_date=2026-06-17 published=2026-06-17 | id=fact_78301f2c987b8af1a580
+      note: collected_by=extraction:readout_timing; company statement; no independent confirmation found
+[ ] (COMMERCIAL/COMPANY_CLAIM/TIER_2/conf 0.45) Potential China milestone payments and royalties could provide further liquidity if rademikibart is approved.
+      source: https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/ | event_date=2026-06-30 published=2026-08-11 | id=fact_0f36bacde69738b4448a
+      note: collected_by=extraction:milestone_payment; company statement; no independent confirmation found
+[ ] (FINANCIAL/COMPANY_CLAIM/UNKNOWN/conf 0.00) Connect Biopharma reported a first quarter 2026 net loss of $19.4 million and ended the quarter with $46.0 million in cash, guiding runway into the second half of 2027.
+      source: https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html | event_date=2026-03-31 published=2026-05-12 | id=fact_19affec94895bb4b09ac
+      note: collected_by=extraction:net_loss; company statement; no independent confirmation found
+[?] (MARKET_SIZE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and the change from baseline in FEV1 following treatment of a minimum of 50 patients in each study with at least 28 days of follow-up.
+      source: https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update | event_date=2026-08-11 published=2026-08-11 | id=fact_1c399b1584c47eae19da
+      note: collected_by=extraction:market_size
+[?] (SCIENCE/UNVERIFIED_CLAIM/UNKNOWN/conf 0.05) To date there have been no treatment-related serious adverse events or severe adverse events, and no discontinuations due to an adverse event in either study.
+      source: https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update | event_date=2026-08-11 published=2026-08-11 | id=fact_8e94ecfbd9a9fa23c9b3
+      note: collected_by=extraction:safety_class_history
+
+------------------------------------------------------------------------------
+6. Contradictions
+------------------------------------------------------------------------------
+No contradictions detected by the mechanical checks.
+Checks run: company_vs_regulator, company_vs_filing, analyst_vs_primary, guidance_change, tam_vs_population, basic_vs_fully_diluted
+
+------------------------------------------------------------------------------
+7. Bull Case
+------------------------------------------------------------------------------
+No verified evidence supports an undervaluation case. This is a finding, not a failure of imagination: the bull case would have to rest on unverified claims.
+
+(Built without sight of the bear case or the kill findings.)
+
+  No evidence-backed undervaluation argument could be constructed.
+
+------------------------------------------------------------------------------
+8. Bear Case
+------------------------------------------------------------------------------
+Most likely failure path: The regulator's position on the endpoint is unverified. The market may be pricing an approval path that has never been confirmed by the regulator. Disclosure of an adverse position would re-rate the equity immediately.
+
+(Built without sight of the bull case.)
+  - [HIGH] The regulator's position on the endpoint is unverified
+      The market may be pricing an approval path that has never been confirmed by the regulator. Disclosure of an adverse position would re-rate the equity immediately.
+
+------------------------------------------------------------------------------
+9. Regulatory
+------------------------------------------------------------------------------
+REGULATOR POSITION ON PRIMARY ENDPOINT: UNKNOWN
+
+What the regulator has agreed:
+  (nothing found)
+
+What the regulator has NOT agreed / adverse findings:
+  (nothing found)
+
+Unresolved:
+  ? No evidence found stating whether the regulator accepts the primary endpoint as adequate to establish effectiveness
+
+------------------------------------------------------------------------------
+10. Capital Structure / Dilution
+------------------------------------------------------------------------------
+As of: 2026-06-30
+  basic shares            : UNKNOWN
+  fully diluted shares    : UNKNOWN
+  dilution overhang       : None%
+  components:
+      basic_shares          : UNKNOWN
+      prefunded_warrants    : UNKNOWN
+      public_warrants       : UNKNOWN
+      options               : UNKNOWN
+      rsus                  : UNKNOWN
+      preferred             : UNKNOWN
+      convertible_debt      : UNKNOWN
+  cash                    : UNKNOWN
+  debt                    : UNKNOWN
+  implied quarterly burn  : UNKNOWN
+  runway (months)         : None
+  ATM capacity            : UNKNOWN
+  shelf effective         : False
+  going concern doubt     : False
+  listing compliance issue: False
+
+  INCOMPLETE: the following dilution components were not found, so the fully diluted figure is a FLOOR: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+
+------------------------------------------------------------------------------
+11. Science / Technology
+------------------------------------------------------------------------------
+Mode biotech. Primary endpoint type: UNKNOWN; design: not randomized, open-label/unknown masking, n=UNKNOWN; design quality 1.0/10.
+
+  phase                 : 2
+  randomized            : False
+  masked                : False
+  enrollment            : None
+  endpoint_type         : UNKNOWN
+  primary_endpoint      : UNKNOWN
+  surrogate_validation  : UNKNOWN
+  design_quality_score  : 1.0
+  - not randomized (or randomization not evidenced)
+  - not double-blinded (or masking not evidenced)
+  - primary endpoint type could not be determined
+  - enrollment unknown
+
+------------------------------------------------------------------------------
+12. Competition
+------------------------------------------------------------------------------
+Competitors identified: 0
+
+  TAM: UNKNOWN
+  SAM: 28 (units depend on the source; see notes)
+  SOM: UNKNOWN
+  note: Serviceable population evidence: The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and the change from baseline in FEV1 following treatment of a minimum of 50 patients in each study with at least 28 days of follow-up. (tier UNKNOWN, independent=True)
+  note: SOM is UNKNOWN: obtainable share requires competitor share, distribution and payer evidence that is not present.
+  comparison dimensions with no evidence: product, clinical_efficacy, safety, pricing, sales, market_share, cash, valuation, partnership, distribution, technical_superiority
+
+------------------------------------------------------------------------------
+13. Valuation
+------------------------------------------------------------------------------
+  price                    : UNKNOWN
+  basic market cap         : UNKNOWN
+  fully diluted market cap : UNKNOWN
+  enterprise value         : UNKNOWN
+  cash-adjusted EV         : UNKNOWN
+
+What each multiple REQUIRES (not what it would be nice to have):
+  assumption: Cash unknown; enterprise value treats cash as zero, overstating EV.
+  assumption: Debt unknown; enterprise value treats debt as zero, understating EV.
+  unknown inputs: price, basic_shares, fully_diluted_shares, cash, debt, market_cap (price or share count missing)
+
+------------------------------------------------------------------------------
+14. Catalysts (JST)
+------------------------------------------------------------------------------
+Timezone: Asia/Tokyo (JST)   Today: 2026-09-06
+
+  [T2] 2026-09-30 (date confidence HIGH)
+      event   : NCT07705737 is a registry record for intravenous rademikibart in acute asthma and COPD exacerbation.
+      bull    : UNKNOWN
+      bear    : UNKNOWN
+      priced? : UNKNOWN
+      source  : Rademikibart IV for Acute Asthma and COPD Exacerbation (NCT07705737) (TIER_1)
+
+------------------------------------------------------------------------------
+15. Scenarios
+------------------------------------------------------------------------------
+
+  DISASTER (VERY_LOW_CONFIDENCE)
+    probability   : 10% - 20%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 0-12 months
+    requires      : No further financing available on any terms, or a programme-ending regulatory or clinical outcome
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BEAR (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 6-18 months
+    requires      : Dilutive financing before the catalyst, or a disappointing readout
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BASE (VERY_LOW_CONFIDENCE)
+    probability   : 25% - 40%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-24 months
+    requires      : The programme continues, financing occurs on ordinary terms, and no new disqualifying fact emerges
+    fails if      : The regulator's position on the endpoint is unverified
+
+  BULL (VERY_LOW_CONFIDENCE)
+    probability   : 6% - 21%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 12-36 months
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    fails if      : The regulator's position on the endpoint is unverified
+
+  EXTREME_BULL (VERY_LOW_CONFIDENCE)
+    probability   : 0% - 4%
+    market cap    : UNKNOWN
+    FD market cap : UNKNOWN
+    horizon       : 3-7 years
+    requires      : The regulator accepts the primary endpoint as adequate to establish effectiveness -- which is NOT established in the current evidence
+    requires      : Approval, launch, and capture of a substantial share of the obtainable market
+    fails if      : The regulator's position on the endpoint is unverified
+
+------------------------------------------------------------------------------
+16. Scores
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE (read this first): 0.0 / 10
+
+There is deliberately NO overall score. A single number would let a large
+upside estimate outvote a disqualifying fact, which is the failure mode
+this system exists to prevent.
+
+  dimension                     score   conf   note
+  evidence_quality                0.0   0.0   Mirrors the evidence confidence breakdown.
+  management_quality              5.0   0.0   Neutral by default: management quality was not independently assessed.
+  science_technology_quality      1.0   0.0   From checkable design/technology attributes.
+  clinical_quality                1.0   0.0   From checkable design/technology attributes.
+  regulatory_quality              4.0   0.0   Regulator position on the primary endpoint: UNKNOWN.
+  financial_strength              3.0   0.0   Runway unknown; scored low because it is unverified.
+  capital_structure_quality       3.0   0.0   Dilution overhang could not be computed.
+  competitive_moat                4.0   0.0   0 peer(s) identified, 0 further advanced.
+  tam_quality                     3.0   0.0   TAM absent.
+  sam_som_quality                 2.0   0.0   SOM is UNKNOWN: obtainable share is not established.
+  growth_quality                  3.0   0.0   No verified revenue growth series in evidence.
+  valuation                       2.0   0.0   Fully diluted market cap could not be computed.
+  catalyst_strength               4.5   0.0   1 dated forward catalyst(s).
+  catalyst_timing                 7.0   0.0   A catalyst falls inside three months.
+  market_pricing                  5.0   0.0   UNKNOWN: whether the market has already discounted the catalyst is not in evidence.
+  flow_microstructure             0.0   0.0   17 microstructure field(s) unknown.
+  immediate_buy                   4.7   0.0   Regulatory position, balance sheet and catalyst timing.
+  explosive_potential             6.5   0.0   Capacity for a violent move given size, catalyst proximity and positioning. This is NOT a statement that the move will be upward, and it is not capped by the kill gate.
+  long_term_multibagger           3.3   0.0   Mean of moat, obtainable market and regulatory position.
+  downside_risk                   5.0   0.0   Higher is worse. Worst kill level K2; 0 category/categories at K3 or above.
+  risk_reward                     5.8   0.0   Upside capacity against downside severity.
+  time_efficiency                 6.0   0.0   How soon the thesis is testable.
+
+------------------------------------------------------------------------------
+17. Immediate Action
+------------------------------------------------------------------------------
+EVIDENCE CONFIDENCE: 0.0 / 10   (shown before the action)
+ACTION: WAIT_FOR_EVENT
+This action is provisional: the run is marked INCOMPLETE_RESEARCH.
+
+------------------------------------------------------------------------------
+18. What Changed Since Previous Run
+------------------------------------------------------------------------------
+Thesis version: v1
+
+WHAT_CHANGED:
+  - First recorded thesis for this ticker.
+
+WHY_CHANGED:
+  - No prior run to compare against.
+
+NEW_FACT: 14 new fact id(s)
+REMOVED_ASSUMPTION: 0 fact id(s) no longer present
+
+------------------------------------------------------------------------------
+19. Unresolved Questions
+------------------------------------------------------------------------------
+BLOCKING -- these prevent a confident conclusion:
+  [!] No evidence was obtained for: FDA documents
+      why: This is a required collection target. Absence of evidence here is an unexamined area, not a clean result.  (raised by fact_collector)
+  [!] Has the regulator agreed that the primary endpoint is adequate to establish effectiveness for the intended indication?
+      why: This single question has more power to invalidate a clinical-stage thesis than every designation, DMC continuation and analyst target combined. Absence of evidence here is not a favourable answer.  (raised by regulatory)
+  [!] Fully diluted share count is incomplete; missing components: pre-funded warrants, public/private warrants, stock options, RSUs, preferred stock (as-converted), convertible debt (as-converted)
+      why: Every per-share and market-cap figure below is understated by an unknown amount until these are obtained.  (raised by capital_structure)
+  [!] The following kill categories were never searched: CAPITAL_KILL, CLINICAL_KILL, GOVERNANCE_KILL, REGULATORY_KILL
+      why: K0 for an unsearched category means 'not examined'. Treating it as 'no problem found' is the failure mode this system is built to prevent.  (raised by kill_agent)
+  [!] Current share price is not in evidence
+      why: No market capitalization can be computed without it.  (raised by valuation)
+
+Other open questions:
+  ? No evidence was obtained for: current reports (8-K)  (raised by fact_collector)
+  ? No evidence was obtained for: proxy statement (DEF 14A)  (raised by fact_collector)
+  ? No evidence was obtained for: beneficial ownership (13D/13G)  (raised by fact_collector)
+  ? No evidence was obtained for: insider transactions (Form 4)  (raised by fact_collector)
+  ? No evidence was obtained for: government contracts  (raised by fact_collector)
+  ? No evidence was obtained for: company IR materials  (raised by fact_collector)
+  ? No evidence was obtained for: management  (raised by fact_collector)
+  ? No evidence was obtained for: competition  (raised by fact_collector)
+  ? What was discussed and decided at the most recent Type A/B/C meeting?  (raised by regulatory)
+  ? Is there a Special Protocol Assessment, and does it remain in force?  (raised by regulatory)
+  ? Has the programme received a Complete Response Letter?  (raised by regulatory)
+  ? Are there open CMC or manufacturing issues?  (raised by regulatory)
+  ? What is the pre-specified statistical power and assumed effect size?  (raised by science)
+  ? What is the comparator arm and the current standard of care?  (raised by science)
+  ? What competitor clinical data exist in the same indication?  (raised by science)
+  ? What share of the serviceable market is realistically obtainable?  (raised by competitive)
+  ? Only 0 competitor(s) identified; at least 3 are required for a usable comparison  (raised by competitive)
+  ? No comparative evidence on: product  (raised by competitive)
+  ? No comparative evidence on: clinical_efficacy  (raised by competitive)
+  ? No comparative evidence on: safety  (raised by competitive)
+  ? No comparative evidence on: pricing  (raised by competitive)
+  ? No comparative evidence on: sales  (raised by competitive)
+  ? No comparative evidence on: market_share  (raised by competitive)
+  ? No comparative evidence on: cash  (raised by competitive)
+  ? No comparative evidence on: valuation  (raised by competitive)
+  ? No comparative evidence on: partnership  (raised by competitive)
+  ? No comparative evidence on: distribution  (raised by competitive)
+  ? No comparative evidence on: technical_superiority  (raised by competitive)
+  ? Microstructure fields with no data: short_interest, short_percent_float, days_to_cover, borrow_availability, borrow_fee, options_open_interest, gamma_exposure, average_volume, relative_volume, vwap, atr, rsi, support, resistance, institutional_ownership, insider_ownership, etf_index_exposure  (raised by microstructure)
+  ? What verifiable evidence would support an undervaluation case?  (raised by bull_agent)
+
+------------------------------------------------------------------------------
+20. Sources
+------------------------------------------------------------------------------
+  [TIER_1] Rademikibart IV for Acute Asthma and COPD Exacerbation (NCT07705737)
+      https://clinicaltrials.gov/study/NCT07705737
+      date used: 2026-09-30 (event_date) | published=2026-01-15 event=2026-09-30 filed=UNKNOWN
+  [TIER_2] Connect Biopharma Initiates Phase 2 Seabreeze STAT COPD Study Evaluating Rademikibart for the Treatment of Acute Exacerbations in COPD
+      https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-initiates-phase-2-seabreeze-stat-copd-study
+      date used: 2025-11-10 (event_date) | published=2025-11-10 event=2025-11-10 filed=UNKNOWN
+  [TIER_2] Connect Biopharma Reports Second Quarter 2026 Financial Results and Provides Business Update
+      https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/
+      date used: 2026-06-30 (event_date) | published=2026-08-11 event=2026-06-30 filed=UNKNOWN
+  [TIER_2] Connect Biopharma Announces Completion of Enrollment of Phase 2 Seabreeze STAT Asthma Study Evaluating Rademikibart for the Treatment of Acute Exacerbations in Asthma
+      https://www.globenewswire.com/news-release/2026/06/17/3313482/0/en/Connect-Biopharma-Announces-Completion-of-Enrollment-of-Phase-2-Seabreeze-STAT-Asthma-Study-Evaluating-Rademikibart-for-the-Treatment-of-Acute-Exacerbations-in-Asthma.html
+      date used: 2026-06-17 (event_date) | published=2026-06-17 event=2026-06-17 filed=UNKNOWN
+  [TIER_2] Connect Biopharma Holdings Ltd - Form 8-K PIPE press release exhibit
+      https://www.sec.gov/Archives/edgar/data/1835268/000183526826000006/exhibit993-pipepressrelease.htm
+      date used: 2026-03-31 (event_date) | published=2026-03-31 event=2026-03-31 filed=UNKNOWN
+  [UNKNOWN] Connect Biopharma DMC interim analysis of the Seabreeze STAT studies
+      https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      date used: 2026-08-11 (event_date) | published=2026-08-11 event=2026-08-11 filed=UNKNOWN
+  [UNKNOWN] Connect Biopharma Q1 loss $19.4M, cash $46M
+      https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html
+      date used: 2026-03-31 (event_date) | published=2026-05-12 event=2026-03-31 filed=UNKNOWN
+  [UNKNOWN] Rademikibart drives Connect Biopharma annual report strategy
+      https://www.stocktitan.net/sec-filings/CNTB/10-k-connect-biopharma-holdings-ltd-files-annual-report-658e1cb8b49c.html
+      date used: 2025-12-31 (event_date) | published=2026-03-10 event=2025-12-31 filed=UNKNOWN
+
+Dates: 'date used' is the event or effective date wherever one exists. A publication date is never treated as the date the event occurred.
+
+==============================================================================
+APPENDIX -- A. RESEARCH PROVENANCE -- how this evidence was obtained
+==============================================================================
+CAPTURED CORPUS REPLAY
+This run replayed 8 document(s) about a real issuer, captured at
+2026-09-06T06:05:00+00:00 via anthropic_websearch. The URLs are real and the
+documents are real. They were NOT fetched live at run time, so anything
+published after the capture time is absent from this analysis by
+construction.
+
+Source provenance:
+  CAPTURED     8
+
+8 source(s) are search-engine summaries rather than the document itself. A
+summary about a filing is not the filing: quotations drawn from it have not
+been checked against the original.
+
+==============================================================================
+APPENDIX -- B. SEARCH COMPLETENESS GATE
+==============================================================================
+6 of 6 required research domains examined.
+
+  domain                 status      queries  docs  paths
+  REGULATORY             [searched]        4    19  CORPUS
+  CAPITAL_STRUCTURE      [searched]        6    36  CORPUS
+  SCIENCE_TECHNOLOGY     [searched]        4    24  CORPUS
+  COMPETITION            [searched]        3    18  CORPUS
+  CATALYST               [searched]        1     6  CORPUS
+  CONTRADICTION          [searched]        4    24  CORPUS
+
+All required domains were examined; a verdict is permitted.
+
+==============================================================================
+APPENDIX -- C. PRIMARY-SOURCE ESCALATION
+==============================================================================
+No material claim required escalation.
+
+==============================================================================
+APPENDIX -- D. CITATION TRACEABILITY INDEX
+==============================================================================
+Every material claim above resolves through this chain: claim -> fact_id -> source_id -> URL -> publication date -> event date.
+
+  fact_292b4a0c336f359f8381
+      claim    : NCT07705737 is a registry record for intravenous rademikibart in acute asthma and COPD exacerbation.
+      source   : cntb_ctgov_stat
+      url      : https://clinicaltrials.gov/study/NCT07705737
+      published: 2026-01-15   event: 2026-09-30
+      tier     : TIER_1   class: VERIFIED_FACT   status: VERIFIED
+  fact_0f36bacde69738b4448a
+      claim    : Potential China milestone payments and royalties could provide further liquidity if rademikibart is approved.
+      source   : cntb_q2_2026
+      url      : https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/
+      published: 2026-08-11   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_3895436e5c853f78ccf7
+      claim    : A Form 8-K exhibit on SEC EDGAR relating to a private placement press release.
+      source   : cntb_pipe_8k
+      url      : https://www.sec.gov/Archives/edgar/data/1835268/000183526826000006/exhibit993-pipepressrelease.htm
+      published: 2026-03-31   event: 2026-03-31
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_506fc636f3a4b09af2d9
+      claim    : Topline data from the Phase 2 Seabreeze STAT asthma and Seabreeze STAT COPD studies are expected in September 2026.
+      source   : cntb_q2_2026
+      url      : https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/
+      published: 2026-08-11   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_78301f2c987b8af1a580
+      claim    : The company's strategy centres on the acute exacerbation setting, and topline data from the asthma and COPD studies are expected to help determine a p
+      source   : cntb_seabreeze_asthma_enrollment
+      url      : https://www.globenewswire.com/news-release/2026/06/17/3313482/0/en/Connect-Biopharma-Announces-Completion-of-Enrollment-of-Phase-2-Seabreeze-STAT-Asthma-Study-Evaluating-Rademikibart-for-the-Treatment-of-Acute-Exacerbations-in-Asthma.html
+      published: 2026-06-17   event: 2026-06-17
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_e5f027fa24e228705577
+      claim    : Cash runway is expected to extend for a period of at least one year from the date of the Q2 2026 earnings release, with current cash runway extending 
+      source   : cntb_q2_2026
+      url      : https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/
+      published: 2026-08-11   event: 2026-06-30
+      tier     : TIER_2   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_0b407a31850430ce0cb5
+      claim    : The DMC also conducts a review of the safety data for both studies on a regular basis and indicated that it has no safety concerns.
+      source   : cntb_dmc_interim
+      url      : https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      published: 2026-08-11   event: 2026-08-11
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_19affec94895bb4b09ac
+      claim    : Connect Biopharma reported a first quarter 2026 net loss of $19.4 million and ended the quarter with $46.0 million in cash, guiding runway into the se
+      source   : cntb_q1_2026
+      url      : https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_1c399b1584c47eae19da
+      claim    : The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and th
+      source   : cntb_dmc_interim
+      url      : https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      published: 2026-08-11   event: 2026-08-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_223dc5ac1811d35d92cb
+      claim    : The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and th
+      source   : cntb_dmc_interim
+      url      : https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      published: 2026-08-11   event: 2026-08-11
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_3338b7ab4ee88724effe
+      claim    : A $20.2 million private placement financing closed on March 31, 2026.
+      source   : cntb_q1_2026
+      url      : https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_8e94ecfbd9a9fa23c9b3
+      claim    : To date there have been no treatment-related serious adverse events or severe adverse events, and no discontinuations due to an adverse event in eithe
+      source   : cntb_dmc_interim
+      url      : https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      published: 2026-08-11   event: 2026-08-11
+      tier     : UNKNOWN   class: UNVERIFIED_CLAIM   status: INSUFFICIENT_EVIDENCE
+  fact_b12f0b689122eee0e661
+      claim    : Connect Biopharma reported a first quarter 2026 net loss of $19.4 million and ended the quarter with $46.0 million in cash, guiding runway into the se
+      source   : cntb_q1_2026
+      url      : https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html
+      published: 2026-05-12   event: 2026-03-31
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+  fact_b75fa9c36b891b455130
+      claim    : The independent Data Monitoring Committee overseeing the Phase 2 Seabreeze STAT asthma and COPD trials completed its review of the pre-specified inter
+      source   : cntb_dmc_interim
+      url      : https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update
+      published: 2026-08-11   event: 2026-08-11
+      tier     : UNKNOWN   class: COMPANY_CLAIM   status: NOT_VERIFIED
+
+==============================================================================
+APPENDIX -- E. ANALYSIS PROVENANCE AND COST
+==============================================================================
+No agent was model-backed in this run. Every analysis below came from the
+deterministic rule-based agents. This is stated plainly because a rule-based
+reading and a model reading are different things, and the reader is entitled
+to know which one produced the text.
+
+Evidence was chunked into 8 chunk(s) and each agent received only the chunks
+relevant to it, within a token budget. No agent read the whole corpus.
