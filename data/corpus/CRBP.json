@@ -1,0 +1,94 @@
+{
+  "_integrity_note": [
+    "CAPTURED REAL DATA about a real issuer. Captured 2026-09-06 via Anthropic WebSearch.",
+    "Every document is a SEARCH_SUMMARY or METADATA_ONLY: direct fetch was blocked by this",
+    "environment's egress policy. Material claims require primary-source escalation."
+  ],
+  "ticker": "CRBP",
+  "captured_at": "2026-09-06T06:10:00+00:00",
+  "captured_via": "anthropic_websearch",
+  "company": {
+    "ticker": "CRBP",
+    "company_name": "Corbus Pharmaceuticals Holdings, Inc.",
+    "aliases": ["Corbus"],
+    "exchange": "NASDAQ",
+    "country": "US",
+    "sector": "Biotechnology",
+    "price": null,
+    "price_note": "No reliable price observed in the captured search results; left UNKNOWN rather than guessed."
+  },
+  "documents": [
+    {
+      "doc_id": "crbp_phase1a_results",
+      "url": "https://ir.corbuspharma.com/news-events/press-releases/detail/458/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss",
+      "title": "Corbus Pharmaceuticals Reports Results from Phase 1a Study of Oral CB1 Inverse Agonist CRB-913 for the Treatment for Obesity Demonstrating Favorable Safety Profile and Emerging Evidence of Weight Loss",
+      "publisher": "Corbus Investor Relations",
+      "published_date": "2025-12-11",
+      "event_date": "2025-12-11",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Corbus reported results from a double-blinded placebo-controlled single ascending dose and multiple ascending dose Phase 1a study of CRB-913, conducted in the United States, assessing safety, tolerability and pharmacokinetics of escalating once-daily doses. The single ascending dose portion of the study enrolled 64 participants across 8 cohorts receiving ascending doses of CRB-913 up to a maximal dose of 600 mg per day, or placebo, dosed orally once. The company's headline describes a favorable safety profile and emerging evidence of weight loss."
+    },
+    {
+      "doc_id": "crbp_canyon1_lplv",
+      "url": "https://ir.corbuspharma.com/news-events/press-releases/detail/474/corbus-pharmaceuticals-announces-last-patient-last-visit-in-canyon-1-study-of-crb-913-for-the-treatment-of-obesity",
+      "title": "Corbus Pharmaceuticals Announces Last Patient Last Visit in CANYON-1 Study of CRB-913 for the Treatment of Obesity",
+      "publisher": "Corbus Investor Relations",
+      "published_date": "2026-08-05",
+      "event_date": "2026-08-05",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Corbus announced last patient last visit in the CANYON-1 study of CRB-913 for the treatment of obesity. CANYON-1 is a Phase 1b, 16-week, double-blind, placebo-controlled, dose-ranging study in 240 obese, non-diabetic participants, with a placebo cohort and three CRB-913 cohorts at 20 mg, 40 mg and 60 mg dosed orally once daily. The study is on track for a topline data readout in September 2026."
+    },
+    {
+      "doc_id": "crbp_cb1_class_safety",
+      "url": "https://www.biospace.com/press-releases/corbus-pharmaceuticals-reports-results-from-phase-1a-study-of-oral-cb1-inverse-agonist-crb-913-for-the-treatment-for-obesity-demonstrating-favorable-safety-profile-and-emerging-evidence-of-weight-loss",
+      "title": "CB1 class history and CRB-913 brain penetration versus monlunabant",
+      "publisher": "BioSpace",
+      "published_date": "2025-12-11",
+      "event_date": "2025-12-11",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "The first generation of experimental drugs in the CB1 class was abandoned because of potential neuropsychiatric adverse event risks. CRB-913 is described as a highly peripherally restricted oral small molecule CB1 inverse agonist, and yielded 15 times lower brain penetration than monlunabant in mice. CANYON-1 is expected to provide clarifying insights as to its safety and efficacy and to allow contextualisation of the data in comparison to both oral GLP-1 agonists and the CB1 inverse agonist monlunabant."
+    },
+    {
+      "doc_id": "crbp_pipeline_crb701",
+      "url": "https://www.nasdaq.com/press-release/corbus-pharmaceuticals-reports-results-phase-1a-study-oral-cb1-inverse-agonist-crb",
+      "title": "Corbus pipeline: CRB-701 and CRB-913",
+      "publisher": "Nasdaq (press release distribution)",
+      "published_date": "2025-12-11",
+      "event_date": "2025-12-11",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "The Corbus pipeline includes CRB-701, a next-generation antibody drug conjugate for the treatment of Nectin-4-expressing tumors, and CRB-913, an orally delivered highly peripherally restricted CB1 inverse agonist for the treatment of obesity."
+    },
+    {
+      "doc_id": "crbp_8k_2026",
+      "url": "https://www.sec.gov/Archives/edgar/data/1595097/000119312526153923/crbp-ex99_1.htm",
+      "title": "Corbus Pharmaceuticals Holdings, Inc. - Form 8-K exhibit 99.1 (FY2026)",
+      "publisher": "SEC EDGAR",
+      "published_date": "2026-06-01",
+      "event_date": "2026-06-01",
+      "doc_type": "filing",
+      "is_company_ir": true,
+      "content_kind": "METADATA_ONLY",
+      "text": "A Form 8-K exhibit on SEC EDGAR for Corbus Pharmaceuticals (CIK 1595097). The document itself could not be retrieved because sec.gov is blocked by this environment's egress policy; only the filing URL and its existence are in evidence. Cash, runway and share count are therefore NOT in evidence for this ticker."
+    },
+    {
+      "doc_id": "crbp_canyon1_lpfv",
+      "url": "https://ir.corbuspharma.com/news-events/press-releases/detail/464/corbus-pharmaceuticals-announces-last-patient-first-visit-in-canyon-1-study-of-crb-913-for-the-treatment-for-obesity",
+      "title": "Corbus Pharmaceuticals Announces Last Patient First Visit in CANYON-1 Study of CRB-913 for the Treatment for Obesity",
+      "publisher": "Corbus Investor Relations",
+      "published_date": "2026-04-14",
+      "event_date": "2026-04-14",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Corbus announced last patient first visit in the CANYON-1 Phase 1b dose-range finding study of CRB-913 for the treatment of obesity, with study completion expected in summer 2026."
+    }
+  ]
+}

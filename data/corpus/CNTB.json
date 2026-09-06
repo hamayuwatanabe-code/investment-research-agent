@@ -1,0 +1,118 @@
+{
+  "_integrity_note": [
+    "CAPTURED REAL DATA about a real issuer. Captured 2026-09-06 via Anthropic WebSearch.",
+    "Every document is a SEARCH_SUMMARY: direct fetch of the underlying sources was blocked",
+    "by this environment's egress policy. Material claims require primary-source escalation."
+  ],
+  "ticker": "CNTB",
+  "captured_at": "2026-09-06T06:05:00+00:00",
+  "captured_via": "anthropic_websearch",
+  "company": {
+    "ticker": "CNTB",
+    "company_name": "Connect Biopharma Holdings Limited",
+    "aliases": ["Connect Biopharma"],
+    "exchange": "NASDAQ",
+    "country": "US",
+    "sector": "Biotechnology",
+    "price": null,
+    "price_note": "No reliable price observed in the captured search results; left UNKNOWN rather than guessed."
+  },
+  "documents": [
+    {
+      "doc_id": "cntb_q2_2026",
+      "url": "https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-reports-second-quarter-2026-financial-results/",
+      "title": "Connect Biopharma Reports Second Quarter 2026 Financial Results and Provides Business Update",
+      "publisher": "Connect Biopharma Investor Relations",
+      "published_date": "2026-08-11",
+      "event_date": "2026-06-30",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Connect Biopharma reported second quarter 2026 financial results. Cash runway is expected to extend for a period of at least one year from the date of the Q2 2026 earnings release, with current cash runway extending into the second half of 2027. Potential China milestone payments and royalties could provide further liquidity if rademikibart is approved. Topline data from the Phase 2 Seabreeze STAT asthma and Seabreeze STAT COPD studies are expected in September 2026."
+    },
+    {
+      "doc_id": "cntb_q1_2026",
+      "url": "https://www.stocktitan.net/news/CNTB/connect-biopharma-reports-first-quarter-2026-financial-results-and-jnnlkp98ikne.html",
+      "title": "Connect Biopharma Q1 loss $19.4M, cash $46M",
+      "publisher": "StockTitan",
+      "published_date": "2026-05-12",
+      "event_date": "2026-03-31",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Connect Biopharma reported a first quarter 2026 net loss of $19.4 million and ended the quarter with $46.0 million in cash, guiding runway into the second half of 2027. A $20.2 million private placement financing closed on March 31, 2026."
+    },
+    {
+      "doc_id": "cntb_dmc_interim",
+      "url": "https://www.biospace.com/press-releases/connect-biopharma-reports-second-quarter-2026-financial-results-and-provides-business-update",
+      "title": "Connect Biopharma DMC interim analysis of the Seabreeze STAT studies",
+      "publisher": "BioSpace",
+      "published_date": "2026-08-11",
+      "event_date": "2026-08-11",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "The independent Data Monitoring Committee overseeing the Phase 2 Seabreeze STAT asthma and COPD trials completed its review of the pre-specified interim analysis of efficacy with no recommendation for change in the sample size. The DMC reviewed interim data based on a pre-specified analysis of treatment failure at 28 days, the rate of new exacerbations through 28 days, and the change from baseline in FEV1 following treatment of a minimum of 50 patients in each study with at least 28 days of follow-up. The DMC also conducts a review of the safety data for both studies on a regular basis and indicated that it has no safety concerns. To date there have been no treatment-related serious adverse events or severe adverse events, and no discontinuations due to an adverse event in either study."
+    },
+    {
+      "doc_id": "cntb_seabreeze_asthma_enrollment",
+      "url": "https://www.globenewswire.com/news-release/2026/06/17/3313482/0/en/Connect-Biopharma-Announces-Completion-of-Enrollment-of-Phase-2-Seabreeze-STAT-Asthma-Study-Evaluating-Rademikibart-for-the-Treatment-of-Acute-Exacerbations-in-Asthma.html",
+      "title": "Connect Biopharma Announces Completion of Enrollment of Phase 2 Seabreeze STAT Asthma Study Evaluating Rademikibart for the Treatment of Acute Exacerbations in Asthma",
+      "publisher": "GlobeNewswire (company press release)",
+      "published_date": "2026-06-17",
+      "event_date": "2026-06-17",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Connect Biopharma completed enrollment of the Phase 2 Seabreeze STAT asthma study evaluating rademikibart as an adjunct treatment for acute exacerbations in asthma. The company's strategy centres on the acute exacerbation setting, and topline data from the asthma and COPD studies are expected to help determine a potential Phase 3 endpoint and sample size requirements."
+    },
+    {
+      "doc_id": "cntb_seabreeze_copd_initiation",
+      "url": "https://investors.connectbiopharma.com/news-releases/news-release-details/connect-biopharma-initiates-phase-2-seabreeze-stat-copd-study",
+      "title": "Connect Biopharma Initiates Phase 2 Seabreeze STAT COPD Study Evaluating Rademikibart for the Treatment of Acute Exacerbations in COPD",
+      "publisher": "Connect Biopharma Investor Relations",
+      "published_date": "2025-11-10",
+      "event_date": "2025-11-10",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Connect Biopharma initiated the Phase 2 Seabreeze STAT COPD study evaluating rademikibart for the treatment of acute exacerbations in chronic obstructive pulmonary disease."
+    },
+    {
+      "doc_id": "cntb_ctgov_stat",
+      "url": "https://clinicaltrials.gov/study/NCT07705737",
+      "title": "Rademikibart IV for Acute Asthma and COPD Exacerbation (NCT07705737)",
+      "publisher": "ClinicalTrials.gov",
+      "published_date": "2026-01-15",
+      "event_date": "2026-09-30",
+      "doc_type": "registry",
+      "is_company_ir": false,
+      "content_kind": "METADATA_ONLY",
+      "text": "NCT07705737 is a registry record for intravenous rademikibart in acute asthma and COPD exacerbation. The registry record itself could not be retrieved because clinicaltrials.gov is blocked by this environment's egress policy, so design fields, enrollment and the registered primary outcome measure are NOT in evidence from the registry."
+    },
+    {
+      "doc_id": "cntb_10k_strategy",
+      "url": "https://www.stocktitan.net/sec-filings/CNTB/10-k-connect-biopharma-holdings-ltd-files-annual-report-658e1cb8b49c.html",
+      "title": "Rademikibart drives Connect Biopharma annual report strategy",
+      "publisher": "StockTitan (coverage of the Form 10-K)",
+      "published_date": "2026-03-10",
+      "event_date": "2025-12-31",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Coverage of the Connect Biopharma annual report describes rademikibart as the centre of the company's asthma and COPD strategy. Existing Phase 2b evidence in the chronic setting underpins the move into the acute exacerbation hypothesis being tested by the Seabreeze STAT studies."
+    },
+    {
+      "doc_id": "cntb_pipe_8k",
+      "url": "https://www.sec.gov/Archives/edgar/data/1835268/000183526826000006/exhibit993-pipepressrelease.htm",
+      "title": "Connect Biopharma Holdings Ltd - Form 8-K PIPE press release exhibit",
+      "publisher": "SEC EDGAR",
+      "published_date": "2026-03-31",
+      "event_date": "2026-03-31",
+      "doc_type": "filing",
+      "is_company_ir": true,
+      "content_kind": "METADATA_ONLY",
+      "text": "A Form 8-K exhibit on SEC EDGAR relating to a private placement press release. The document itself could not be retrieved because sec.gov is blocked by this environment's egress policy; only the filing URL and its existence are in evidence."
+    }
+  ]
+}

@@ -41,6 +41,18 @@ DECISION_GRADE_CLASSES = frozenset(
     {EvidenceClass.VERIFIED_FACT, EvidenceClass.INDEPENDENT_EVIDENCE}
 )
 
+#: Statuses that bar a fact from settling a material question, however good its
+#: source tier looks.
+NON_DECISIVE_STATUSES = frozenset(
+    {
+        "UNVERIFIED_MATERIAL_CLAIM",
+        "NOT_VERIFIED",
+        "NOT_FOUND",
+        "INSUFFICIENT_EVIDENCE",
+        "CONTRADICTED",
+    }
+)
+
 
 class SourceTier(StrEnum):
     """Source hierarchy (requirement 2).  Lower tier number == more primary."""
@@ -72,6 +84,11 @@ class VerifiedStatus(StrEnum):
     CONTRADICTED = "CONTRADICTED"
     NOT_FOUND = "NOT_FOUND"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    #: A material claim found only in Tier 3-5 reporting whose primary-source
+    #: confirmation was attempted and failed. Distinct from NOT_VERIFIED: the
+    #: escalation ran, and the primary source does not (yet) corroborate it.
+    #: Barred from decision-grade use (requirement P4).
+    UNVERIFIED_MATERIAL_CLAIM = "UNVERIFIED_MATERIAL_CLAIM"
 
 
 #: The single sentinel used everywhere a value is unknown.  Requirement 1G:
@@ -229,8 +246,80 @@ class FetchOutcome(StrEnum):
 
 
 class Provenance(StrEnum):
-    """Hard separation between production data and mock data (requirement 24)."""
+    """Hard separation between production, captured and mock data (req. 24)."""
 
     LIVE = "LIVE"
     CACHE = "CACHE"
     FIXTURE = "FIXTURE"  # mock; may never be presented as real research
+    #: Real documents about a real issuer, captured at a stated time through a
+    #: stated channel, and replayed. Not synthetic -- but also not fetched live
+    #: at run time, so the report says when it was captured.
+    CAPTURED = "CAPTURED"
+
+
+class ContentKind(StrEnum):
+    """How much of the source document is actually in hand.
+
+    This distinction is load-bearing. A search engine's summary *about* a press
+    release is not the press release: it is a third party's paraphrase, and a
+    quotation drawn from it has not been checked against the original. Treating
+    the two as equivalent is how "the filing says X" ends up meaning "a search
+    result said the filing says X".
+    """
+
+    FULL_DOCUMENT = "FULL_DOCUMENT"
+    EXCERPT = "EXCERPT"
+    SEARCH_SUMMARY = "SEARCH_SUMMARY"
+    METADATA_ONLY = "METADATA_ONLY"
+
+    @property
+    def is_primary_text(self) -> bool:
+        """Whether the actual source text was read."""
+        return self in (ContentKind.FULL_DOCUMENT, ContentKind.EXCERPT)
+
+    @property
+    def confidence_multiplier(self) -> float:
+        return {
+            "FULL_DOCUMENT": 1.0,
+            "EXCERPT": 0.9,
+            "SEARCH_SUMMARY": 0.6,
+            "METADATA_ONLY": 0.3,
+        }[self.value]
+
+
+class ResearchPath(StrEnum):
+    """Which channel actually served a piece of evidence (ADR 0005)."""
+
+    #: Anthropic server-side web_search / web_fetch tools.
+    ANTHROPIC_WEB = "ANTHROPIC_WEB"
+    #: Direct structured API (SEC EDGAR, ClinicalTrials.gov, openFDA).
+    DIRECT_API = "DIRECT_API"
+    #: Third-party search API (Tavily / Brave / MCP provider).
+    SEARCH_API = "SEARCH_API"
+    #: Replayed from a captured corpus.
+    CORPUS = "CORPUS"
+    #: Synthetic fixture.
+    FIXTURE = "FIXTURE"
+    NONE = "NONE"
+
+
+class ResearchDomain(StrEnum):
+    """The domains the Search Completeness Gate requires (requirement P6)."""
+
+    REGULATORY = "REGULATORY"
+    CAPITAL_STRUCTURE = "CAPITAL_STRUCTURE"
+    SCIENCE_TECHNOLOGY = "SCIENCE_TECHNOLOGY"
+    COMPETITION = "COMPETITION"
+    CATALYST = "CATALYST"
+    CONTRADICTION = "CONTRADICTION"
+
+
+#: Every one of these must be SEARCHED before a final verdict may be issued.
+REQUIRED_RESEARCH_DOMAINS: tuple[ResearchDomain, ...] = tuple(ResearchDomain)
+
+
+class SearchStatus(StrEnum):
+    SEARCHED = "SEARCHED"
+    PARTIAL = "PARTIAL"
+    UNSEARCHED = "UNSEARCHED"
+    FAILED = "FAILED"

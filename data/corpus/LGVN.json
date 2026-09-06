@@ -1,0 +1,148 @@
+{
+  "_integrity_note": [
+    "CAPTURED REAL DATA about a real issuer. Not synthetic.",
+    "Captured on 2026-09-06 via Anthropic WebSearch from a Claude Code session.",
+    "IMPORTANT: content_kind is SEARCH_SUMMARY for every document below. Direct fetch of",
+    "sec.gov, globenewswire.com, investors.longeveron.com and the news domains was BLOCKED by",
+    "this environment's egress policy, so what is stored is a search engine's summary ABOUT",
+    "each document, not the document itself. The system therefore caps confidence on these",
+    "and marks material claims for primary-source escalation. Replaying this corpus is NOT",
+    "the same as a live run and the report says so."
+  ],
+  "ticker": "LGVN",
+  "captured_at": "2026-09-06T06:00:00+00:00",
+  "captured_via": "anthropic_websearch",
+  "company": {
+    "ticker": "LGVN",
+    "company_name": "Longeveron Inc.",
+    "aliases": ["Longeveron"],
+    "exchange": "NASDAQ",
+    "country": "US",
+    "sector": "Biotechnology",
+    "price": 0.97,
+    "price_as_of": "2026-03-13",
+    "price_note": "Last price observed in captured search results; not a live quote."
+  },
+  "documents": [
+    {
+      "doc_id": "lgvn_typec_pr_20260508",
+      "url": "https://www.globenewswire.com/news-release/2026/05/08/3291328/0/en/Longeveron-Announces-Constructive-Type-C-Meeting-with-U-S-FDA-Ahead-of-Data-Readout-for-ELPIS-II-Phase-2b-Clinical-Trial-Evaluating-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HL.html",
+      "title": "Longeveron Announces Constructive Type C Meeting with U.S. FDA Ahead of Data Readout for ELPIS II Phase 2b Clinical Trial Evaluating Treatment for Hypoplastic Left Heart Syndrome (HLHS)",
+      "publisher": "GlobeNewswire (company press release)",
+      "published_date": "2026-05-08",
+      "event_date": "2026-03-31",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron held a Type C meeting with the U.S. FDA in late March 2026 to discuss the ongoing development of laromestrocel (Lomecel-B), being evaluated in the Phase 2b ELPIS II clinical trial for hypoplastic left heart syndrome (HLHS). The company's headline describes the meeting as constructive. The FDA acknowledged that HLHS is a rare disease with high unmet need, but advised that the trial's primary endpoint, right ventricular ejection fraction (RVEF), is not sufficient to demonstrate efficacy. The company agreed with the FDA's concerns, but changes to the primary endpoint cannot be made mid-trial because of an NIH-mandated interim analysis. Without an agreed upon primary endpoint sufficient for efficacy, the FDA no longer refers to the ELPIS II trial as pivotal, as had been specifically discussed in the company's Type C meeting in 2024. The FDA recommended that only the most objective measures, such as all-cause mortality, cardiac transplant-free survival, cardiac transplantation, and major adverse cardiac events (MACE), are likely to be acceptable for demonstrating efficacy. The FDA remains open to further discussions once ELPIS II is complete and has encouraged Longeveron to present study results for potential alignment on a path forward. Top-line results from the randomized, controlled Phase 2b ELPIS II trial are anticipated in August 2026."
+    },
+    {
+      "doc_id": "lgvn_stocktitan_pivotal_20260508",
+      "url": "https://www.stocktitan.net/news/LGVN/longeveron-announces-constructive-type-c-meeting-with-u-s-fda-ahead-f573wqx78fjx.html",
+      "title": "Longeveron: FDA no longer calls ELPIS II pivotal",
+      "publisher": "StockTitan",
+      "published_date": "2026-05-08",
+      "event_date": "2026-03-31",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Coverage of the Longeveron Type C meeting announcement headlines the change in the FDA's characterisation: the FDA no longer calls ELPIS II pivotal. The trial had previously been described as pivotal following a 2024 Type C meeting. The change follows the FDA's position that the RVEF primary endpoint is not sufficient to demonstrate efficacy."
+    },
+    {
+      "doc_id": "lgvn_appliedxl_endpoint_2026",
+      "url": "https://www.appliedxl.com/news/laromestrocel-lomecel-b-hypoplastic-left-heart-syndrome-hlhs-readout",
+      "title": "FDA tells Longeveron its HLHS trial's endpoint can't prove efficacy, mid-study",
+      "publisher": "AppliedXL",
+      "published_date": "2026-05-09",
+      "event_date": "2026-03-31",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Independent reporting states that the FDA told Longeveron, mid-study, that the primary endpoint of its hypoplastic left heart syndrome trial cannot prove efficacy. The trial referenced is NCT04925024, the ELPIS II Phase 2b study of laromestrocel (Lomecel-B)."
+    },
+    {
+      "doc_id": "lgvn_q2_2026_results",
+      "url": "https://www.globenewswire.com/news-release/2026/08/12/3344055/0/en/longeveron-announces-2026-second-quarter-financial-results-and-provides-business-update.html",
+      "title": "Longeveron Announces 2026 Second Quarter Financial Results and Provides Business Update",
+      "publisher": "GlobeNewswire (company press release)",
+      "published_date": "2026-08-12",
+      "event_date": "2026-06-30",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron reported a second quarter 2026 net loss of $6.1 million. Cash and cash equivalents were $10.1 million at June 30, 2026, which the company expects will fund operations into the fourth quarter of 2026. Management's forecast shows insufficient cash to cover minimum commitments for twelve months, and the company discloses substantial doubt about its ability to continue as a going concern, indicating it must secure additional financing or revise its operating plan. ELPIS II top-line data are expected in September 2026."
+    },
+    {
+      "doc_id": "lgvn_q1_2026_results",
+      "url": "https://www.stocktitan.net/news/LGVN/longeveron-announces-2026-first-quarter-financial-results-and-6asv19gpq07o.html",
+      "title": "Longeveron Q1 loss $4.7M, cash runway to Q4 2026",
+      "publisher": "StockTitan",
+      "published_date": "2026-05-12",
+      "event_date": "2026-03-31",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron posted a first quarter 2026 net loss of $4.7 million on $0.4 million of revenue, raised $15.9 million via private placement, and ended the quarter with $15.8 million of cash. The company disclosed substantial doubt about its ability to continue as a going concern. Cash runway was guided into the fourth quarter of 2026."
+    },
+    {
+      "doc_id": "lgvn_pipe_2026",
+      "url": "https://microcapalerts.org/ticker/LGVN",
+      "title": "LGVN private placement and dilution coverage",
+      "publisher": "Microcap Alerts",
+      "published_date": "2026-03-20",
+      "event_date": "2026-03-13",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron closed a private placement of up to $30 million, including $15 million initially funded, raising concerns about shareholder dilution. The company had previously implemented 25% to 50% pay cuts in February 2026 because of cash runway concerns. Large equity grants, including 500,000 restricted stock units for the chief executive, were issued immediately following the capital raise, which may lead to further shareholder dilution."
+    },
+    {
+      "doc_id": "lgvn_designations",
+      "url": "https://investors.longeveron.com/news/News/news-details/2025/Longeveron-Announces-U-S--FDA-Approval-of-IND-Application-for-a-Phase-2-Pivotal-Registration-Study-Evaluating-Laromestrocel-as-a-Treatment-of-Pediatric-Dilated-Cardiomyopathy-DCM/default.aspx",
+      "title": "Longeveron FDA designations for laromestrocel",
+      "publisher": "Longeveron Investor Relations",
+      "published_date": "2025-07-08",
+      "event_date": "2025-07-08",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "The FDA has granted laromestrocel Orphan Drug designation, Fast Track designation, and Rare Pediatric Disease designation for the treatment of hypoplastic left heart syndrome. Under the Rare Pediatric Disease designation, if Longeveron were to receive FDA marketing approval for laromestrocel for HLHS, the company could be eligible to receive a Priority Review Voucher, which allows priority review of another drug application, reducing review time from the standard ten months to six months. The laromestrocel development programs have received five FDA designations in total: for the HLHS program, Orphan Drug, Fast Track and Rare Pediatric Disease designations; and for the Alzheimer's disease program, Regenerative Medicine Advanced Therapy (RMAT) designation and Fast Track designation."
+    },
+    {
+      "doc_id": "lgvn_enrollment_complete_2025",
+      "url": "https://www.globenewswire.com/news-release/2025/06/24/3104065/0/en/Longeveron-Announces-Completion-of-Enrollment-of-Pivotal-Phase-2b-Clinical-Trial-Evaluating-Laromestrocel-as-a-Treatment-for-Hypoplastic-Left-Heart-Syndrome-HLHS.html",
+      "title": "Longeveron Announces Completion of Enrollment of Pivotal Phase 2b Clinical Trial Evaluating Laromestrocel as a Treatment for Hypoplastic Left Heart Syndrome (HLHS)",
+      "publisher": "GlobeNewswire (company press release)",
+      "published_date": "2025-06-24",
+      "event_date": "2025-06-24",
+      "doc_type": "press_release",
+      "is_company_ir": true,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron announced completion of enrollment of the Phase 2b ELPIS II clinical trial evaluating laromestrocel as a treatment for hypoplastic left heart syndrome. At the time of this announcement in June 2025 the company described the trial as pivotal."
+    },
+    {
+      "doc_id": "lgvn_ctgov_elpis2",
+      "url": "https://clinicaltrials.gov/study/NCT04925024",
+      "title": "ELPIS II registry record (NCT04925024)",
+      "publisher": "ClinicalTrials.gov",
+      "published_date": "2026-05-01",
+      "event_date": "2026-09-30",
+      "doc_type": "registry",
+      "is_company_ir": false,
+      "content_kind": "METADATA_ONLY",
+      "text": "NCT04925024 is the ELPIS II Phase 2b randomized controlled trial of laromestrocel (Lomecel-B) in hypoplastic left heart syndrome. Only the registry identifier and trial name were obtainable in this capture; the registry record itself could not be retrieved because clinicaltrials.gov is blocked by this environment's egress policy. Design fields, enrollment and the registered primary outcome measure are therefore NOT in evidence from the registry."
+    },
+    {
+      "doc_id": "lgvn_seekingalpha_runway",
+      "url": "https://seekingalpha.com/news/4632091-longeveron-expects-elpis-ii-hlhs-data-in-mid-september-while-cash-runway-extends-into-q4-2026",
+      "title": "Longeveron expects ELPIS II HLHS data in mid-September while cash runway extends into Q4 2026",
+      "publisher": "Seeking Alpha",
+      "published_date": "2026-08-13",
+      "event_date": "2026-09-15",
+      "doc_type": "news",
+      "is_company_ir": false,
+      "content_kind": "SEARCH_SUMMARY",
+      "text": "Longeveron expects ELPIS II hypoplastic left heart syndrome data in mid-September 2026, while its cash runway extends into the fourth quarter of 2026."
+    }
+  ]
+}
