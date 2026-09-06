@@ -126,9 +126,7 @@ def assess_completeness(
             )
         elif entry.queries_executed:
             entry.status = SearchStatus.SEARCHED
-            entry.detail = (
-                f"{entry.queries_executed} query/queries executed, no documents returned"
-            )
+            entry.detail = f"{entry.queries_executed} query/queries executed, no documents returned"
         elif agent_ran and agent_evidence:
             entry.status = SearchStatus.PARTIAL
             entry.detail = (
@@ -137,9 +135,7 @@ def assess_completeness(
             )
         elif entry.queries_attempted:
             entry.status = SearchStatus.FAILED
-            entry.detail = (
-                f"{entry.queries_attempted} query/queries attempted, none executed"
-            )
+            entry.detail = f"{entry.queries_attempted} query/queries attempted, none executed"
         else:
             entry.status = SearchStatus.UNSEARCHED
             entry.detail = "no query attempted and no evidence analysed"

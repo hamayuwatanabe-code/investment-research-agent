@@ -24,16 +24,22 @@ from pathlib import Path
 
 from .collectors.base import CollectionResult
 from .collectors.clinicaltrials import ClinicalTrialsCollector
+from .collectors.extraction import DocumentCollector
 from .collectors.fda import FdaCollector
 from .collectors.fixtures import FixtureCollector
 from .collectors.http import HttpClient
 from .collectors.search import build_search_provider
 from .collectors.sec_edgar import SecEdgarCollector
 from .config import get_settings
+from .llm.client import LLMBudget, LLMClient
 from .logging_setup import setup_logging
 from .orchestrator.pipeline import Pipeline, ResearchResult, new_run_id
 from .reporting.report import render_report
-from .schemas.enums import RunStatus
+from .research.adversarial import build_plan, run_adversarial_search
+from .research.anthropic_web import AnthropicWebResearchProvider
+from .research.corpus import CorpusResearchProvider
+from .research.provider import CompositeResearchProvider, NullResearchProvider
+from .schemas.enums import Provenance, RunStatus
 from .storage.db import open_db
 from .storage.repository import Repository
 
@@ -66,7 +72,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fixtures", action="store_true", help="use SYNTHETIC fixture data (never real research)"
     )
+    parser.add_argument(
+        "--corpus",
+        action="store_true",
+        help=(
+            "replay a CAPTURED corpus of real documents from data/corpus/. Real issuer, real "
+            "URLs, captured at a stated time -- not a live fetch, and the report says so."
+        ),
+    )
     parser.add_argument("--live", action="store_true", help="allow outbound network calls")
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help=(
+            "use Claude for the eight interpretive agents. Requires credentials; without them "
+            "the deterministic agents run and the report records that."
+        ),
+    )
+    parser.add_argument("--llm-model", default="claude-opus-5", help="model id for --llm")
+    parser.add_argument(
+        "--llm-effort",
+        default="high",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="reasoning effort for --llm",
+    )
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=2_000_000,
+        help="maximum total LLM tokens for the run",
+    )
+    parser.add_argument(
+        "--adversarial",
+        action="store_true",
+        help="run the separated bear and bull web search passes (requirement P3)",
+    )
+    parser.add_argument("--resume", metavar="RUN_ID", help="resume an interrupted run")
     parser.add_argument(
         "--price", type=float, help="current share price, if not otherwise available"
     )
@@ -112,6 +153,23 @@ def collect(
     return results, metadata
 
 
+def build_research_stack(ticker: str, args: argparse.Namespace, settings, llm):
+    """Assemble the research providers for this run (ADR 0005).
+
+    Order matters: a captured corpus answers from documents already in hand, and
+    live web research is the general channel. Whichever serves a query is
+    recorded on the result, so the report can say how each fact was obtained.
+    """
+    providers = []
+    if args.corpus:
+        providers.append(CorpusResearchProvider(settings.corpus_dir, ticker))
+    if args.live and llm is not None:
+        providers.append(AnthropicWebResearchProvider(llm))
+    if not providers:
+        return NullResearchProvider()
+    return providers[0] if len(providers) == 1 else CompositeResearchProvider(providers)
+
+
 def run_one(
     ticker: str,
     args: argparse.Namespace,
@@ -120,17 +178,67 @@ def run_one(
     http: HttpClient,
 ) -> ResearchResult:
     fixtures = FixtureCollector(settings.fixture_dir)
-    metadata = fixtures.metadata(ticker) if args.fixtures else {}
+    corpus = CorpusResearchProvider(settings.corpus_dir, ticker)
+
+    metadata: dict = {}
+    capture_info: dict = {}
+    if args.fixtures:
+        metadata = fixtures.metadata(ticker)
+    elif args.corpus:
+        metadata = corpus.metadata(ticker)
+        capture_info = corpus.capture_info(ticker)
+
     company_name = args.company_name or metadata.get("company_name") or ticker.upper()
     price = args.price if args.price is not None else metadata.get("price")
 
-    results, _ = collect(
-        ticker,
-        company_name,
-        settings=settings,
-        http=http,
-        use_fixtures=args.fixtures,
-    )
+    budget = LLMBudget(max_total_tokens=args.token_budget)
+    llm = None
+    if args.llm:
+        llm = LLMClient(
+            api_key=settings.anthropic_api_key,
+            model=args.llm_model,
+            effort=args.llm_effort,
+            budget=budget,
+        )
+        usable, reason = llm.available()
+        if not usable:
+            log.warning("--llm requested but unavailable: %s", reason)
+
+    research = build_research_stack(ticker, args, settings, llm)
+    chunks: list = []
+    adversarial = None
+
+    if args.corpus:
+        documents = corpus.documents(ticker)
+        if args.adversarial:
+            adversarial = run_adversarial_search(
+                research, build_plan(ticker, company_name), llm=llm
+            )
+            known = {d.doc_id for d in documents}
+            for document in adversarial.all_documents():
+                if document.doc_id not in known:
+                    documents.append(document)
+                    known.add(document.doc_id)
+        collector = DocumentCollector(
+            documents,
+            provenance=Provenance.CAPTURED,
+            note=(
+                f"CAPTURED corpus replay: {capture_info.get('document_count', 0)} document(s) "
+                f"captured {capture_info.get('captured_at', 'UNKNOWN')} via "
+                f"{capture_info.get('captured_via', 'UNKNOWN')}. Real data about a real issuer, "
+                "but NOT fetched live at run time."
+            ),
+        )
+        results = [collector.collect(ticker, company_name)]
+        chunks = collector.chunks
+    else:
+        results, _ = collect(
+            ticker,
+            company_name,
+            settings=settings,
+            http=http,
+            use_fixtures=args.fixtures,
+        )
 
     mode = "standard"
     if args.full_dd:
@@ -147,6 +255,11 @@ def run_one(
         build_search_provider(http, settings),
         today=date.today(),
         stale_after_days=settings.stale_after_days,
+        research=research,
+        llm=llm,
+        adversarial=adversarial,
+        chunks=chunks,
+        capture_info=capture_info,
     )
     return pipeline.run(
         ticker,
@@ -160,6 +273,7 @@ def run_one(
         # orchestrator/isolation.py.
         user_preferences=load_portfolio(args.portfolio),
         offline=not args.live,
+        run_id=args.resume or None,
     )
 
 
@@ -189,7 +303,20 @@ def result_to_json(result: ResearchResult) -> dict:
         "evidence_confidence": (
             result.confidence_breakdown.score if result.confidence_breakdown else None
         ),
-        "action": str(verdict.action) if verdict else None,
+        "action": (str(verdict.action) if verdict and verdict.action else None),
+        "blocked": bool(verdict.blocked) if verdict else None,
+        "blocked_reason": verdict.blocked_reason if verdict else "",
+        "research_coverage": (
+            {
+                domain: entry.status
+                for domain, entry in ((str(d), e) for d, e in result.completeness.coverage.items())
+            }
+            if result.completeness
+            else {}
+        ),
+        "llm_agents_used": result.llm_agents_used,
+        "llm_tokens": result.llm_budget.used_total if result.llm_budget else 0,
+        "capture_info": result.capture_info,
         "max_kill_level": str(verdict.kill_gate.max_level) if verdict else None,
         "kill_gate": [a.to_row() for a in verdict.kill_gate.assessments] if verdict else [],
         "scores": card.scores if card else {},

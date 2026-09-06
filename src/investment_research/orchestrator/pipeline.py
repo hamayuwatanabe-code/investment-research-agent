@@ -39,25 +39,24 @@ from ..agents.science import ScienceAgent
 from ..agents.valuation import ValuationAgent
 from ..collectors.base import CollectionResult
 from ..collectors.documents import Chunk
-from ..llm.client import LLMBudget, LLMClient
 from ..collectors.search import SearchProvider
+from ..llm.client import LLMBudget, LLMClient
+from ..reporting.traceability import TraceabilityIndex, build_index
+from ..research.adversarial import AdversarialOutcome
+from ..research.escalation import EscalationReport, escalate
+from ..research.provider import NullResearchProvider, ResearchProvider
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
     FactCategory,
-    ResearchDomain,
     KillCategory,
     KillLevel,
     Provenance,
+    ResearchDomain,
     RunStatus,
 )
 from ..schemas.evaluation import KillAssessment, KillGateResult, ScoreCard, Verdict
 from ..scoring.completeness import CompletenessResult, assess_completeness
-from ..research.adversarial import AdversarialOutcome
-from ..research.escalation import EscalationReport, escalate
-from ..research.provider import NullResearchProvider, ResearchProvider
-from ..reporting.traceability import TraceabilityIndex, build_index
-from .resume import Checkpoint, ResumePlan, STAGES, build_plan, stage_index
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
@@ -70,6 +69,7 @@ from .isolation import (
     LeakageError,
     derive_fingerprints,
 )
+from .resume import Checkpoint, ResumePlan, stage_index
 
 log = logging.getLogger(__name__)
 
@@ -177,10 +177,15 @@ class Pipeline:
                 )
                 if marker.strip().lower() != ANON_LABEL.lower()
             )
+        # A blind agent gets no raw chunks: chunk text is un-anonymised source
+        # prose. It works from its anonymised fact set and the channels it may
+        # read, which is what "blind" has to mean once a model is involved.
+        chunks = () if not policy.sees_identity else self.chunks
         return llm_cls(
             self.llm,
             fallback=deterministic,
             guard=PromptGuard(denied_fingerprints=denied, forbidden_identity=forbidden),
+            chunks=chunks,
         )
 
     # -- helpers -----------------------------------------------------------
@@ -371,10 +376,6 @@ class Pipeline:
             "price": price,
             "aliases": tuple(aliases),
             "mode": mode,
-            # Chunks travel as a private param so each agent can build its own
-            # bounded evidence pack (requirement P9). They are already filtered
-            # to this run's documents; per-agent selection happens in the agent.
-            "_chunks": self.chunks,
         }
         if self.adversarial is not None:
             params["_bear_search_summary"] = "\n".join(
@@ -448,7 +449,9 @@ class Pipeline:
                 )
         else:
             result.failures.append(f"escalation skipped: {research_reason}")
-        checkpoint("escalate", {"attempts": len(result.escalation.attempts) if result.escalation else 0})
+        checkpoint(
+            "escalate", {"attempts": len(result.escalation.attempts) if result.escalation else 0}
+        )
 
         # ---- Stage 3: domain agents (facts only) ------------------------
         from ..agents.llm_agents import (
@@ -497,14 +500,28 @@ class Pipeline:
         # The LLM kill agent proposes findings; the deterministic gate below
         # computes the binding assessment from the same evidence. A model can
         # surface a lethal fact, but it cannot argue a kill level down.
-        llm_kill = self._agent_for("kill_agent", KillAgent(self.search), LLMKillAgent, bus)
+        executed_queries = tuple(
+            r.query.query
+            for r in (
+                [*self.adversarial.bear_results, *self.adversarial.bull_results]
+                if self.adversarial
+                else []
+            )
+            if r.executed
+        )
+        llm_kill = self._agent_for(
+            "kill_agent",
+            KillAgent(self.search, executed_queries=executed_queries),
+            LLMKillAgent,
+            bus,
+        )
         kill_output = self._run_agent(
             llm_kill, guard, result, params=params, user_preferences=user_preferences
         )
         if kill_output.metrics.get("llm_backed"):
             result.llm_agents_used.append("kill_agent")
             deterministic_kill = self._run_agent(
-                KillAgent(self.search),
+                KillAgent(self.search, executed_queries=executed_queries),
                 guard,
                 result,
                 params=params,
@@ -664,8 +681,8 @@ class Pipeline:
                 [
                     f
                     for f in verified_facts
-                    if f.category in (FactCategory.CLINICAL, FactCategory.SCIENCE,
-                                      FactCategory.TECHNOLOGY)
+                    if f.category
+                    in (FactCategory.CLINICAL, FactCategory.SCIENCE, FactCategory.TECHNOLOGY)
                 ]
             ),
             ResearchDomain.COMPETITION: len(
@@ -681,7 +698,9 @@ class Pipeline:
         search_results = []
         if self.adversarial is not None:
             search_results = [*self.adversarial.bear_results, *self.adversarial.bull_results]
-        agents_run = {record.agent_id for record in result.agent_records if record.status != "FAILED"}
+        agents_run = {
+            record.agent_id for record in result.agent_records if record.status != "FAILED"
+        }
         completeness = assess_completeness(
             search_results=search_results,
             facts_by_domain=domain_fact_counts,

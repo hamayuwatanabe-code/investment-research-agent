@@ -93,6 +93,17 @@ class ReportRenderer:
         evaluation = self.bus.channels.get(name)
         return evaluation.summary if evaluation else "Not produced (agent did not run or failed)."
 
+    @staticmethod
+    def _wrap(text: str, width: int = 76, indent: str = "") -> str:
+        import textwrap
+
+        return (
+            "\n".join(
+                textwrap.wrap(text, width=width, initial_indent=indent, subsequent_indent=indent)
+            )
+            or text
+        )
+
     def _safe(self, text: str) -> str:
         clean, report = self.validator.sanitize(text)
         if not report.clean:
@@ -169,6 +180,12 @@ class ReportRenderer:
             if wanted is None or number in wanted:
                 add(renderer())
 
+        add(self._section_research_provenance())
+        add(self._section_search_coverage())
+        add(self._section_escalation())
+        add(self._section_traceability())
+        add(self._section_cost())
+
         if self.citation_issues:
             add("")
             add("-" * 78)
@@ -193,7 +210,18 @@ class ReportRenderer:
         if verdict is None:
             out.append("NO VERDICT: the blind judge did not complete. Treat as INCOMPLETE.")
             return "\n".join(out)
-        out.append(f"Action: {verdict.action}")
+        if verdict.blocked:
+            out.append("FINAL VERDICT: BLOCKED")
+            out.append("RESEARCH STATUS: INCOMPLETE")
+            out.append("")
+            out.append(self._wrap(verdict.blocked_reason))
+            out.append("")
+            out.append(
+                "No action label is issued. Not AVOID, not WAIT_FOR_EVENT -- an action label "
+                "asserts a judgement, and there is not enough research here to support one."
+            )
+        else:
+            out.append(f"Action: {verdict.action}")
         out.append(f"Judged blind (identity withheld from the judge): {verdict.judged_blind}")
         out.append(f"Worst kill level: {verdict.kill_gate.max_level}")
         out.append(f"Headline: {self._safe(verdict.headline)}")
@@ -673,5 +701,194 @@ class ReportRenderer:
         return "\n".join(out)
 
 
+def _fmt_status(status: str) -> str:
+    return {
+        "SEARCHED": "[searched]",
+        "PARTIAL": "[partial ]",
+        "UNSEARCHED": "[NOT DONE]",
+        "FAILED": "[FAILED  ]",
+    }.get(status, f"[{status}]")
+
+
+def _appendix(title: str) -> str:
+    return f"\n{'=' * 78}\nAPPENDIX -- {title}\n{'=' * 78}"
+
+
 def render_report(result: ResearchResult) -> str:
     return ReportRenderer(result).render()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 appendices, bound onto ReportRenderer.
+# ---------------------------------------------------------------------------
+def _section_research_provenance(self: ReportRenderer) -> str:
+    """How the evidence was obtained (ADR 0005)."""
+    out = [_appendix("A. RESEARCH PROVENANCE -- how this evidence was obtained")]
+    capture = self.result.capture_info
+    if capture:
+        out.append("CAPTURED CORPUS REPLAY")
+        out.append(
+            self._wrap(
+                f"This run replayed {capture.get('document_count', 0)} document(s) about a real "
+                f"issuer, captured at {capture.get('captured_at', UNKNOWN)} via "
+                f"{capture.get('captured_via', UNKNOWN)}. The URLs are real and the documents "
+                "are real. They were NOT fetched live at run time, so anything published after "
+                "the capture time is absent from this analysis by construction."
+            )
+        )
+        out.append("")
+
+    kinds: dict[str, int] = {}
+    paths: dict[str, int] = {}
+    for source in self.bus.sources:
+        kinds[str(source.provenance)] = kinds.get(str(source.provenance), 0) + 1
+    for fact in self.bus.facts:
+        paths[str(fact.provenance)] = paths.get(str(fact.provenance), 0) + 1
+    out.append("Source provenance:")
+    for name, count in sorted(kinds.items()):
+        out.append(f"  {name:<12} {count}")
+
+    summary_sources = [
+        s for s in self.bus.sources if "SEARCH_SUMMARY" in str(getattr(s, "content_kind", ""))
+    ]
+    if summary_sources:
+        out.append("")
+        out.append(
+            self._wrap(
+                f"{len(summary_sources)} source(s) are search-engine summaries rather than the "
+                "document itself. A summary about a filing is not the filing: quotations drawn "
+                "from it have not been checked against the original."
+            )
+        )
+    return "\n".join(out)
+
+
+def _section_search_coverage(self: ReportRenderer) -> str:
+    """Search Completeness Gate (requirement P6)."""
+    out = [_appendix("B. SEARCH COMPLETENESS GATE")]
+    completeness = self.result.completeness
+    if completeness is None:
+        out.append("Completeness was not assessed for this run.")
+        return "\n".join(out)
+
+    out.append(f"{completeness.searched_count} of 6 required research domains examined.")
+    out.append("")
+    out.append(f"  {'domain':<22} {'status':<11} {'queries':>7} {'docs':>5}  paths")
+    for name, status, queries, documents, paths in completeness.summary_rows():
+        out.append(f"  {name:<22} {_fmt_status(status):<11} {queries:>7} {documents:>5}  {paths}")
+    if completeness.blocked:
+        out.append("")
+        out.append("*** VERDICT BLOCKED ***")
+        out.append(self._wrap(completeness.reason()))
+    else:
+        out.append("")
+        out.append("All required domains were examined; a verdict is permitted.")
+    return "\n".join(out)
+
+
+def _section_escalation(self: ReportRenderer) -> str:
+    """Primary-source escalation (requirement P4)."""
+    out = [_appendix("C. PRIMARY-SOURCE ESCALATION")]
+    escalation = self.result.escalation
+    if escalation is None:
+        out.append("No escalation was attempted (no research provider available).")
+        return "\n".join(out)
+    if not escalation.attempts:
+        out.append("No material claim required escalation.")
+        return "\n".join(out)
+
+    out.append(
+        self._wrap(
+            "A material claim carried only by weak sourcing is escalated to a primary source. "
+            "A company press release does not count as confirmation of what a regulator said; "
+            "only a statutory filing or the regulator's own document does."
+        )
+    )
+    out.append("")
+    out.append(f"  attempted : {len(escalation.attempts)}")
+    out.append(f"  confirmed : {len(escalation.confirmed)}")
+    out.append(f"  UNCONFIRMED: {len(escalation.unconfirmed)}")
+    for attempt in escalation.unconfirmed:
+        out.append("")
+        out.append(f"  [UNVERIFIED_MATERIAL_CLAIM] ({attempt.reason})")
+        out.append(f"      {self._safe(attempt.claim)}")
+        if attempt.queries:
+            out.append(f"      searched: {'; '.join(attempt.queries[:3])}")
+    for attempt in escalation.confirmed:
+        out.append("")
+        out.append(f"  [CONFIRMED] ({attempt.reason}) {self._safe(attempt.claim)[:150]}")
+        out.append(f"      confirmed by: {self._safe(attempt.confirming_url)}")
+    return "\n".join(out)
+
+
+def _section_traceability(self: ReportRenderer) -> str:
+    """Citation traceability index (requirement P7)."""
+    out = [_appendix("D. CITATION TRACEABILITY INDEX")]
+    index = self.result.traceability
+    if index is None or not index.links:
+        out.append("No traceability index was built.")
+        return "\n".join(out)
+    out.append(
+        "Every material claim above resolves through this chain: "
+        "claim -> fact_id -> source_id -> URL -> publication date -> event date."
+    )
+    out.append("")
+    for link in index.rows():
+        out.append(f"  {link.fact_id}")
+        out.append(f"      claim    : {link.claim[:150]}")
+        out.append(f"      source   : {link.source_id}")
+        out.append(f"      url      : {self._safe(link.url)}")
+        out.append(f"      published: {link.publication_date}   event: {link.event_date}")
+        out.append(
+            f"      tier     : {link.source_tier}   class: {link.evidence_class}   "
+            f"status: {link.verified_status}"
+        )
+    return "\n".join(out)
+
+
+def _section_cost(self: ReportRenderer) -> str:
+    """Model usage and cost accounting (requirement P9)."""
+    out = [_appendix("E. ANALYSIS PROVENANCE AND COST")]
+    used = self.result.llm_agents_used
+    budget = self.result.llm_budget
+
+    if not used:
+        out.append(
+            self._wrap(
+                "No agent was model-backed in this run. Every analysis below came from the "
+                "deterministic rule-based agents. This is stated plainly because a "
+                "rule-based reading and a model reading are different things, and the reader "
+                "is entitled to know which one produced the text."
+            )
+        )
+    else:
+        out.append(f"LLM-backed agents: {', '.join(sorted(set(used)))}")
+        out.append(
+            "All other agents -- share counts, runway, market cap, valuation arithmetic, the "
+            "Kill Gate, tiering, routing and isolation -- were deterministic."
+        )
+    if budget and budget.calls:
+        out.append("")
+        out.append(f"  tokens used : {budget.used_total:,} of {budget.max_total_tokens:,} budget")
+        out.append(f"  calls       : {len(budget.calls)}")
+        for agent_id, tokens in sorted(budget.by_agent().items()):
+            out.append(f"      {agent_id:<22} {tokens:>9,}")
+
+    packs = [(record.agent_id, record) for record in self.result.agent_records]
+    if self.result.chunks:
+        out.append("")
+        out.append(
+            self._wrap(
+                f"Evidence was chunked into {len(self.result.chunks)} chunk(s) and each agent "
+                "received only the chunks relevant to it, within a token budget. No agent read "
+                "the whole corpus."
+            )
+        )
+    return "\n".join(out)
+
+
+ReportRenderer._section_research_provenance = _section_research_provenance
+ReportRenderer._section_search_coverage = _section_search_coverage
+ReportRenderer._section_escalation = _section_escalation
+ReportRenderer._section_traceability = _section_traceability
+ReportRenderer._section_cost = _section_cost

@@ -75,11 +75,21 @@ def anonymize_facts(
     out: list[Fact] = []
     for fact in facts:
         ref = ref_map.ref_for(fact.source_id, fact.source_url, fact.source_title)
+        # Corroboration and contradiction lists hold raw source ids, and a
+        # source id derived from a document name embeds the ticker
+        # ("lgvn_typec_pr_20260508"). They are mapped through the same ref map,
+        # not just the primary source_id.
         changes: dict[str, Any] = {
             "ticker": ANON_LABEL,
             "source_url": f"blindref://{ref}",
             "source_id": ref,
             "source_title": _redact(fact.source_title, patterns) or "(document)",
+            "corroborating_source_ids": tuple(
+                ref_map.ref_for(other, "", "") for other in fact.corroborating_source_ids
+            ),
+            "contradicting_evidence": tuple(
+                ref_map.ref_for(other, "", "") for other in fact.contradicting_evidence
+            ),
         }
         for field_name in _IDENTIFYING_FACT_FIELDS:
             if field_name in ("source_title",):

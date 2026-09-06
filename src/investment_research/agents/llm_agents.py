@@ -21,6 +21,7 @@ Every agent below therefore *proposes*; the deterministic Kill Gate still
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from ..collectors.documents import Chunk, build_evidence_pack
@@ -55,9 +56,15 @@ _EVIDENCE_ITEM = {
 }
 
 
-def _pack_for(agent_id: str, data: AgentInput, budget: int) -> tuple[Any, str, set[str]]:
-    """Build this agent's evidence pack and the id set its citations may use."""
-    chunks: list[Chunk] = list(data.params.get("_chunks") or [])
+def _pack_for(
+    agent_id: str, data: AgentInput, budget: int, chunks: Sequence[Chunk] = ()
+) -> tuple[Any, str, set[str]]:
+    """Build this agent's evidence pack and the id set its citations may use.
+
+    With no chunks the pack falls back to rendering the agent's own fact set,
+    which for a blind agent is already anonymised.
+    """
+    chunks = list(chunks)
     valid: set[str] = {f.fact_id for f in data.facts}
     if chunks:
         pack = build_evidence_pack(chunks, agent_id, budget_tokens=budget)
@@ -142,7 +149,7 @@ and must be labelled that way wherever you list them."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         prompt = (
             "Analyse the regulatory position of the company described by this evidence.\n\n"
             "EVIDENCE:\n" + rendered + "\n\n"
@@ -160,7 +167,7 @@ and must be labelled that way wherever you list them."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
 
         not_agreed, dropped = cited_only(payload.get("not_agreed", []), valid)
         agreed, _ = cited_only(payload.get("agreed", []), valid)
@@ -285,7 +292,7 @@ independent testing is an assertion, not a moat."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         return PromptBuildResult(
             prompt=(
                 "Assess the scientific or technical quality of the asset from this evidence.\n\n"
@@ -300,7 +307,7 @@ independent testing is an assertion, not a moat."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         findings, dropped = cited_only(payload.get("findings", []), valid)
         out.risk_flags.extend(_flags(findings, self.agent_id, FactCategory.CLINICAL))
 
@@ -390,7 +397,7 @@ them."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         return PromptBuildResult(
             prompt=(
                 "Identify competitors and characterise the addressable market.\n\n"
@@ -405,7 +412,7 @@ them."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         competitors, dropped = cited_only(payload.get("competitors", []), valid)
         for competitor in competitors:
             if competitor.get("ahead"):
@@ -515,7 +522,7 @@ Look especially for:
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         return PromptBuildResult(
             prompt=(
                 "Find contradictions within this evidence set. Quote both sides.\n\n"
@@ -529,7 +536,7 @@ Look especially for:
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         ticker = data.ticker or UNKNOWN
 
         kept = 0
@@ -557,9 +564,7 @@ Look especially for:
                 )
             )
 
-        critical = sum(
-            1 for c in out.contradictions if c.severity == Materiality.CRITICAL
-        )
+        critical = sum(1 for c in out.contradictions if c.severity == Materiality.CRITICAL)
         out.evaluation = self.evaluation(
             Channel.CONTRADICTIONS,
             f"{kept} contradiction(s) found, {critical} critical. Conflicts are reported as "

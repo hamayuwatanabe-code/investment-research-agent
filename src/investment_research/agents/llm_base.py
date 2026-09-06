@@ -118,16 +118,24 @@ class LLMAgent(Agent):
         *,
         fallback: Agent | None = None,
         guard: PromptGuard | None = None,
+        chunks: Sequence[Any] = (),
     ) -> None:
         self.llm = llm
         self.fallback = fallback
         self.guard = guard or PromptGuard()
+        # Held out of band for the same reason as the guard: a Chunk carries the
+        # document text, and document text carries the company name. Routing
+        # chunks through AgentInput.params would put un-anonymised prose into the
+        # blind judge's input, which the isolation scanner correctly rejects.
+        self.chunks = list(chunks)
 
     # -- to implement ------------------------------------------------------
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:  # pragma: no cover
         raise NotImplementedError
 
-    def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:  # pragma: no cover
+    def interpret(
+        self, payload: dict[str, Any], data: AgentInput
+    ) -> AgentOutput:  # pragma: no cover
         raise NotImplementedError
 
     # -- isolation ---------------------------------------------------------
@@ -142,9 +150,7 @@ class LLMAgent(Agent):
         violations = self.guard.scan(self.agent_id, prompt)
         if violations:
             log.error("prompt leakage for %s: %s", self.agent_id, violations)
-            raise LeakageError(
-                f"refusing to send a prompt containing denied content: {violations}"
-            )
+            raise LeakageError(f"refusing to send a prompt containing denied content: {violations}")
 
     # -- execution ---------------------------------------------------------
     def run(self, data: AgentInput) -> AgentOutput:

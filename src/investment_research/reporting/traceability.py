@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
 
 from ..collectors.documents import Chunk
 from ..schemas.enums import UNKNOWN
@@ -33,22 +33,42 @@ _URL_REF = re.compile(r"https?://[^\s\)\]\"'<>]+")
 
 #: Verbs and phrasings that assert something on someone else's authority.
 ATTRIBUTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("regulator", re.compile(
-        r"(?i)\b(?:FDA|EMA|PMDA|MHRA|the agency|the regulator)\b\s+"
-        r"(?:has |had |have )?(?:said|stated|advised|told|indicated|noted|determined|"
-        r"concluded|agreed|refused|rejected|recommended|requires?|required)")),
-    ("analyst", re.compile(
-        r"(?i)\b(?:analysts?|the street|sell-side|broker)\b\s+"
-        r"(?:said|expects?|estimates?|believes?|rates?|maintains?|forecasts?)")),
-    ("study", re.compile(
-        r"(?i)\b(?:the )?(?:study|trial|paper|research|data|results?)\b\s+"
-        r"(?:showed|shows|demonstrated|demonstrates|found|indicated|suggests?|reported)")),
-    ("company", re.compile(
-        r"(?i)\bthe (?:company|management|issuer)\b\s+"
-        r"(?:said|stated|disclosed|reported|announced|guided|expects?)")),
-    ("filing", re.compile(
-        r"(?i)\b(?:the )?(?:filing|10-K|10-Q|8-K|prospectus|registration statement)\b\s+"
-        r"(?:said|states?|discloses?|reported|shows?)")),
+    (
+        "regulator",
+        re.compile(
+            r"(?i)\b(?:FDA|EMA|PMDA|MHRA|the agency|the regulator)\b\s+"
+            r"(?:has |had |have )?(?:said|stated|advised|told|indicated|noted|determined|"
+            r"concluded|agreed|refused|rejected|recommended|requires?|required)"
+        ),
+    ),
+    (
+        "analyst",
+        re.compile(
+            r"(?i)\b(?:analysts?|the street|sell-side|broker)\b\s+"
+            r"(?:said|expects?|estimates?|believes?|rates?|maintains?|forecasts?)"
+        ),
+    ),
+    (
+        "study",
+        re.compile(
+            r"(?i)\b(?:the )?(?:study|trial|paper|research|data|results?)\b\s+"
+            r"(?:showed|shows|demonstrated|demonstrates|found|indicated|suggests?|reported)"
+        ),
+    ),
+    (
+        "company",
+        re.compile(
+            r"(?i)\bthe (?:company|management|issuer)\b\s+"
+            r"(?:said|stated|disclosed|reported|announced|guided|expects?)"
+        ),
+    ),
+    (
+        "filing",
+        re.compile(
+            r"(?i)\b(?:the )?(?:filing|10-K|10-Q|8-K|prospectus|registration statement)\b\s+"
+            r"(?:said|states?|discloses?|reported|shows?)"
+        ),
+    ),
 )
 
 

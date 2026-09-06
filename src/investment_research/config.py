@@ -67,6 +67,7 @@ class Settings:
     cache_dir: Path = field(default_factory=lambda: REPO_ROOT / _env("IRA_CACHE_DIR", "data/cache"))
     log_dir: Path = field(default_factory=lambda: REPO_ROOT / _env("IRA_LOG_DIR", "logs"))
     fixture_dir: Path = field(default_factory=lambda: REPO_ROOT / "data/fixtures")
+    corpus_dir: Path = field(default_factory=lambda: REPO_ROOT / "data/corpus")
 
     http_timeout: float = field(default_factory=lambda: _env_float("IRA_HTTP_TIMEOUT", 30.0))
     http_max_retries: int = field(default_factory=lambda: _env_int("IRA_HTTP_MAX_RETRIES", 4))

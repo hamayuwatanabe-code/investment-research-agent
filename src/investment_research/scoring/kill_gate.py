@@ -56,6 +56,36 @@ def _rx(pattern: str) -> re.Pattern[str]:
 #: disqualify a company on its own, but it can raise a flag.
 KILL_RULES: tuple[KillRule, ...] = (
     KillRule(
+        "endpoint_insufficient_for_efficacy",
+        KillCategory.REGULATORY_KILL,
+        "Regulator states the primary endpoint is not sufficient to demonstrate efficacy",
+        _rx(
+            r"\b(?:endpoint|rvef|right ventricular ejection fraction|primary outcome)\b"
+            r"[^.]{0,160}?\bnot sufficient\b[^.]{0,80}?"
+            r"(?:demonstrate|establish|support|show)\b[^.]{0,40}?(?:efficacy|effectiveness|benefit)"
+            r"|(?:advised|informed|told)[^.]{0,120}?\bendpoint\b[^.]{0,120}?\bnot sufficient\b"
+            r"|\bendpoint\b[^.]{0,120}?\bcannot (?:prove|demonstrate|establish)\b"
+        ),
+        KillLevel.K5,
+        KillLevel.K3,
+        "The trial as designed cannot support approval on its primary endpoint. Every valuation "
+        "of the programme assumes a registrational path the regulator has said does not exist.",
+    ),
+    KillRule(
+        "registrational_status_withdrawn",
+        KillCategory.REGULATORY_KILL,
+        "Regulator no longer treats the trial as pivotal or registrational",
+        _rx(
+            r"\bno longer\b[^.]{0,80}?\b(?:pivotal|registrational)\b"
+            r"|\bno longer\b[^.]{0,40}\b(?:refers to|calls|describes|considers)\b[^.]{0,80}\bpivotal\b"
+        ),
+        KillLevel.K5,
+        KillLevel.K3,
+        "A trial that was registrational and no longer is has lost the status the equity value "
+        "rested on, without any trial result having changed. This is the regulator withdrawing "
+        "the premise rather than the company failing a test.",
+    ),
+    KillRule(
         "endpoint_not_accepted",
         KillCategory.REGULATORY_KILL,
         "Regulator does not accept the primary endpoint as adequate to establish effectiveness",

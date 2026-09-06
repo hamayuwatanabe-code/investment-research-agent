@@ -19,8 +19,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
 
 from ..schemas.enums import (
     UNKNOWN,
@@ -86,8 +86,28 @@ class Chunk:
 #: "a Type C meeting with the U.S. FDA" after "U." truncates the statement and
 #: can hide the very sentence the analysis turns on.
 _ABBREVIATIONS = (
-    "U.S.A", "Ph.D", "U.S", "U.K", "e.g", "i.e", "Inc", "Corp", "Ltd", "Co",
-    "Dr", "Mr", "Ms", "St", "No", "vs", "approx", "etc", "Fig", "al", "Jr", "Sr",
+    "U.S.A",
+    "Ph.D",
+    "U.S",
+    "U.K",
+    "e.g",
+    "i.e",
+    "Inc",
+    "Corp",
+    "Ltd",
+    "Co",
+    "Dr",
+    "Mr",
+    "Ms",
+    "St",
+    "No",
+    "vs",
+    "approx",
+    "etc",
+    "Fig",
+    "al",
+    "Jr",
+    "Sr",
 )
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(])")
 _PERIOD_SENTINEL = "\u0000P\u0000"
@@ -191,7 +211,18 @@ AGENT_KEYWORDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "accelerated approval",
             "surrogate",
         ),
-        ("fda", "ema", "pmda", "regulator", "agency", "designation", "approval", "ind", "bla", "nda"),
+        (
+            "fda",
+            "ema",
+            "pmda",
+            "regulator",
+            "agency",
+            "designation",
+            "approval",
+            "ind",
+            "bla",
+            "nda",
+        ),
     ),
     "science": (
         (
@@ -207,7 +238,17 @@ AGENT_KEYWORDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "brain penetration",
             "adverse event",
         ),
-        ("trial", "study", "phase", "cohort", "dose", "patients", "efficacy", "safety", "mechanism"),
+        (
+            "trial",
+            "study",
+            "phase",
+            "cohort",
+            "dose",
+            "patients",
+            "efficacy",
+            "safety",
+            "mechanism",
+        ),
     ),
     "capital_structure": (
         (

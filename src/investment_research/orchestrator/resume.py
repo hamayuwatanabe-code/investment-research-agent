@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any
 
-from ..schemas.enums import UNKNOWN, FactCategory
+from ..schemas.enums import FactCategory
 from ..schemas.fact import Fact, parse_iso_date
 
 log = logging.getLogger(__name__)
@@ -112,7 +113,12 @@ def is_stale(fact: Fact, today: date) -> bool:
     the publication date. A fact with no usable date at all is treated as stale,
     because an undated fact cannot be shown to be current.
     """
-    for candidate in (fact.event_date, fact.effective_date, fact.filing_date, fact.publication_date):
+    for candidate in (
+        fact.event_date,
+        fact.effective_date,
+        fact.filing_date,
+        fact.publication_date,
+    ):
         parsed = parse_iso_date(candidate)
         if parsed:
             return (today - parsed) > timedelta(days=freshness_days(fact.category))

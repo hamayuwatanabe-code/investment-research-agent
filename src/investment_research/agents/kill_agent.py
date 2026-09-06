@@ -60,9 +60,20 @@ class KillAgent(Agent):
     agent_id = "kill_agent"
     purpose = "Find disqualifying facts; never defend the candidate"
 
-    def __init__(self, search: SearchProvider, *, max_hits_per_query: int = 5) -> None:
+    def __init__(
+        self,
+        search: SearchProvider,
+        *,
+        max_hits_per_query: int = 5,
+        executed_queries: tuple[str, ...] = (),
+    ) -> None:
         self.search = search
         self.max_hits = max_hits_per_query
+        # Queries already executed by the adversarial search pass. Without this
+        # the agent reports categories as UNSEARCHED that were in fact searched
+        # through the research provider -- understating the work that was done
+        # is as misleading as overstating it.
+        self.executed_queries = tuple(executed_queries)
 
     def run(self, data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
@@ -155,10 +166,14 @@ class KillAgent(Agent):
     def _run_searches(
         self, ticker: str, company_name: str, out: AgentOutput
     ) -> tuple[list[str], list[str], list[dict]]:
-        executed: list[str] = []
+        executed: list[str] = list(self.executed_queries)
         unexecuted: list[str] = []
         hits: list[dict] = []
+        already = {q.lower() for q in self.executed_queries}
         for query in kill_queries(ticker, company_name):
+            if _covered_by(query, already):
+                executed.append(query)
+                continue
             response = self.search.search(query, limit=self.max_hits)
             if not response.executed:
                 unexecuted.append(query)
@@ -197,6 +212,19 @@ class KillAgent(Agent):
                     categories.add(category)
         # Only mandatory categories are reported, to keep the report readable.
         return tuple(sorted(categories & set(MANDATORY_KILL_CATEGORIES), key=lambda c: c.value))
+
+
+def _covered_by(query: str, executed: set[str]) -> bool:
+    """Whether an already-executed query covers this mandatory one.
+
+    Matched on the distinctive tail of the template ("going concern",
+    "clinical hold"), because the adversarial pass phrases the same question
+    with the company name rather than the ticker.
+    """
+    tail = " ".join(query.split()[1:]).lower().strip()
+    if not tail:
+        return False
+    return any(tail in candidate for candidate in executed)
 
 
 def _kill_to_fact_category(category: KillCategory) -> FactCategory:

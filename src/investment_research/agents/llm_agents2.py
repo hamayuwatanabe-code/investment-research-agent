@@ -94,12 +94,14 @@ verification, not a disqualification on its own."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         searches = data.params.get("_bear_search_summary", "")
         return PromptBuildResult(
             prompt=(
                 "Find every reason to discard this candidate.\n\n"
-                "EVIDENCE:\n" + rendered + "\n\n"
+                "EVIDENCE:\n"
+                + rendered
+                + "\n\n"
                 + (f"ADVERSARIAL SEARCH RESULTS:\n{searches}\n\n" if searches else "")
                 + "Report findings with category, level and evidence ids. Also propose "
                 "follow_up_queries: specific web searches that would confirm or refute the "
@@ -111,7 +113,7 @@ verification, not a disqualification on its own."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         findings, dropped = cited_only(payload.get("findings", []), valid)
 
         proposed: list[dict[str, Any]] = []
@@ -135,9 +137,7 @@ verification, not a disqualification on its own."""
                         category=_kill_to_fact_category(category),
                         title=f"{category} proposed {level}: {item['title']}",
                         detail=str(item["detail"]),
-                        severity=(
-                            Materiality.CRITICAL if level.level >= 4 else Materiality.HIGH
-                        ),
+                        severity=(Materiality.CRITICAL if level.level >= 4 else Materiality.HIGH),
                         fact_ids=tuple(item.get("evidence_ids", [])),
                         raised_by=self.agent_id,
                     )
@@ -213,7 +213,7 @@ useful than an invented mechanism."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         return PromptBuildResult(
             prompt=(
                 "Construct the most plausible way this investment loses money.\n\n"
@@ -227,7 +227,7 @@ useful than an invented mechanism."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         mechanisms, dropped = cited_only(payload.get("mechanisms", []), valid)
         ordered = sorted(
             mechanisms,
@@ -291,7 +291,7 @@ finding, not a failure of imagination."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         return PromptBuildResult(
             prompt=(
                 "Assess whether this evidence supports the market undervaluing the asset.\n\n"
@@ -305,7 +305,7 @@ finding, not a failure of imagination."""
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
-        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         points, dropped = cited_only(payload.get("points", []), valid)
 
         if not points:
@@ -331,15 +331,16 @@ finding, not a failure of imagination."""
             tuple(p["statement"] for p in points),
             {
                 "points": [
-                    {"claim": p["statement"], "fact_ids": p.get("evidence_ids", []),
-                     "category": "llm"}
+                    {
+                        "claim": p["statement"],
+                        "fact_ids": p.get("evidence_ids", []),
+                        "category": "llm",
+                    }
                     for p in points
                 ],
                 "dropped_unsupported_points": [p["statement"] for p in dropped],
                 "decision_grade_fact_count": len(data.decision_grade_facts()),
-                "evidence_used": sorted(
-                    {i for p in points for i in p.get("evidence_ids", [])}
-                ),
+                "evidence_used": sorted({i for p in points for i in p.get("evidence_ids", [])}),
             },
             self.baseline_from(data),
         )
@@ -382,7 +383,7 @@ you express. Your job is the reasoning that makes that decision legible."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        _, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens)
+        _, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         sections = [f"EVIDENCE ABOUT COMPANY X:\n{rendered}"]
         for label, channel in (
             ("KILL FINDINGS", Channel.KILL),
@@ -444,9 +445,7 @@ you express. Your job is the reasoning that makes that decision legible."""
             run_status=run_status,
             judged_blind=data.ticker is None,
             anonymized_label=str(data.params.get("anonymized_label", "Company X")),
-            caveats=tuple(
-                BlindJudgeAgent._caveats(run_status, confidence, gate)
-            ),
+            caveats=tuple(BlindJudgeAgent._caveats(run_status, confidence, gate)),
         )
         out.evaluation = self.evaluation(
             Channel.VERDICT,

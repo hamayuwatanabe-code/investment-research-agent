@@ -47,6 +47,43 @@ class RegulatoryPattern:
 
 ADVERSE_PATTERNS: tuple[RegulatoryPattern, ...] = (
     RegulatoryPattern(
+        "endpoint_insufficient_for_efficacy",
+        "Regulator states the primary endpoint is not sufficient to demonstrate efficacy",
+        re.compile(
+            r"(?i)\b(?:endpoint|rvef|right ventricular ejection fraction|primary outcome)\b"
+            r"[^.]{0,160}?\b(?:is |are |was |were )?not sufficient\b[^.]{0,80}?"
+            r"(?:demonstrate|establish|support|show)\b[^.]{0,40}?"
+            r"(?:efficacy|effectiveness|benefit)"
+            r"|(?:advised|informed|told|notified)[^.]{0,120}?\bendpoint\b[^.]{0,120}?"
+            r"\bnot sufficient\b"
+            r"|\bendpoint\b[^.]{0,120}?\bcannot (?:prove|demonstrate|establish)\b"
+        ),
+        Materiality.CRITICAL,
+        True,
+    ),
+    RegulatoryPattern(
+        "registrational_status_withdrawn",
+        "Regulator no longer treats the trial as pivotal or registrational",
+        re.compile(
+            r"(?i)\bno longer\b[^.]{0,80}?\b(?:pivotal|registrational)\b"
+            r"|\bno longer\b[^.]{0,40}\b(?:refers to|calls|describes|considers)\b[^.]{0,80}"
+            r"\bpivotal\b"
+        ),
+        Materiality.CRITICAL,
+        True,
+    ),
+    RegulatoryPattern(
+        "regulator_prescribes_other_endpoints",
+        "Regulator names different endpoints as the only likely acceptable ones",
+        re.compile(
+            r"(?i)\b(?:recommended|advised|indicated)\b[^.]{0,120}?\bonly\b[^.]{0,80}?"
+            r"(?:objective measures|mortality|survival|MACE)[^.]{0,120}?"
+            r"(?:acceptable|likely to be acceptable|demonstrating efficacy)"
+        ),
+        Materiality.CRITICAL,
+        True,
+    ),
+    RegulatoryPattern(
         "endpoint_not_acceptable",
         "FDA does not accept the primary endpoint as adequate to establish effectiveness",
         re.compile(

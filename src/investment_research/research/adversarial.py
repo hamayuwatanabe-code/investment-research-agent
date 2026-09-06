@@ -17,8 +17,9 @@ finding gets confirmed.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 from ..schemas.enums import ResearchDomain
 from .provider import ResearchProvider, ResearchQuery, ResearchResult
@@ -156,9 +157,7 @@ def build_plan(ticker: str, company: str, programmes: Sequence[str] = ()) -> Sea
             )
         return queries
 
-    return SearchPlan(
-        bear=expand(BEAR_TEMPLATES, "bear"), bull=expand(BULL_TEMPLATES, "bull")
-    )
+    return SearchPlan(bear=expand(BEAR_TEMPLATES, "bear"), bull=expand(BULL_TEMPLATES, "bull"))
 
 
 def run_adversarial_search(

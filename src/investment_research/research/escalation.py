@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 from ..collectors.documents import Document
 from ..schemas.enums import (
@@ -48,14 +48,22 @@ PRIMARY_DOMAINS: tuple[str, ...] = (
 #: A claim is material enough to require escalation if it says one of these
 #: things. Deliberately narrow: escalating everything would be noise.
 _MATERIAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("regulator_position", re.compile(r"(?i)\b(?:fda|ema|pmda|regulator|agency)\b.{0,120}"
-                                      r"(?:not sufficient|does not|no longer|advised|required|rejected)")),
+    (
+        "regulator_position",
+        re.compile(
+            r"(?i)\b(?:fda|ema|pmda|regulator|agency)\b.{0,120}"
+            r"(?:not sufficient|does not|no longer|advised|required|rejected)"
+        ),
+    ),
     ("endpoint", re.compile(r"(?i)\bendpoint\b.{0,80}(?:not|insufficient|inadequate|cannot)")),
     ("pivotal_status", re.compile(r"(?i)\bno longer\b.{0,40}\b(?:pivotal|registrational)\b")),
     ("going_concern", re.compile(r"(?i)\b(?:going concern|substantial doubt)\b")),
     ("clinical_hold", re.compile(r"(?i)\bclinical hold\b")),
     ("trial_failure", re.compile(r"(?i)\b(?:failed|did not meet|missed)\b.{0,40}\bendpoint\b")),
-    ("investigation", re.compile(r"(?i)\b(?:sec investigation|subpoena|wells notice|restatement)\b")),
+    (
+        "investigation",
+        re.compile(r"(?i)\b(?:sec investigation|subpoena|wells notice|restatement)\b"),
+    ),
     ("delisting", re.compile(r"(?i)\b(?:delisting|minimum bid price|non-?compliance)\b")),
 )
 
@@ -105,23 +113,37 @@ def needs_escalation(fact: Fact) -> tuple[bool, str]:
     return False, ""
 
 
+#: Document types that carry statutory liability or come from the regulator
+#: itself. A press release does not qualify, however primary the wire that
+#: distributed it.
+_PRIMARY_DOC_TYPES = frozenset({"filing", "registry", "regulator", "docket"})
+
+
 def _confirms(document: Document, fact: Fact) -> bool:
     """Whether a candidate primary document actually supports the claim.
 
-    Deliberately strict: overlapping distinctive terms, not merely being about
-    the same company. A 10-K that mentions the FDA does not confirm a specific
-    statement about what the FDA said.
+    Two independent bars, both required:
+
+    1. **The document must be able to confirm this.** A company press release is
+       not a primary source for what a regulator said -- it is the company's
+       account of it, which is the exact conflation this system exists to stop.
+       Company-controlled material qualifies only when it is a statutory filing,
+       which carries liability that a release does not.
+    2. **It must actually say the same thing.** Overlapping distinctive terms,
+       not merely being about the same company: a 10-K that mentions the FDA
+       does not confirm a specific statement about what the FDA said.
     """
     if not document.tier.is_primary:
+        return False
+    if document.is_company_ir and document.doc_type not in _PRIMARY_DOC_TYPES:
+        return False
+    if not document.content_kind.is_primary_text:
+        # A search engine's summary about a filing is not the filing.
         return False
     haystack = f"{document.title} {document.text}".lower()
     if not haystack.strip():
         return False
-    terms = {
-        term
-        for term in re.split(r"[^a-z0-9]+", fact.claim.lower())
-        if len(term) > 5
-    }
+    terms = {term for term in re.split(r"[^a-z0-9]+", fact.claim.lower()) if len(term) > 5}
     if not terms:
         return False
     overlap = sum(1 for term in terms if term in haystack)

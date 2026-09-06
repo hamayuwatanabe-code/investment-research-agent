@@ -32,9 +32,7 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
         if schema.get("additionalProperties") is False:
             extra = set(instance) - set(properties)
             if extra:
-                raise SchemaValidationError(
-                    f"{path}: unexpected properties {sorted(extra)}"
-                )
+                raise SchemaValidationError(f"{path}: unexpected properties {sorted(extra)}")
         for key, value in instance.items():
             if key in properties:
                 validate(value, properties[key], f"{path}.{key}")
@@ -50,9 +48,7 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             )
         min_items = schema.get("minItems")
         if min_items is not None and len(instance) < min_items:
-            raise SchemaValidationError(
-                f"{path}: {len(instance)} items below minItems {min_items}"
-            )
+            raise SchemaValidationError(f"{path}: {len(instance)} items below minItems {min_items}")
         item_schema = schema.get("items")
         if item_schema:
             for index, item in enumerate(instance):
@@ -64,9 +60,7 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
             raise SchemaValidationError(f"{path}: expected string, got {type(instance).__name__}")
         choices = schema.get("enum")
         if choices is not None and instance not in choices:
-            raise SchemaValidationError(
-                f"{path}: {instance!r} is not one of {choices}"
-            )
+            raise SchemaValidationError(f"{path}: {instance!r} is not one of {choices}")
         max_length = schema.get("maxLength")
         if max_length is not None and len(instance) > max_length:
             raise SchemaValidationError(f"{path}: string longer than {max_length}")

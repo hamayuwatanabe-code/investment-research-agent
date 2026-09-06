@@ -21,8 +21,9 @@ the result, and the report states which paths served the run.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from ..collectors.documents import Document
 from ..schemas.enums import FetchOutcome, ResearchDomain, ResearchPath, SearchStatus
@@ -92,11 +93,9 @@ class ResearchProvider(Protocol):
         """``(usable, reason)``. A provider says why it cannot run."""
         ...
 
-    def search(self, query: ResearchQuery) -> ResearchResult:
-        ...
+    def search(self, query: ResearchQuery) -> ResearchResult: ...
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
-        ...
+    def fetch(self, url: str, *, reason: str = "") -> Document | None: ...
 
 
 class NullResearchProvider:
