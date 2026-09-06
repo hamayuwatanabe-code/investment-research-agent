@@ -138,7 +138,7 @@ class EvidenceIntegrityAgent(Agent):
             and other.source_tier.rank <= SourceTier.TIER_3.rank
         ]
         # Same-host republication does not count.
-        seen_hosts: set[str] = set()
+        seen_hosts: set[str] = set()  # same-host republication is not confirmation
         confirming: list[str] = []
         for other in others:
             host = other.source_url.split("/")[2] if "//" in other.source_url else other.source_url

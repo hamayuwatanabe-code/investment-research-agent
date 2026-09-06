@@ -21,7 +21,7 @@ from typing import Any
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput, RiskFlag
-from ..schemas.enums import UNKNOWN, EvidenceClass, FactCategory, Materiality
+from ..schemas.enums import UNKNOWN, FactCategory, Materiality
 from ..schemas.fact import Fact, UnresolvedQuestion
 from .base import Agent
 from .capital_structure import parse_number

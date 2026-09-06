@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .enums import Action, KillCategory, KillLevel, Materiality, RunStatus, ScenarioName
+from .enums import Action, KillCategory, KillLevel, RunStatus, ScenarioName
 
 
 @dataclass

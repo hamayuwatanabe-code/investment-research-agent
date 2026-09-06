@@ -74,7 +74,7 @@ class MicrostructureAgent(Agent):
             )
         ]
 
-        values: dict[str, Any] = {field: UNKNOWN for field in FIELDS}
+        values: dict[str, Any] = dict.fromkeys(FIELDS, UNKNOWN)
         citations: dict[str, str] = {}
         for field, patterns in _FIELD_PATTERNS.items():
             for fact in facts:

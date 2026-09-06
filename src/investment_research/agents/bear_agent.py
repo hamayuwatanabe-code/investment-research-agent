@@ -14,8 +14,7 @@ import logging
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput
-from ..schemas.enums import UNKNOWN, EvidenceClass, FactCategory, Materiality
-from ..schemas.fact import Fact
+from ..schemas.enums import UNKNOWN, FactCategory, Materiality
 from .base import Agent
 
 log = logging.getLogger(__name__)

@@ -184,8 +184,8 @@ def extract_xbrl_metric(
     entry = facts.get(tag)
     if not entry:
         return None, UNKNOWN
-    units = entry.get("units") or {}
-    series = units.get(unit) or next(iter(units.values()), [])
+    units: dict[str, list[dict[str, Any]]] = entry.get("units") or {}
+    series: list[dict[str, Any]] = units.get(unit) or next(iter(units.values()), [])
     dated = [item for item in series if item.get("end")]
     if not dated:
         return None, UNKNOWN

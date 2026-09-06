@@ -12,16 +12,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..orchestrator.isolation import Channel
+from ..orchestrator.pipeline import ResearchResult
 from ..schemas.enums import (
     UNKNOWN,
     KillLevel,
     Materiality,
     Provenance,
     RunStatus,
-    SourceTier,
 )
 from ..schemas.evaluation import SCORE_DIMENSIONS
-from ..orchestrator.pipeline import ResearchResult
 from .citations import CitationValidator
 
 SECTION_ORDER = (
@@ -530,9 +529,10 @@ class ReportRenderer:
             value = card.scores.get(dimension)
             confidence = card.per_score_confidence.get(dimension)
             capped = " [CAPPED BY KILL GATE]" if dimension in card.capped_by_kill_gate else ""
+            score_text = UNKNOWN if value is None else f"{value:.1f}"
+            confidence_text = "-" if confidence is None else f"{confidence:.1f}"
             out.append(
-                f"  {dimension:<28} {('%.1f' % value) if value is not None else UNKNOWN:>6} "
-                f"{('%.1f' % confidence) if confidence is not None else '-':>5}   "
+                f"  {dimension:<28} {score_text:>6} {confidence_text:>5}   "
                 f"{card.rationale.get(dimension, '')}{capped}"
             )
         return "\n".join(out)

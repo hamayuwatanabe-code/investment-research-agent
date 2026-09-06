@@ -137,10 +137,16 @@ _COMPANY_WIRE_HOSTS = {
 
 
 def _host(url: str) -> str:
+    """Hostname, lowercased, with a leading ``www.`` label removed.
+
+    Note: ``lstrip("www.")`` would strip *characters*, turning ``www.wsj.com``
+    into ``sj.com`` and silently misclassifying the source.
+    """
     try:
-        return (urlparse(url).hostname or "").lower().lstrip("www.")
+        host = (urlparse(url).hostname or "").lower()
     except ValueError:
         return ""
+    return host[4:] if host.startswith("www.") else host
 
 
 def _match_len(host: str, table: set[str]) -> int:

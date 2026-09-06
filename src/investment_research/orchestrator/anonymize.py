@@ -15,8 +15,9 @@ the verdict is fixed.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..schemas.agent_io import Evaluation
 from ..schemas.fact import Fact

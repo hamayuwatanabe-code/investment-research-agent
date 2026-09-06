@@ -23,7 +23,7 @@ from itertools import combinations
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput
-from ..schemas.enums import UNKNOWN, EvidenceClass, FactCategory, Materiality, SourceTier
+from ..schemas.enums import UNKNOWN, EvidenceClass, Materiality, SourceTier
 from ..schemas.fact import Contradiction, Fact, make_contradiction_id, parse_iso_date
 from .base import Agent
 from .capital_structure import parse_number

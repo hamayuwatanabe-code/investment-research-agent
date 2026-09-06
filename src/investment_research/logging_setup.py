@@ -6,8 +6,9 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 _TOKEN_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_\-]{12,}"),

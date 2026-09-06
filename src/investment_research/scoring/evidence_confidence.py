@@ -15,10 +15,7 @@ from dataclasses import dataclass
 
 from ..schemas.enums import (
     DECISION_GRADE_CLASSES,
-    EvidenceClass,
     KillCategory,
-    SourceTier,
-    VerifiedStatus,
 )
 from ..schemas.fact import Fact, UnresolvedQuestion
 

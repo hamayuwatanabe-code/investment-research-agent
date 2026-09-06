@@ -12,7 +12,8 @@ Two jobs:
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .enums import (
     UNKNOWN,
@@ -133,12 +134,15 @@ def validate_fact(fact: Fact, *, facts_only: bool = True) -> None:
         assert_evaluation_free(fact.claim, where=f"fact:{fact.fact_id}")
 
     # A company's own statement can never be a VERIFIED_FACT on its own.
-    if fact.company_claim and fact.evidence_class == EvidenceClass.VERIFIED_FACT:
-        if not fact.independent_confirmation:
-            raise SchemaError(
-                "a company claim cannot be classified VERIFIED_FACT without independent "
-                "confirmation (requirement 1B)"
-            )
+    if (
+        fact.company_claim
+        and fact.evidence_class == EvidenceClass.VERIFIED_FACT
+        and not fact.independent_confirmation
+    ):
+        raise SchemaError(
+            "a company claim cannot be classified VERIFIED_FACT without independent "
+            "confirmation (requirement 1B)"
+        )
     # Tier 4/5 alone cannot produce a decision-grade verified fact.
     if (
         fact.evidence_class == EvidenceClass.VERIFIED_FACT

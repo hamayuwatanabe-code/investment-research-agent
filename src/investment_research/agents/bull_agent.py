@@ -18,8 +18,8 @@ import logging
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput
-from ..schemas.enums import UNKNOWN, FactCategory, Materiality
-from ..schemas.fact import Fact, UnresolvedQuestion
+from ..schemas.enums import FactCategory
+from ..schemas.fact import UnresolvedQuestion
 from .base import Agent
 
 log = logging.getLogger(__name__)

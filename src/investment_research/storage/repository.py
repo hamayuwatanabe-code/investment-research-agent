@@ -10,18 +10,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any
 
+from ..schemas.agent_io import AgentRunRecord, RunContext
 from ..schemas.evaluation import (
     CatalystEvent,
     KillGateResult,
-    ScoreCard,
     Scenario,
+    ScoreCard,
     Verdict,
 )
 from ..schemas.fact import Contradiction, Fact, Source
-from ..schemas.agent_io import AgentRunRecord, RunContext
 from ..schemas.validation import validate_fact, validate_source
 
 _CONTENT_FIELDS = (

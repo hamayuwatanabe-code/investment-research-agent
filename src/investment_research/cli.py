@@ -18,9 +18,9 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import Sequence
 
 from .collectors.base import CollectionResult
 from .collectors.clinicaltrials import ClinicalTrialsCollector

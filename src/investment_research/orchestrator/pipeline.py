@@ -14,14 +14,14 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from ..agents.base import Agent, inputs_hash
-from ..agents.blind_judge import BlindJudgeAgent
 from ..agents.bear_agent import BearAgent
+from ..agents.blind_judge import BlindJudgeAgent
 from ..agents.bull_agent import BullAgent
 from ..agents.capital_structure import CapitalStructureAgent
 from ..agents.catalyst import CatalystAgent
@@ -40,11 +40,11 @@ from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
     KillCategory,
+    KillLevel,
     Provenance,
     RunStatus,
 )
 from ..schemas.evaluation import KillAssessment, KillGateResult, ScoreCard, Verdict
-from ..schemas.enums import KillLevel
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
@@ -316,15 +316,16 @@ class Pipeline:
         self.repo.save_kill_gate(ctx.run_id, ctx.ticker, gate)
 
         # ---- Stage 6: bear and bull, mutually blind ----------------------
-        bear_output = self._run_agent(
+        # Order matters only for reproducibility; neither can see the other.
+        self._run_agent(
             BearAgent(), guard, result, params=params, user_preferences=user_preferences
         )
-        bull_output = self._run_agent(
+        self._run_agent(
             BullAgent(), guard, result, params=params, user_preferences=user_preferences
         )
 
         # ---- Stage 7: valuation ------------------------------------------
-        valuation_output = self._run_agent(
+        self._run_agent(
             ValuationAgent(), guard, result, params=params, user_preferences=user_preferences
         )
 
@@ -333,9 +334,6 @@ class Pipeline:
             bus.channels[Channel.CAPITAL_STRUCTURE].payload
             if Channel.CAPITAL_STRUCTURE in bus.channels
             else {}
-        )
-        valuation_payload = (
-            bus.channels[Channel.VALUATION].payload if Channel.VALUATION in bus.channels else {}
         )
         catalyst_payload = (
             bus.channels[Channel.CATALYSTS].payload if Channel.CATALYSTS in bus.channels else {}

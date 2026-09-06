@@ -15,11 +15,9 @@ from typing import Any
 
 from ..schemas.evaluation import (
     INVESTMENT_QUALITY_DIMENSIONS,
-    SCORE_DIMENSIONS,
     KillGateResult,
     ScoreCard,
 )
-from ..schemas.enums import KillCategory, KillLevel
 from .kill_gate import quality_cap
 
 log = logging.getLogger(__name__)
@@ -53,8 +51,6 @@ def build_scorecard(
     competitive = channels.get("competitive_findings")
     valuation = channels.get("valuation_math")
     micro = channels.get("microstructure")
-    bull = channels.get("bull_case")
-    bear = channels.get("bear_case")
 
     reg_payload = regulatory.payload if regulatory else {}
     cap_payload = capital.payload if capital else {}

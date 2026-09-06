@@ -29,8 +29,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from ..schemas.agent_io import AgentInput, Evaluation, RiskFlag
 from ..schemas.fact import Contradiction, Fact, Source, UnresolvedQuestion
@@ -495,7 +496,15 @@ class IsolationGuard:
 
         forbidden_identity: list[str] = []
         if not policy.sees_identity:
-            forbidden_identity = identity_markers(ticker, company_name, aliases)
+            from .anonymize import ANON_LABEL
+
+            # A marker identical to the anonymisation label is already
+            # anonymous; flagging it would make the pack impossible to build.
+            forbidden_identity = [
+                marker
+                for marker in identity_markers(ticker, company_name, aliases)
+                if marker.strip().lower() != ANON_LABEL.lower()
+            ]
 
         scanner = LeakageScanner(denied_fingerprints, forbidden_identity)
         violations = scanner.scan(policy.agent_id, agent_input)

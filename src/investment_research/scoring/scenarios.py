@@ -61,8 +61,12 @@ def build_scenarios(
         elif name in (ScenarioName.BULL, ScenarioName.EXTREME_BULL):
             low, high = max(0.005, low - shift * 0.8), max(0.01, high - shift * 0.8)
 
-        price_low = price * _PRICE_MULTIPLE[name][0] if price else None
-        price_high = price * _PRICE_MULTIPLE[name][1] if price else None
+        price_range: tuple[float, float] | None = (
+            (price * _PRICE_MULTIPLE[name][0], price * _PRICE_MULTIPLE[name][1])
+            if price
+            else None
+        )
+        price_high = price_range[1] if price_range else None
         shares = fully_diluted_shares or basic_shares
         market_cap = price_high * (basic_shares or 0) if price_high and basic_shares else None
         diluted_cap = price_high * shares if price_high and shares else None
@@ -71,7 +75,7 @@ def build_scenarios(
             Scenario(
                 name=name,
                 probability_range=(round(low, 3), round(high, 3)),
-                price_range=(price_low, price_high) if price_low is not None else None,
+                price_range=price_range,
                 market_cap=market_cap,
                 fully_diluted_market_cap=diluted_cap,
                 time_horizon=_horizon_for(name),

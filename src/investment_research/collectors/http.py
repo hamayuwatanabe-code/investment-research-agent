@@ -11,6 +11,7 @@ that downstream code reads as "nothing to worry about".  Every fetch returns a
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -20,9 +21,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from ..schemas.enums import FetchOutcome
 
@@ -191,10 +193,8 @@ class HttpClient:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     body = response.read()
                     if response.headers.get("Content-Encoding") == "gzip":
-                        try:
+                        with contextlib.suppress(OSError):
                             body = gzip.decompress(body)
-                        except OSError:
-                            pass
                     status = int(response.status)
                     result = FetchResult(
                         url=url,

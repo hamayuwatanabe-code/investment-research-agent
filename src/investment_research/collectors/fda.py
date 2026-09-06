@@ -14,7 +14,6 @@ emits an explicit unresolved question rather than an optimistic silence.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory, FetchOutcome, Provenance, SourceTier
 from ..schemas.fact import RawFact, Source, make_source_id

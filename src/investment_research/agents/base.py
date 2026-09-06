@@ -19,8 +19,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..schemas.agent_io import AgentInput, AgentOutput, Evaluation
 from ..orchestrator.isolation import derive_fingerprints
+from ..schemas.agent_io import AgentInput, AgentOutput, Evaluation
 
 log = logging.getLogger(__name__)
 

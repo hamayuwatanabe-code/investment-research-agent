@@ -269,7 +269,7 @@ class RegulatoryAgent(Agent):
                     agreed.append(f"{pattern.label}{note} [{fact.fact_id}]")
 
             if fact.company_claim and COMPANY_FRAMING_RE.search(fact.claim):
-                adjectives = sorted(set(m.lower() for m in COMPANY_FRAMING_RE.findall(fact.claim)))
+                adjectives = sorted({m.lower() for m in COMPANY_FRAMING_RE.findall(fact.claim)})
                 company_framings.append(
                     f"Company describes the interaction as {adjectives} [{fact.fact_id}] "
                     f"-- characterization only, not a regulator statement"
@@ -322,12 +322,12 @@ class RegulatoryAgent(Agent):
             )
 
         for question in _STANDING_QUESTIONS:
-            if question["key"] not in matched_keys:
+            if question.key not in matched_keys:
                 out.unresolved.append(
                     UnresolvedQuestion(
-                        question=question["text"],
-                        why_it_matters=question["why"],
-                        blocking=bool(question.get("blocking")),
+                        question=question.text,
+                        why_it_matters=question.why,
+                        blocking=question.blocking,
                         category=FactCategory.REGULATORY,
                         raised_by=self.agent_id,
                     )
@@ -374,31 +374,37 @@ class RegulatoryAgent(Agent):
         return "UNKNOWN"
 
 
-_STANDING_QUESTIONS = (
-    {
-        "key": "regulator_meeting",
-        "text": "What was discussed and decided at the most recent Type A/B/C meeting?",
-        "why": "Meeting minutes state the regulator's position in its own words.",
-        "blocking": False,
-    },
-    {
-        "key": "spa_agreement",
-        "text": "Is there a Special Protocol Assessment, and does it remain in force?",
-        "why": "An SPA is the strongest available evidence that a trial design is acceptable.",
-        "blocking": False,
-    },
-    {
-        "key": "complete_response_letter",
-        "text": "Has the programme received a Complete Response Letter?",
-        "why": "A prior CRL usually names the exact deficiency that must be cured.",
-        "blocking": False,
-    },
-    {
-        "key": "cmc_deficiency",
-        "text": "Are there open CMC or manufacturing issues?",
-        "why": "CMC failures delay approvals independently of clinical results.",
-        "blocking": False,
-    },
+@dataclass(frozen=True)
+class StandingQuestion:
+    """A question that is asked whenever the evidence does not already answer it."""
+
+    key: str
+    text: str
+    why: str
+    blocking: bool = False
+
+
+_STANDING_QUESTIONS: tuple[StandingQuestion, ...] = (
+    StandingQuestion(
+        key="regulator_meeting",
+        text="What was discussed and decided at the most recent Type A/B/C meeting?",
+        why="Meeting minutes state the regulator's position in its own words.",
+    ),
+    StandingQuestion(
+        key="spa_agreement",
+        text="Is there a Special Protocol Assessment, and does it remain in force?",
+        why="An SPA is the strongest available evidence that a trial design is acceptable.",
+    ),
+    StandingQuestion(
+        key="complete_response_letter",
+        text="Has the programme received a Complete Response Letter?",
+        why="A prior CRL usually names the exact deficiency that must be cured.",
+    ),
+    StandingQuestion(
+        key="cmc_deficiency",
+        text="Are there open CMC or manufacturing issues?",
+        why="CMC failures delay approvals independently of clinical results.",
+    ),
 )
 
 

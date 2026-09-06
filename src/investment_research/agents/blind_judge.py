@@ -16,9 +16,8 @@ import logging
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput
-from ..schemas.enums import UNKNOWN, Action, KillLevel, RunStatus
+from ..schemas.enums import UNKNOWN, Action, KillCategory, KillLevel, RunStatus
 from ..schemas.evaluation import KillAssessment, KillGateResult, Verdict
-from ..schemas.enums import KillCategory
 from .base import Agent
 
 log = logging.getLogger(__name__)

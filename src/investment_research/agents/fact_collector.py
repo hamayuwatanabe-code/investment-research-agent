@@ -14,7 +14,7 @@ Two structural guarantees rather than a promise:
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 
 from ..collectors.base import CollectionResult
 from ..schemas.agent_io import AgentInput, AgentOutput
@@ -22,7 +22,6 @@ from ..schemas.enums import (
     UNKNOWN,
     EvidenceClass,
     FactCategory,
-    FetchOutcome,
     Materiality,
     Provenance,
     SourceTier,
