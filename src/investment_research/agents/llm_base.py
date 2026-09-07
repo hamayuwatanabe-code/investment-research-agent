@@ -119,6 +119,7 @@ class LLMAgent(Agent):
         fallback: Agent | None = None,
         guard: PromptGuard | None = None,
         chunks: Sequence[Any] = (),
+        discovery_summary: str = "",
     ) -> None:
         self.llm = llm
         self.fallback = fallback
@@ -128,6 +129,13 @@ class LLMAgent(Agent):
         # chunks through AgentInput.params would put un-anonymised prose into the
         # blind judge's input, which the isolation scanner correctly rejects.
         self.chunks = list(chunks)
+        # Purpose-filtered web-search discovery context (requirement M3), built
+        # by the orchestrator from purposes_for_agent(self.agent_id) BEFORE
+        # construction. Never routed through the shared AgentInput.params dict,
+        # which is copied unfiltered into every agent's input -- a Bear-purpose
+        # summary sitting there would be one careless read away from reaching
+        # the Bull agent.
+        self.discovery_summary = discovery_summary
 
     # -- to implement ------------------------------------------------------
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:  # pragma: no cover

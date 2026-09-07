@@ -545,6 +545,56 @@ class Repository:
         self.conn.commit()
         return n
 
+    # -- search discovery log (requirements M2/M3) ------------------------
+    def save_discovery_log(self, discovery) -> tuple[int, int]:
+        """Persist a DiscoveryLog: queries and hits, kept apart from facts."""
+        n_queries = 0
+        for query in discovery.queries:
+            row = query.to_row()
+            cols = ",".join(row)
+            marks = ",".join("?" * len(row))
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO search_queries({cols}) VALUES({marks})",
+                tuple(row.values()),
+            )
+            n_queries += 1
+        n_hits = 0
+        for hit in discovery.hits:
+            row = hit.to_row()
+            cols = ",".join(row)
+            marks = ",".join("?" * len(row))
+            self.conn.execute(
+                f"INSERT OR REPLACE INTO search_hits({cols}) VALUES({marks})",
+                tuple(row.values()),
+            )
+            n_hits += 1
+        self.conn.commit()
+        return n_queries, n_hits
+
+    def discovery_queries(self, run_id: str, purposes: tuple[str, ...] | None = None):
+        if purposes:
+            placeholders = ",".join("?" * len(purposes))
+            return self.conn.execute(
+                f"SELECT * FROM search_queries WHERE run_id = ? "
+                f"AND query_purpose IN ({placeholders}) ORDER BY created_at",
+                (run_id, *purposes),
+            ).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM search_queries WHERE run_id = ? ORDER BY created_at", (run_id,)
+        ).fetchall()
+
+    def discovery_hits(self, run_id: str, purposes: tuple[str, ...] | None = None):
+        if purposes:
+            placeholders = ",".join("?" * len(purposes))
+            return self.conn.execute(
+                f"SELECT * FROM search_hits WHERE run_id = ? "
+                f"AND query_purpose IN ({placeholders}) ORDER BY rank",
+                (run_id, *purposes),
+            ).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM search_hits WHERE run_id = ? ORDER BY rank", (run_id,)
+        ).fetchall()
+
     def log_fetch(
         self,
         run_id: str,

@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from ..schemas.enums import UNKNOWN, QueryPurpose, ResearchPath, SourceTier
 

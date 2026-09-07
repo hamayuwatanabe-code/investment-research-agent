@@ -95,7 +95,7 @@ verification, not a disqualification on its own."""
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
         pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
-        searches = data.params.get("_bear_search_summary", "")
+        searches = self.discovery_summary
         return PromptBuildResult(
             prompt=(
                 "Find every reason to discard this candidate.\n\n"

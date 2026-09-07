@@ -21,7 +21,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..schemas.enums import ResearchDomain
+from ..schemas.enums import QueryPurpose, ResearchDomain
+from .discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, make_query_id
 from .provider import ResearchProvider, ResearchQuery, ResearchResult
 
 log = logging.getLogger(__name__)
@@ -107,13 +108,22 @@ class SearchPlan:
 
 @dataclass
 class AdversarialOutcome:
-    """Results of the two passes, kept apart."""
+    """Results of the two passes, kept apart.
+
+    ``documents`` on each ``ResearchResult`` remain here for callers that need
+    the raw provider response (e.g. escalation, which fetches bodies). They are
+    NOT facts and must never be extracted into facts directly (requirement M2)
+    -- ``discovery`` is the audited, purpose-tagged record of what was searched
+    and found, and it is what agents and the completeness gate should read.
+    """
 
     bear_results: list[ResearchResult] = field(default_factory=list)
     bull_results: list[ResearchResult] = field(default_factory=list)
     follow_up_queries: list[ResearchQuery] = field(default_factory=list)
     executed: int = 0
     unexecuted: list[str] = field(default_factory=list)
+    #: Auditable, purpose-separated query and hit log (requirement M3).
+    discovery: DiscoveryLog = field(default_factory=DiscoveryLog)
 
     def bear_documents(self) -> list:
         return [d for r in self.bear_results for d in r.documents]
@@ -122,6 +132,11 @@ class AdversarialOutcome:
         return [d for r in self.bull_results for d in r.documents]
 
     def all_documents(self) -> list:
+        """All discovered documents, deduplicated.
+
+        Kept for callers that need to attempt body retrieval (escalation), NOT
+        for fact extraction -- see the class docstring.
+        """
         seen: set[str] = set()
         out = []
         for document in self.bear_documents() + self.bull_documents():
@@ -166,17 +181,51 @@ def run_adversarial_search(
     *,
     llm: Any = None,
     max_follow_ups: int = 8,
+    run_id: str = "",
+    ticker: str = "",
+    agent_id: str = "adversarial_search",
 ) -> AdversarialOutcome:
     """Execute the bear pass, then the bull pass, then LLM follow-ups.
 
     Order is deliberate: the bear pass runs first and its results seed the
     follow-up generation, so the follow-ups hunt for disconfirmation rather than
     elaborating a story the bull pass has already started telling.
+
+    Every query and every hit is recorded on ``outcome.discovery`` with its
+    purpose (requirement M3), so a Bear-purpose hit can never be handed to the
+    Bull agent's context (or vice versa) -- the isolation is enforced by which
+    purposes an agent is allowed to read (``purposes_for_agent``), not by hoping
+    nothing gets mixed up downstream.
     """
     outcome = AdversarialOutcome()
+    run_id = run_id or ticker or "unknown-run"
+
+    def _execute(query: ResearchQuery, purpose: QueryPurpose, origin_fact_id: str | None = None):
+        result = provider.search(query)
+        record = SearchQueryRecord(
+            query_id=make_query_id(agent_id, purpose, query.query, run_id),
+            run_id=run_id,
+            ticker=ticker,
+            agent_id=agent_id,
+            query_purpose=purpose,
+            query_text=query.query,
+            origin_fact_id=origin_fact_id,
+            results_count=len(result.documents),
+            executed=result.executed,
+            provider=getattr(provider, "name", "unknown"),
+            rationale=query.rationale,
+            outcome=str(result.outcome),
+        )
+        outcome.discovery.record_query(record)
+        outcome.discovery.record_hits(
+            hits_from_documents(
+                result.documents, query=record, provider=record.provider, path=result.path
+            )
+        )
+        return result
 
     for query in plan.bear:
-        result = provider.search(query)
+        result = _execute(query, QueryPurpose.BEAR)
         outcome.bear_results.append(result)
         if result.executed:
             outcome.executed += 1
@@ -187,7 +236,7 @@ def run_adversarial_search(
         follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups)
         outcome.follow_up_queries = follow_ups
         for query in follow_ups:
-            result = provider.search(query)
+            result = _execute(query, QueryPurpose.BEAR)
             outcome.bear_results.append(result)
             if result.executed:
                 outcome.executed += 1
@@ -195,7 +244,7 @@ def run_adversarial_search(
                 outcome.unexecuted.append(query.query)
 
     for query in plan.bull:
-        result = provider.search(query)
+        result = _execute(query, QueryPurpose.BULL)
         outcome.bull_results.append(result)
         if result.executed:
             outcome.executed += 1

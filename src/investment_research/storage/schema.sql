@@ -357,3 +357,50 @@ CREATE TABLE IF NOT EXISTS escalations (
     created_at          TEXT NOT NULL,
     PRIMARY KEY (run_id, fact_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Search discovery log (requirements M2/M3). Search results are discovery
+-- evidence, never facts, and are stored here so they can never accidentally
+-- be mistaken for verified evidence. Every query is auditable and tagged with
+-- its purpose (BULL/BEAR/NEUTRAL/CONTRADICTION/VERIFICATION); a Bear-purpose
+-- hit must never be readable by an agent whose isolation policy grants it only
+-- Bull-purpose access, and vice versa (see purposes_for_agent()).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS search_queries (
+    query_id            TEXT NOT NULL,
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    agent_id            TEXT NOT NULL,
+    query_purpose       TEXT NOT NULL,
+    query_text          TEXT NOT NULL,
+    origin_fact_id      TEXT,
+    created_at          TEXT NOT NULL,
+    results_count       INTEGER NOT NULL DEFAULT 0,
+    executed            INTEGER NOT NULL DEFAULT 1,
+    provider            TEXT DEFAULT 'UNKNOWN',
+    rationale           TEXT DEFAULT '',
+    outcome             TEXT DEFAULT 'UNKNOWN',
+    PRIMARY KEY (query_id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_queries_run ON search_queries(run_id, query_purpose);
+
+CREATE TABLE IF NOT EXISTS search_hits (
+    hit_id              TEXT NOT NULL,
+    query_id            TEXT NOT NULL,
+    run_id              TEXT NOT NULL,
+    ticker              TEXT NOT NULL,
+    title               TEXT DEFAULT '',
+    url                 TEXT NOT NULL,
+    snippet             TEXT DEFAULT '',
+    provider            TEXT DEFAULT 'UNKNOWN',
+    research_path       TEXT DEFAULT 'NONE',
+    query_purpose       TEXT NOT NULL,
+    captured_at         TEXT NOT NULL,
+    published_date      TEXT DEFAULT 'UNKNOWN',
+    tier                TEXT DEFAULT 'UNKNOWN',
+    rank                INTEGER NOT NULL DEFAULT 0,
+    body_retrieved      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_hits_run ON search_hits(run_id, query_purpose);
+CREATE INDEX IF NOT EXISTS idx_search_hits_query ON search_hits(query_id);

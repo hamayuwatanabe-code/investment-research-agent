@@ -183,11 +183,36 @@ class Pipeline:
         # prose. It works from its anonymised fact set and the channels it may
         # read, which is what "blind" has to mean once a model is involved.
         chunks = () if not policy.sees_identity else self.chunks
+        discovery_summary = "" if not policy.sees_identity else self._discovery_summary_for(
+            deterministic.agent_id
+        )
         return llm_cls(
             self.llm,
             fallback=deterministic,
             guard=PromptGuard(denied_fingerprints=denied, forbidden_identity=forbidden),
             chunks=chunks,
+            discovery_summary=discovery_summary,
+        )
+
+    def _discovery_summary_for(self, agent_id: str) -> str:
+        """Purpose-filtered web-search context for one agent (requirement M3).
+
+        Built directly from ``self.adversarial.discovery`` and passed to the
+        agent out of band (never through the shared ``AgentInput.params`` dict,
+        which is copied unfiltered into every agent's input). A Bear-purpose
+        hit is never included for an agent whose purposes do not cover BEAR,
+        and vice versa for Bull -- see ``purposes_for_agent``.
+        """
+        if self.adversarial is None:
+            return ""
+        from ..schemas.enums import purposes_for_agent
+
+        hits = self.adversarial.discovery.hits_for(tuple(purposes_for_agent(agent_id)))
+        if not hits:
+            return ""
+        return "\n".join(
+            f"- [{hit.hit_id}] {hit.title} ({hit.url}) -- {hit.snippet[:200]}"
+            for hit in hits[:40]
         )
 
     # -- helpers -----------------------------------------------------------
@@ -384,18 +409,17 @@ class Pipeline:
         result.chunks = list(self.chunks)
         if self.llm is not None:
             result.llm_budget = self.llm.budget
+        if self.adversarial is not None and self.adversarial.discovery.queries:
+            # Requirement M3: every query and hit is persisted, purpose intact,
+            # separately from facts -- this is what makes the search layer
+            # auditable after the run rather than only during it.
+            self.repo.save_discovery_log(self.adversarial.discovery)
 
         params: dict[str, Any] = {
             "price": price,
             "aliases": tuple(aliases),
             "mode": mode,
         }
-        if self.adversarial is not None:
-            params["_bear_search_summary"] = "\n".join(
-                f"- [{d.doc_id}] {d.title} ({d.url})"
-                for d in self.adversarial.bear_documents()[:40]
-            )
-
         def checkpoint(stage: str, payload: dict[str, Any] | None = None) -> None:
             self.repo.save_checkpoint(
                 Checkpoint(

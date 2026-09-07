@@ -215,14 +215,15 @@ def run_one(
     if args.corpus:
         documents = corpus.documents(ticker)
         if args.adversarial:
+            # Requirement M2: search results are discovery evidence, never
+            # facts. They are NOT merged into the document set that feeds
+            # extraction -- adversarial.discovery (SearchQueryRecord/SearchHit)
+            # is what the Kill Agent's prompt context and the completeness gate
+            # read instead. A search snippet must never become a Fact.
             adversarial = run_adversarial_search(
-                research, build_plan(ticker, company_name), llm=llm
+                research, build_plan(ticker, company_name), llm=llm,
+                run_id=ticker, ticker=ticker,
             )
-            known = {d.doc_id for d in documents}
-            for document in adversarial.all_documents():
-                if document.doc_id not in known:
-                    documents.append(document)
-                    known.add(document.doc_id)
         collector = DocumentCollector(
             documents,
             provenance=Provenance.CAPTURED,
