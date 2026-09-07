@@ -216,8 +216,27 @@ CREATE TABLE IF NOT EXISTS kill_assessments (
     level               TEXT NOT NULL,
     rationale           TEXT DEFAULT '',
     evidence_confidence REAL DEFAULT 0.0,
+    -- Decision-Grade Evidence Gate (requirement DG2): PROVISIONAL or
+    -- CONFIRMED, distinct from `level`. A K5 finding can be PROVISIONAL.
+    confirmation        TEXT NOT NULL DEFAULT 'PROVISIONAL',
     created_at          TEXT NOT NULL,
     PRIMARY KEY (run_id, ticker, category)
+);
+
+-- Per-run, per-domain outcome of the Evidence Sufficiency Matrix (requirement
+-- DG5). Kept apart from research_coverage: that table answers "did we search
+-- this domain", this one answers "did what we found settle anything".
+CREATE TABLE IF NOT EXISTS evidence_sufficiency (
+    run_id                      TEXT NOT NULL,
+    ticker                      TEXT NOT NULL,
+    domain                      TEXT NOT NULL,
+    search_status               TEXT NOT NULL,
+    evidence_sufficiency_status TEXT NOT NULL,
+    decision_grade_fact_count   INTEGER NOT NULL DEFAULT 0,
+    total_fact_count            INTEGER NOT NULL DEFAULT 0,
+    reason                      TEXT DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    PRIMARY KEY (run_id, domain)
 );
 
 CREATE TABLE IF NOT EXISTS scenarios (
@@ -253,6 +272,11 @@ CREATE TABLE IF NOT EXISTS thesis_versions (
     removed_assumptions TEXT DEFAULT '',
     score_change        TEXT DEFAULT '',
     snapshot            TEXT DEFAULT '',
+    -- Decision-Grade Evidence Gate (requirement DG1): COMPLETE, INCOMPLETE or
+    -- BLOCKED_PENDING_VERIFICATION. `action` above may be the string "None"
+    -- exactly when this is not COMPLETE.
+    research_status               TEXT NOT NULL DEFAULT 'COMPLETE',
+    blocking_verification_required TEXT DEFAULT '',
     created_at          TEXT NOT NULL,
     PRIMARY KEY (ticker, version)
 );

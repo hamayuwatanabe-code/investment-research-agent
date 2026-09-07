@@ -24,6 +24,7 @@ from ..schemas.enums import (
     MANDATORY_KILL_CATEGORIES,
     FactCategory,
     KillCategory,
+    KillConfirmation,
     KillLevel,
     Materiality,
     SourceTier,
@@ -292,6 +293,7 @@ def evaluate_kill_gate(
 ) -> KillGateResult:
     """Run every kill rule over the evidence and return per-category assessments."""
     findings: dict[KillCategory, list[KillFinding]] = {c: [] for c in KillCategory}
+    fact_by_id = {f.fact_id: f for f in facts}
 
     for fact in facts:
         haystack = f"{fact.claim} {fact.value if isinstance(fact.value, str) else ''}"
@@ -300,6 +302,15 @@ def evaluate_kill_gate(
                 continue
             primary = fact.source_tier in (SourceTier.TIER_1, SourceTier.TIER_2)
             level = rule.level_primary if primary else rule.level_secondary
+            # Severity is a judgement about the source tier; confirmation is a
+            # judgement about whether anyone actually read the document. A
+            # Tier 1 URL surfaced by a search snippet is still only PROVISIONAL
+            # (requirement DG2/DG3) -- it must not drive AVOID on its own.
+            confirmation = (
+                KillConfirmation.CONFIRMED
+                if fact.is_decision_grade
+                else KillConfirmation.PROVISIONAL
+            )
             findings[rule.category].append(
                 KillFinding(
                     category=rule.category,
@@ -309,6 +320,7 @@ def evaluate_kill_gate(
                     fact_ids=(fact.fact_id,),
                     source_urls=(fact.source_url,),
                     evidence_is_primary=primary,
+                    confirmation=confirmation,
                 )
             )
 
@@ -333,6 +345,11 @@ def evaluate_kill_gate(
                         "transfers the option value of a good result to new investors."
                     ),
                     evidence_is_primary=True,
+                    # Arithmetic on structured cash/burn figures, not a textual
+                    # claim -- the "rule-based disqualifier derived from
+                    # verified structured facts" the Decision-Grade Evidence
+                    # Gate allows to stand on its own (requirement DG6).
+                    confirmation=KillConfirmation.CONFIRMED,
                 )
             )
 
@@ -347,6 +364,8 @@ def evaluate_kill_gate(
             continue
         if any(f.title == flag.title for f in findings[category]):
             continue
+        linked_facts = [fact_by_id[fid] for fid in flag.fact_ids if fid in fact_by_id]
+        flag_confirmed = bool(linked_facts) and all(f.is_decision_grade for f in linked_facts)
         findings[category].append(
             KillFinding(
                 category=category,
@@ -355,6 +374,14 @@ def evaluate_kill_gate(
                 detail=flag.detail,
                 fact_ids=flag.fact_ids,
                 evidence_is_primary=False,
+                # A flag is an agent's (possibly LLM's) proposal, never a fact
+                # itself. It can only be CONFIRMED when every fact it cites is
+                # decision-grade; an untraceable or partly-unverified flag stays
+                # PROVISIONAL (requirement DG3/DG4 -- no asymmetry for how
+                # generously a proposal is trusted).
+                confirmation=(
+                    KillConfirmation.CONFIRMED if flag_confirmed else KillConfirmation.PROVISIONAL
+                ),
             )
         )
 
@@ -391,15 +418,27 @@ def evaluate_kill_gate(
             )
             continue
         worst = max(items, key=lambda f: f.level.level)
-        primary_backed = any(f.evidence_is_primary for f in items)
+        # Confirmation is judged at the worst level itself: a CONFIRMED K2
+        # finding does not license calling a co-occurring PROVISIONAL K5 worse
+        # finding "confirmed" by association.
+        at_worst_level = [f for f in items if f.level.level == worst.level.level]
+        confirmed_backed = any(f.confirmation is KillConfirmation.CONFIRMED for f in at_worst_level)
+        confirmation = (
+            KillConfirmation.CONFIRMED if confirmed_backed else KillConfirmation.PROVISIONAL
+        )
+        rationale = worst.title + (
+            " [CONFIRMED -- decision-grade evidence]"
+            if confirmed_backed
+            else " [PROVISIONAL -- not yet decision-grade]"
+        )
         assessments.append(
             KillAssessment(
                 category=category,
                 level=worst.level,
-                rationale=worst.title
-                + (" [primary source]" if primary_backed else " [weak sourcing]"),
+                rationale=rationale,
                 findings=tuple(sorted(items, key=lambda f: -f.level.level)),
-                evidence_confidence=0.85 if primary_backed else 0.35,
+                evidence_confidence=0.85 if confirmed_backed else 0.35,
+                confirmation=confirmation,
             )
         )
 

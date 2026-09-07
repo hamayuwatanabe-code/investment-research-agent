@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from investment_research.schemas.enums import (  # noqa: E402
+    ContentKind,
     EvidenceClass,
     FactCategory,
     Materiality,
@@ -59,6 +60,8 @@ def make_fact(
     independent_confirmation: bool = False,
     provenance: Provenance = Provenance.LIVE,
     run_id: str = "test-run",
+    content_kind: ContentKind = ContentKind.FULL_DOCUMENT,
+    primary_source_url: str | None = None,
 ) -> Fact:
     from investment_research.schemas.fact import make_source_id
 
@@ -84,6 +87,8 @@ def make_fact(
         value=value,
         provenance=provenance,
         run_id=run_id,
+        content_kind=content_kind,
+        primary_source_url=primary_source_url,
     )
 
 

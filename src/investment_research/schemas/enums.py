@@ -385,3 +385,62 @@ class SearchStatus(StrEnum):
     PARTIAL = "PARTIAL"
     UNSEARCHED = "UNSEARCHED"
     FAILED = "FAILED"
+
+
+class ResearchStatus(StrEnum):
+    """Whether the research behind a run is complete enough to bear an Action.
+
+    This is a distinct axis from :class:`RunStatus` (did the pipeline finish
+    without agent/collector failures?) and from the Search Completeness Gate
+    (was every domain searched?). A run can be COMPLETE by both of those and
+    still have found nothing decision-grade -- searching a domain and
+    confirming a claim from it are different achievements. This status is the
+    single gate that decides whether ``Verdict.action`` may be non-``None``.
+    """
+
+    #: The Evidence Sufficiency Matrix is satisfied: every required domain has
+    #: decision-grade backing where material, and no unresolved MATERIAL or
+    #: CRITICAL claim remains. An Action may be emitted.
+    COMPLETE = "COMPLETE"
+    #: The pipeline ran to the end but one or more agents/collectors failed or
+    #: degraded. Distinct from BLOCKED_PENDING_VERIFICATION: this is about the
+    #: run's own health, not about the evidence it produced.
+    INCOMPLETE = "INCOMPLETE"
+    #: Research ran and domains were searched, but the evidence that surfaced
+    #: is not decision-grade (search summaries, unfetched primary sources,
+    #: unverified material claims) or a material finding is still provisional.
+    #: No Action may be emitted -- not even WAIT_FOR_EVENT, which is itself an
+    #: Action and must never be used as a stand-in for insufficient evidence.
+    BLOCKED_PENDING_VERIFICATION = "BLOCKED_PENDING_VERIFICATION"
+
+
+class KillConfirmation(StrEnum):
+    """Whether a Kill finding rests on decision-grade evidence.
+
+    Distinct from :class:`KillLevel`: severity (how bad, if true) and
+    confirmation (whether it has actually been verified) are two different
+    questions, and collapsing them let an unfetched search snippet drive an
+    AVOID exactly as if a filing had been read.
+    """
+
+    #: Raised from evidence that is not (yet) decision-grade: a search
+    #: snippet, an identified-but-unfetched primary source, an unverified
+    #: material claim, or an LLM-proposed flag not traced to a decision-grade
+    #: fact. Reportable and must trigger further verification; must never by
+    #: itself justify a final Action.
+    PROVISIONAL = "PROVISIONAL"
+    #: Backed by at least one decision-grade fact at this finding's severity.
+    CONFIRMED = "CONFIRMED"
+
+
+class EvidenceSufficiencyStatus(StrEnum):
+    """Per-domain outcome of the Evidence Sufficiency Matrix.
+
+    Deliberately separate from :class:`SearchStatus`: a domain can be fully
+    SEARCHED and still be evidence-INSUFFICIENT, because searching a domain
+    and confirming what it found are different achievements.
+    """
+
+    SUFFICIENT = "SUFFICIENT"
+    INSUFFICIENT = "INSUFFICIENT"
+    UNSEARCHED = "UNSEARCHED"

@@ -332,8 +332,8 @@ class Repository:
             self.conn.execute(
                 """INSERT OR REPLACE INTO kill_assessments(run_id, ticker, category, level,
                                                            rationale, evidence_confidence,
-                                                           created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
+                                                           confirmation, created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     run_id,
                     ticker.upper(),
@@ -341,6 +341,32 @@ class Repository:
                     str(a.level),
                     a.rationale,
                     a.evidence_confidence,
+                    str(a.confirmation),
+                    _now(),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def save_evidence_sufficiency(self, run_id: str, ticker: str, matrix) -> int:
+        """Persist the Evidence Sufficiency Matrix (requirement DG5/DG10)."""
+        n = 0
+        for domain, entry in matrix.domains.items():
+            self.conn.execute(
+                """INSERT OR REPLACE INTO evidence_sufficiency(run_id, ticker, domain,
+                       search_status, evidence_sufficiency_status, decision_grade_fact_count,
+                       total_fact_count, reason, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_id,
+                    ticker.upper(),
+                    str(domain),
+                    str(entry.search_status),
+                    str(entry.evidence_sufficiency_status),
+                    entry.decision_grade_fact_count,
+                    entry.total_fact_count,
+                    entry.reason,
                     _now(),
                 ),
             )
@@ -636,8 +662,9 @@ class Repository:
             """INSERT INTO thesis_versions(ticker, version, run_id, action, evidence_confidence,
                                            headline, max_kill_level, what_changed, why_changed,
                                            new_facts, removed_assumptions, score_change,
-                                           snapshot, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                           snapshot, research_status,
+                                           blocking_verification_required, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 ticker.upper(),
                 version,
@@ -652,6 +679,11 @@ class Repository:
                 json.dumps(diff.get("REMOVED_ASSUMPTION", []), ensure_ascii=False),
                 json.dumps(diff.get("SCORE_CHANGE", {}), ensure_ascii=False),
                 json.dumps(snapshot, ensure_ascii=False, default=str),
+                str(getattr(verdict, "research_status", "COMPLETE")),
+                json.dumps(
+                    list(getattr(verdict, "blocking_verification_required", ())),
+                    ensure_ascii=False,
+                ),
                 _now(),
             ),
         )

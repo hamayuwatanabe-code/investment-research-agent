@@ -73,6 +73,7 @@ what-would-kill-the-thesis *before* the bull case.
 | `src/investment_research/schemas/` | Controlled vocabularies, records, validation |
 | `src/investment_research/agents/` | The fourteen agent implementations |
 | `src/investment_research/scoring/kill_gate.py` | K0–K5 rules and the quality caps |
+| `src/investment_research/scoring/evidence_sufficiency.py` | Decision-Grade Evidence Gate: searched vs. verified, per domain |
 | `src/investment_research/collectors/` | SEC, ClinicalTrials.gov, FDA, search, fixtures |
 | `src/investment_research/reporting/` | 20-section report and citation validation |
 | `agents/*.md` | Prompt contracts mirroring the Python agents |

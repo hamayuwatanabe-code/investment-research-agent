@@ -228,14 +228,30 @@ class Fact:
         Requirement M1 adds the decisive condition: the body of the source
         document must actually have been read. A Tier 1 URL discovered through a
         search engine is a pointer, not a finding.
+
+        The Decision-Grade Evidence Gate adds one more: at least one date on
+        the record must be known. A claim with no publication, event,
+        effective or filing date cannot be placed in time, and an undated
+        "fact" is exactly the kind of thing requirement 1G exists to refuse to
+        launder into something that looks settled.
         """
         from .enums import DECISION_GRADE_CLASSES, NON_DECISIVE_TIERS
 
+        any_date_known = any(
+            value not in (None, UNKNOWN)
+            for value in (
+                self.publication_date,
+                self.event_date,
+                self.effective_date,
+                self.filing_date,
+            )
+        )
         return (
             self.evidence_class in DECISION_GRADE_CLASSES
             and self.source_tier not in NON_DECISIVE_TIERS
             and self.verified_status in (VerifiedStatus.VERIFIED, VerifiedStatus.PARTIALLY_VERIFIED)
             and self.content_kind.is_primary_text
+            and any_date_known
         )
 
     @property

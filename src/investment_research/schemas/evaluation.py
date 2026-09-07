@@ -5,7 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .enums import Action, KillCategory, KillLevel, RunStatus, ScenarioName
+from .enums import (
+    Action,
+    KillCategory,
+    KillConfirmation,
+    KillLevel,
+    ResearchStatus,
+    RunStatus,
+    ScenarioName,
+)
 
 
 @dataclass
@@ -19,6 +27,12 @@ class KillFinding:
     fact_ids: tuple[str, ...] = ()
     source_urls: tuple[str, ...] = ()
     evidence_is_primary: bool = False
+    #: Whether this specific finding is backed by at least one decision-grade
+    #: fact. Distinct from ``evidence_is_primary`` (a tier judgement about the
+    #: document) and from ``level`` (severity if true). A K5 finding whose only
+    #: support is a search snippet pointing at a Tier 1 filing is PROVISIONAL,
+    #: not CONFIRMED, until the filing body is actually read.
+    confirmation: KillConfirmation = KillConfirmation.PROVISIONAL
 
 
 @dataclass
@@ -30,6 +44,11 @@ class KillAssessment:
     rationale: str
     findings: tuple[KillFinding, ...] = ()
     evidence_confidence: float = 0.0
+    #: CONFIRMED when at least one finding at this assessment's severity is
+    #: decision-grade-backed; PROVISIONAL otherwise. Reported as "Potential
+    #: <category>: <level> PROVISIONAL" vs "<category>: <level> CONFIRMED" --
+    #: the Decision-Grade Evidence Gate's central distinction (requirement DG2).
+    confirmation: KillConfirmation = KillConfirmation.PROVISIONAL
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -37,6 +56,7 @@ class KillAssessment:
             "level": str(self.level),
             "rationale": self.rationale,
             "evidence_confidence": self.evidence_confidence,
+            "confirmation": str(self.confirmation),
         }
 
 
@@ -47,9 +67,39 @@ class KillGateResult:
 
     @property
     def max_level(self) -> KillLevel:
+        """Worst severity found, CONFIRMED or PROVISIONAL alike.
+
+        This answers "how bad, if true" and is used for reporting and for the
+        conservative score cap (requirement 5/18) -- an unverified K5 concern
+        still means no optimistic score is warranted. It must NOT be used to
+        decide whether a final Action such as AVOID may be emitted; that
+        decision requires :attr:`max_confirmed_level`.
+        """
         if not self.assessments:
             return KillLevel.K0
         return max((a.level for a in self.assessments), key=lambda k: k.level)
+
+    @property
+    def max_confirmed_level(self) -> KillLevel:
+        """Worst severity among CONFIRMED (decision-grade-backed) assessments.
+
+        This is the level an Action may be based on. A PROVISIONAL K5 -- a
+        search snippet pointing at a filing nobody has read yet -- must never
+        drive AVOID; it drives a demand for verification instead.
+        """
+        confirmed = [a for a in self.assessments if a.confirmation is KillConfirmation.CONFIRMED]
+        if not confirmed:
+            return KillLevel.K0
+        return max((a.level for a in confirmed), key=lambda k: k.level)
+
+    @property
+    def provisional_major_or_worse(self) -> tuple[KillAssessment, ...]:
+        """K3+ assessments that are still PROVISIONAL -- open verification work."""
+        return tuple(
+            a
+            for a in self.assessments
+            if a.level.level >= 3 and a.confirmation is KillConfirmation.PROVISIONAL
+        )
 
     @property
     def disqualifying(self) -> tuple[KillAssessment, ...]:
@@ -64,6 +114,31 @@ class KillGateResult:
             if a.category == category:
                 return a
         return None
+
+    @classmethod
+    def from_channel_payload(cls, payload: dict[str, Any]) -> KillGateResult:
+        """Reconstruct a gate from the serialized ``Channel.KILL`` payload.
+
+        The single place that deserializes ``KillAssessment.to_row()`` rows, so
+        every consumer (pipeline, deterministic judge, LLM judge) parses
+        ``confirmation`` the same way instead of three copies drifting apart.
+        """
+        assessments = tuple(
+            KillAssessment(
+                category=KillCategory(row["category"]),
+                level=KillLevel(row["level"]),
+                rationale=row.get("rationale", ""),
+                evidence_confidence=float(row.get("evidence_confidence", 0.0)),
+                confirmation=KillConfirmation(
+                    row.get("confirmation", KillConfirmation.PROVISIONAL.value)
+                ),
+            )
+            for row in payload.get("kill_gate", [])
+        )
+        unsearched = tuple(
+            KillCategory(name) for name in payload.get("unsearched_categories", [])
+        )
+        return cls(assessments=assessments, unsearched_categories=unsearched)
 
 
 #: The independent score dimensions (requirement 7).  There is deliberately NO
@@ -186,6 +261,14 @@ class Verdict:
     #: Set by the Search Completeness Gate (requirement P6).
     blocked: bool = False
     blocked_reason: str = ""
+    #: The Decision-Grade Evidence Gate's verdict on whether there is enough
+    #: verified evidence to bear an Action at all. ``action`` may be non-``None``
+    #: only when this is COMPLETE -- not merely when every domain was searched,
+    #: and not merely when the pipeline ran without failures.
+    research_status: ResearchStatus = ResearchStatus.COMPLETE
+    #: What must be retrieved and verified before an Action can be issued. Only
+    #: populated when ``research_status`` is not COMPLETE.
+    blocking_verification_required: tuple[str, ...] = ()
 
 
 @dataclass

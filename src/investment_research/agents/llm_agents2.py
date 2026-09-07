@@ -28,9 +28,9 @@ from ..schemas.enums import (
     Materiality,
     RunStatus,
 )
-from ..schemas.evaluation import Verdict
+from ..schemas.evaluation import KillGateResult, Verdict
 from ..schemas.fact import UnresolvedQuestion
-from .blind_judge import BlindJudgeAgent, _rebuild_gate
+from .blind_judge import BlindJudgeAgent
 from .llm_agents import _EVIDENCE_ITEM, _SEVERITY, _pack_for
 from .llm_base import LLMAgent, PromptBuildResult, cited_only
 
@@ -383,8 +383,30 @@ you express. Your job is the reasoning that makes that decision legible."""
     }
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
-        _, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
+        pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         sections = [f"EVIDENCE ABOUT COMPANY X:\n{rendered}"]
+        if pack is None:
+            # No chunk pack: the fallback render already tags each line
+            # DECISION-GRADE / NOT DECISION-GRADE, but the Decision-Grade
+            # Evidence Gate (requirement DG7) asks for a harder separation
+            # than a per-line tag, so the non-decision-grade facts are lifted
+            # into their own clearly out-of-bounds section.
+            decision_grade = [f for f in data.facts if f.is_decision_grade]
+            not_decision_grade = [f for f in data.facts if not f.is_decision_grade]
+            sections = [
+                "DECISION-GRADE EVIDENCE (body retrieved and verified):\n"
+                + (
+                    "\n".join(f"[{f.fact_id}] {f.claim}" for f in decision_grade)
+                    or "(none)"
+                ),
+                "NON_DECISION_GRADE / DO NOT USE FOR FINAL VERDICT "
+                "(search summaries, unfetched primary sources, unverified material claims -- "
+                "may only justify further research or a PROVISIONAL flag, never a conclusion):\n"
+                + (
+                    "\n".join(f"[{f.fact_id}] {f.claim}" for f in not_decision_grade)
+                    or "(none)"
+                ),
+            ]
         for label, channel in (
             ("KILL FINDINGS", Channel.KILL),
             ("CONTRADICTIONS", Channel.CONTRADICTIONS),
@@ -404,14 +426,17 @@ you express. Your job is the reasoning that makes that decision legible."""
         return PromptBuildResult(
             prompt="\n\n====\n\n".join(sections)
             + "\n\n====\n\nProduce your reasoning, the thesis breakers and the critical red "
-            "flags. Do not choose an action label.",
+            "flags. Material drawn only from the NON_DECISION_GRADE section may be named as an "
+            "open question or a provisional concern, never as an established fact, and it must "
+            "never be the sole basis for a thesis breaker stated as settled. Do not choose an "
+            "action label.",
             cited_ids=tuple(valid),
         )
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
         kill_channel = data.channel(Channel.KILL)
-        gate = _rebuild_gate(kill_channel.payload if kill_channel else {})
+        gate = KillGateResult.from_channel_payload(kill_channel.payload if kill_channel else {})
         confidence = float(data.params.get("evidence_confidence", 0.0))
         run_status = RunStatus(data.params.get("run_status", RunStatus.COMPLETE.value))
         regulatory = data.channel(Channel.REGULATORY)

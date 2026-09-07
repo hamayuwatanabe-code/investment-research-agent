@@ -18,7 +18,6 @@ from investment_research.orchestrator.isolation import Channel
 from investment_research.orchestrator.pipeline import Pipeline
 from investment_research.reporting.report import SECTION_ORDER, render_report
 from investment_research.schemas.enums import (
-    Action,
     KillCategory,
     KillLevel,
     Provenance,
@@ -207,8 +206,20 @@ def test_regulatory_kill_detected_from_a_buried_filing_fact(run_result):
     assert gate.max_level is KillLevel.K5
 
 
-def test_verdict_is_avoid_and_confidence_precedes_it(run_result):
-    assert run_result.verdict.action is Action.AVOID
+def test_verdict_is_blocked_pending_verification_and_confidence_precedes_it(run_result):
+    """The regulatory K5 is CONFIRMED here (a real Tier 1 filing, actually read),
+
+    but a separate, uncorroborated Nasdaq-notice claim leaves a PROVISIONAL K3
+    finding outstanding. The Decision-Grade Evidence Gate withholds the Action
+    until that is resolved too -- a confirmed disqualifier in one category
+    does not license ignoring an unresolved one in another.
+    """
+    from investment_research.schemas.enums import KillConfirmation, ResearchStatus
+
+    assert run_result.verdict.action is None
+    assert run_result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    regulatory = run_result.verdict.kill_gate.by_category(KillCategory.REGULATORY_KILL)
+    assert regulatory.confirmation is KillConfirmation.CONFIRMED
     assert run_result.verdict.evidence_confidence is not None
     assert "Evidence confidence" in run_result.verdict.reasoning[0]
 

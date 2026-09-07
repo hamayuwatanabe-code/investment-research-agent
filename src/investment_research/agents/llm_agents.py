@@ -73,7 +73,8 @@ def _pack_for(
 
     lines = [
         f"[{f.fact_id}] ({f.category}/{f.evidence_class}/{f.source_tier}"
-        f"/confidence {f.confidence:.2f}) {f.claim}\n"
+        f"/confidence {f.confidence:.2f}/"
+        f"{'DECISION-GRADE' if f.is_decision_grade else 'NOT DECISION-GRADE'}) {f.claim}\n"
         f"    source: {f.source_title} | url: {f.source_url} | "
         f"published: {f.publication_date} | event: {f.event_date}"
         for f in data.facts

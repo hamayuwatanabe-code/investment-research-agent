@@ -197,11 +197,31 @@ def test_lgvn_investment_quality_was_capped(lgvn):
             assert value <= cap, f"{dimension}={value} exceeds the kill-gate cap {cap}"
 
 
-def test_lgvn_verdict_is_avoid(lgvn):
-    from investment_research.schemas.enums import Action
+def test_lgvn_verdict_is_blocked_pending_verification_not_a_confident_avoid(lgvn):
+    """The Decision-Grade Evidence Gate, exercised on real 2026 evidence.
 
-    assert lgvn.verdict.action is Action.AVOID
-    assert not lgvn.verdict.blocked
+    LGVN's REGULATORY_KILL and CAPITAL_KILL both reach K5/K4 severity, but
+    every fact behind them is PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED or
+    UNVERIFIED_MATERIAL_CLAIM -- a search engine told the pipeline where the
+    filing is, nobody has read the filing itself. That is exactly the gap
+    between "searched" and "verified" this gate exists to hold open: emitting
+    a confident AVOID from an unread document would be the same failure this
+    system was built after, just pointed the other direction.
+    """
+    from investment_research.schemas.enums import KillConfirmation, ResearchStatus
+
+    assert lgvn.verdict.action is None
+    assert lgvn.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert lgvn.verdict.blocked
+    assert lgvn.verdict.blocking_verification_required
+
+    regulatory = lgvn.verdict.kill_gate.by_category(KillCategory.REGULATORY_KILL)
+    assert regulatory.level.level >= 3
+    assert regulatory.confirmation is KillConfirmation.PROVISIONAL
+
+    assert lgvn.evidence_sufficiency is not None
+    assert not lgvn.evidence_sufficiency.sufficient
+    assert lgvn.evidence_sufficiency.decision_grade_fact_total == 0
 
 
 # --- traceability and escalation on real data -------------------------------

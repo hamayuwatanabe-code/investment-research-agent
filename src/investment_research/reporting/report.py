@@ -185,6 +185,7 @@ class ReportRenderer:
         # with the concerns they document.
         add(_section_research_provenance(self))
         add(_section_search_coverage(self))
+        add(_section_evidence_sufficiency(self))
         add(_section_escalation(self))
         add(_section_traceability(self))
         add(_section_cost(self))
@@ -208,23 +209,49 @@ class ReportRenderer:
         return f"\n{'-' * 78}\n{title}\n{'-' * 78}"
 
     def _section_1_verdict(self) -> str:
+        from ..schemas.enums import ResearchStatus
+
         verdict = self.result.verdict
         out = [self._header(SECTION_ORDER[0])]
         if verdict is None:
+            out.append("RESEARCH_STATUS: BLOCKED_PENDING_VERIFICATION")
+            out.append("FINAL_ACTION: NONE")
             out.append("NO VERDICT: the blind judge did not complete. Treat as INCOMPLETE.")
             return "\n".join(out)
+
+        out.append(f"RESEARCH_STATUS: {verdict.research_status}")
+        if verdict.research_status is not ResearchStatus.COMPLETE:
+            out.append("FINAL_ACTION: NONE")
+        else:
+            out.append(f"FINAL_ACTION: {verdict.action}")
+
+        # Every K3+ finding, confirmed and provisional alike, named explicitly
+        # -- "Potential X: K5 PROVISIONAL" is a legitimate and required output
+        # (requirement DG2/DG8), never collapsed into silence or into a
+        # confident label it has not earned.
+        for assessment in sorted(
+            verdict.kill_gate.assessments, key=lambda a: -a.level.level
+        ):
+            if assessment.level.level < 3:
+                continue
+            if assessment.confirmation.value == "CONFIRMED":
+                out.append(f"{assessment.category}: {assessment.level} CONFIRMED")
+            else:
+                out.append(f"POTENTIAL_{assessment.category}: {assessment.level} PROVISIONAL")
+
         if verdict.blocked:
-            out.append("FINAL VERDICT: BLOCKED")
-            out.append("RESEARCH STATUS: INCOMPLETE")
             out.append("")
+            out.append("FINAL VERDICT: BLOCKED")
             out.append(self._wrap(verdict.blocked_reason))
+            if verdict.blocking_verification_required:
+                out.append("")
+                out.append("BLOCKING_VERIFICATION_REQUIRED:")
+                out.extend(f"- {self._safe(r)}" for r in verdict.blocking_verification_required)
             out.append("")
             out.append(
                 "No action label is issued. Not AVOID, not WAIT_FOR_EVENT -- an action label "
                 "asserts a judgement, and there is not enough research here to support one."
             )
-        else:
-            out.append(f"Action: {verdict.action}")
         out.append(f"Judged blind (identity withheld from the judge): {verdict.judged_blind}")
         out.append(f"Worst kill level: {verdict.kill_gate.max_level}")
         out.append(f"Headline: {self._safe(verdict.headline)}")
@@ -612,7 +639,8 @@ class ReportRenderer:
         out.append(
             f"EVIDENCE CONFIDENCE: {verdict.evidence_confidence} / 10   (shown before the action)"
         )
-        out.append(f"ACTION: {verdict.action}")
+        out.append(f"RESEARCH_STATUS: {verdict.research_status}")
+        out.append(f"ACTION: {verdict.action if verdict.action is not None else 'NONE'}")
         if self.result.context.status != RunStatus.COMPLETE:
             out.append(
                 f"This action is provisional: the run is marked {self.result.context.status}."
@@ -784,6 +812,47 @@ def _section_search_coverage(self: ReportRenderer) -> str:
     else:
         out.append("")
         out.append("All required domains were examined; a verdict is permitted.")
+    return "\n".join(out)
+
+
+def _section_evidence_sufficiency(self: ReportRenderer) -> str:
+    """Evidence Sufficiency Matrix (Decision-Grade Evidence Gate, requirement DG5).
+
+    Deliberately separate from the Search Completeness Gate above: that
+    section answers "did we look at this domain"; this one answers "did what
+    we found actually settle anything". A domain can be SEARCHED there and
+    INSUFFICIENT here, and that gap -- not an unsearched domain -- is what
+    blocked LGVN/CNTB/CRBP from a confident verdict on the captured corpus.
+    """
+    out = [_appendix("C. EVIDENCE SUFFICIENCY MATRIX")]
+    matrix = self.result.evidence_sufficiency
+    if matrix is None:
+        out.append("The Evidence Sufficiency Matrix was not assessed for this run.")
+        return "\n".join(out)
+
+    out.append(f"Decision-grade facts in this run: {matrix.decision_grade_fact_total}")
+    out.append("")
+    out.append(f"  {'domain':<22} {'search_status':<13} {'sufficiency':<12} {'grade/total'}")
+    for name, search_status, sufficiency_status, grade, total, reason in matrix.summary_rows():
+        out.append(
+            f"  {name:<22} {search_status:<13} {sufficiency_status:<12} {grade}/{total}"
+        )
+        out.append(f"{self._wrap(reason, indent='      ')}")
+    if matrix.provisional_kill_findings:
+        out.append("")
+        out.append("PROVISIONAL kill findings still requiring verification:")
+        out.extend(f"  - {self._safe(f)}" for f in matrix.provisional_kill_findings)
+    if matrix.unresolved_material_claims:
+        out.append("")
+        out.append("Unresolved MATERIAL/CRITICAL claims:")
+        out.extend(f"  - {self._safe(c)}" for c in matrix.unresolved_material_claims)
+    out.append("")
+    if matrix.sufficient:
+        out.append("The Evidence Sufficiency Matrix is satisfied; an Action may be issued.")
+    else:
+        out.append("*** EVIDENCE SUFFICIENCY MATRIX NOT SATISFIED -- ACTION WITHHELD ***")
+        for reason in matrix.blocking_reasons():
+            out.append(f"  - {self._wrap(reason, indent='    ')}")
     return "\n".join(out)
 
 

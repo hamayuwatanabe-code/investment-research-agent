@@ -310,8 +310,29 @@ def result_to_json(result: ResearchResult) -> dict:
             result.confidence_breakdown.score if result.confidence_breakdown else None
         ),
         "action": (str(verdict.action) if verdict and verdict.action else None),
+        "research_status": str(verdict.research_status) if verdict else None,
+        "blocking_verification_required": (
+            list(verdict.blocking_verification_required) if verdict else []
+        ),
         "blocked": bool(verdict.blocked) if verdict else None,
         "blocked_reason": verdict.blocked_reason if verdict else "",
+        "evidence_sufficiency": (
+            {
+                "sufficient": result.evidence_sufficiency.sufficient,
+                "decision_grade_fact_total": result.evidence_sufficiency.decision_grade_fact_total,
+                "domains": {
+                    str(domain): {
+                        "search_status": str(entry.search_status),
+                        "evidence_sufficiency_status": str(entry.evidence_sufficiency_status),
+                        "decision_grade_fact_count": entry.decision_grade_fact_count,
+                        "total_fact_count": entry.total_fact_count,
+                    }
+                    for domain, entry in result.evidence_sufficiency.domains.items()
+                },
+            }
+            if result.evidence_sufficiency
+            else None
+        ),
         "research_coverage": (
             {
                 domain: entry.status

@@ -50,15 +50,15 @@ from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
     FactCategory,
-    KillCategory,
-    KillLevel,
     Provenance,
     ResearchDomain,
+    ResearchStatus,
     RunStatus,
 )
-from ..schemas.evaluation import KillAssessment, KillGateResult, ScoreCard, Verdict
+from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
 from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.evidence_confidence import compute_evidence_confidence
+from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
 from ..storage.repository import Repository
@@ -107,6 +107,9 @@ class ResearchResult:
     llm_agents_used: list[str] = field(default_factory=list)
     capture_info: dict[str, Any] = field(default_factory=dict)
     resume_plan: ResumePlan | None = None
+    #: Decision-Grade Evidence Gate: whether what was found is actually
+    #: verified, as opposed to merely searched-for (requirement DG5).
+    evidence_sufficiency: EvidenceSufficiencyMatrix | None = None
 
     @property
     def blocked(self) -> bool:
@@ -769,6 +772,30 @@ class Pipeline:
             result.failures.append(f"search completeness gate: {completeness.reason()}")
         checkpoint("score", {"blocked": completeness.blocked})
 
+        # ---- Stage 8c: Decision-Grade Evidence Gate ----------------------
+        # Searched and verified are different achievements (requirement DG5).
+        # Computed even when the completeness gate already blocks, so the
+        # report can say both: an unsearched domain is one failure mode, six
+        # fully-searched domains full of unread search summaries is another.
+        # Unresolved questions about *which categories were never searched* are
+        # already the Search Completeness Gate's job (and, for kill categories
+        # specifically, the UNSEARCHED rationale on the assessment itself); only
+        # a genuinely unresolved factual question -- one that is not simply
+        # "we never ran this query" -- belongs here as a material claim.
+        material_claims = tuple(
+            uq.question
+            for uq in bus.unresolved
+            if uq.blocking and "never searched" not in uq.question
+        )
+        sufficiency = assess_evidence_sufficiency(
+            facts=verified_facts,
+            completeness=completeness,
+            gate=gate,
+            unresolved_material_claims=material_claims,
+        )
+        result.evidence_sufficiency = sufficiency
+        self.repo.save_evidence_sufficiency(ctx.run_id, ctx.ticker, sufficiency)
+
         # ---- Stage 9: blind judgement ------------------------------------
         judge_params = {
             **params,
@@ -792,17 +819,32 @@ class Pipeline:
         result.verdict = verdict
         result.source_ref_map = guard.source_ref_maps.get("blind_judge")
 
-        # Requirement P6: an incomplete search withholds the action label
-        # entirely. Not AVOID, not WAIT_FOR_EVENT -- no label, because an action
-        # asserts a judgement and there is not enough research to support one.
-        if verdict is not None and completeness.blocked:
-            verdict.blocked = True
-            verdict.blocked_reason = completeness.reason()
-            verdict.action = None
-            verdict.caveats = (
-                *verdict.caveats,
-                "FINAL VERDICT: BLOCKED -- " + completeness.reason(),
-            )
+        # Requirement P6/DG1/DG6: an incomplete search OR evidence that has not
+        # cleared the decision-grade bar withholds the action label entirely.
+        # Not AVOID, not WAIT_FOR_EVENT -- WAIT_FOR_EVENT is itself an Action
+        # and must never stand in for insufficient evidence.
+        blocking_reasons: list[str] = []
+        if completeness.blocked:
+            blocking_reasons.append(completeness.reason())
+        if not sufficiency.sufficient:
+            blocking_reasons.extend(sufficiency.blocking_reasons())
+
+        if verdict is not None:
+            if blocking_reasons:
+                verdict.blocked = True
+                verdict.blocked_reason = " | ".join(blocking_reasons)
+                verdict.action = None
+                verdict.research_status = ResearchStatus.BLOCKED_PENDING_VERIFICATION
+                verdict.blocking_verification_required = tuple(blocking_reasons)
+                verdict.caveats = (
+                    *verdict.caveats,
+                    "RESEARCH_STATUS: BLOCKED_PENDING_VERIFICATION -- FINAL_ACTION: NONE -- "
+                    + " | ".join(blocking_reasons),
+                )
+            elif result.failures or ctx.status != RunStatus.COMPLETE:
+                verdict.research_status = ResearchStatus.INCOMPLETE
+            else:
+                verdict.research_status = ResearchStatus.COMPLETE
         checkpoint("judge")
 
         if result.failures and ctx.status == RunStatus.COMPLETE:
@@ -893,17 +935,7 @@ _NCT_RE = re.compile(r"\b(NCT[-A-Z0-9]{4,})\b")
 
 def _gate_from_output(output: AgentOutput) -> KillGateResult:
     payload = output.evaluation.payload if output.evaluation else {}
-    assessments = tuple(
-        KillAssessment(
-            category=KillCategory(row["category"]),
-            level=KillLevel(row["level"]),
-            rationale=row.get("rationale", ""),
-            evidence_confidence=float(row.get("evidence_confidence", 0.0)),
-        )
-        for row in payload.get("kill_gate", [])
-    )
-    unsearched = tuple(KillCategory(c) for c in payload.get("unsearched_categories", []))
-    return KillGateResult(assessments=assessments, unsearched_categories=unsearched)
+    return KillGateResult.from_channel_payload(payload)
 
 
 def _clinical_trials_from_facts(facts: Sequence[Any]) -> list[dict[str, Any]]:

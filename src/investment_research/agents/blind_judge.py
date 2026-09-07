@@ -16,8 +16,8 @@ import logging
 
 from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput
-from ..schemas.enums import UNKNOWN, Action, KillCategory, KillLevel, RunStatus
-from ..schemas.evaluation import KillAssessment, KillGateResult, Verdict
+from ..schemas.enums import UNKNOWN, Action, RunStatus
+from ..schemas.evaluation import KillGateResult, Verdict
 from .base import Agent
 
 log = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class BlindJudgeAgent(Agent):
         out = AgentOutput(agent_id=self.agent_id)
 
         kill_channel = data.channel(Channel.KILL)
-        gate = _rebuild_gate(kill_channel.payload if kill_channel else {})
+        gate = KillGateResult.from_channel_payload(kill_channel.payload if kill_channel else {})
         evidence_confidence = float(data.params.get("evidence_confidence", 0.0))
         run_status = RunStatus(data.params.get("run_status", RunStatus.COMPLETE.value))
 
@@ -56,11 +56,18 @@ class BlindJudgeAgent(Agent):
         breakers: list[str] = []
 
         # 1. Kill gate first (requirement 27: kill test before bull case).
+        # PROVISIONAL findings are reported with equal prominence to CONFIRMED
+        # ones -- hiding an unverified K5 would be worse than never having
+        # looked -- but the label makes clear which is which, because only a
+        # CONFIRMED finding may drive the final Action (requirement DG2).
         for assessment in sorted(gate.assessments, key=lambda a: -a.level.level):
             if assessment.level.level >= 3:
-                red_flags.append(
-                    f"{assessment.category} = {assessment.level}: {assessment.rationale}"
+                label = (
+                    f"{assessment.category} = {assessment.level}"
+                    if assessment.confirmation.value == "CONFIRMED"
+                    else f"Potential {assessment.category} = {assessment.level} (PROVISIONAL)"
                 )
+                red_flags.append(f"{label}: {assessment.rationale}")
         if gate.unsearched_categories:
             red_flags.append(
                 "Kill categories never searched: "
@@ -152,15 +159,27 @@ class BlindJudgeAgent(Agent):
         endpoint_position: str,
         run_status: RunStatus,
     ) -> tuple[Action, str]:
-        max_level = gate.max_level
-        if max_level.level >= 5:
+        """Choose an Action from CONFIRMED kill severity only.
+
+        Requirement DG2/DG6: a PROVISIONAL finding -- however severe if
+        true -- must never by itself select AVOID or any other Action. It is
+        surfaced as a red flag and, at the pipeline level, as a reason the
+        Evidence Sufficiency Matrix withholds an Action entirely
+        (BLOCKED_PENDING_VERIFICATION). This function only ever sees the
+        question "given what is actually confirmed, what follows" -- the
+        caller is responsible for nulling the result when research is not
+        COMPLETE.
+        """
+        max_confirmed = gate.max_confirmed_level
+        if max_confirmed.level >= 5:
             return Action.AVOID, (
-                f"A K5 disqualifier is present ({_worst(gate)}). No upside estimate overrides a "
-                "disqualifying fact."
+                f"A CONFIRMED K5 disqualifier is present ({_worst(gate, confirmed_only=True)}). "
+                "No upside estimate overrides a disqualifying fact."
             )
-        if max_level.level == 4:
+        if max_confirmed.level == 4:
             return Action.AVOID, (
-                f"A K4 severe issue is present ({_worst(gate)}). The default at K4 is to avoid."
+                f"A CONFIRMED K4 severe issue is present ({_worst(gate, confirmed_only=True)}). "
+                "The default at K4 is to avoid."
             )
         if run_status == RunStatus.INCOMPLETE_RESEARCH:
             return Action.WAIT_FOR_EVENT, (
@@ -172,10 +191,10 @@ class BlindJudgeAgent(Agent):
                 f"Evidence confidence {evidence_confidence}/10 is too low to support any "
                 "position, in either direction."
             )
-        if max_level.level == 3:
+        if max_confirmed.level == 3:
             return Action.WAIT_FOR_EVENT, (
-                f"A K3 major red flag is present ({_worst(gate)}). The flag must be resolved "
-                "before a position is justified."
+                f"A CONFIRMED K3 major red flag is present ({_worst(gate, confirmed_only=True)}). "
+                "The flag must be resolved before a position is justified."
             )
         if evidence_confidence < MIN_CONFIDENCE_FOR_BUY:
             return Action.WAIT_FOR_EVENT, (
@@ -187,9 +206,9 @@ class BlindJudgeAgent(Agent):
                 "The regulator's position on the primary endpoint is unverified, which is the "
                 "single highest-value unknown in this kind of thesis."
             )
-        if max_level.level == 2:
+        if max_confirmed.level == 2:
             return Action.BUY_ON_PULLBACK, (
-                "Meaningful but manageable issues; entry price matters."
+                "Meaningful but manageable confirmed issues; entry price matters."
             )
         if endpoint_position == "AGREED" and evidence_confidence >= 8.0:
             return Action.BUY, (
@@ -226,21 +245,9 @@ class BlindJudgeAgent(Agent):
         return caveats
 
 
-def _worst(gate: KillGateResult) -> str:
-    worst = max(gate.assessments, key=lambda a: a.level.level, default=None)
+def _worst(gate: KillGateResult, *, confirmed_only: bool = False) -> str:
+    pool = gate.assessments
+    if confirmed_only:
+        pool = tuple(a for a in pool if a.confirmation.value == "CONFIRMED")
+    worst = max(pool, key=lambda a: a.level.level, default=None)
     return f"{worst.category} {worst.level}" if worst else UNKNOWN
-
-
-def _rebuild_gate(payload: dict) -> KillGateResult:
-    """Reconstruct the gate from the transported channel payload."""
-    assessments = tuple(
-        KillAssessment(
-            category=KillCategory(row["category"]),
-            level=KillLevel(row["level"]),
-            rationale=row.get("rationale", ""),
-            evidence_confidence=float(row.get("evidence_confidence", 0.0)),
-        )
-        for row in payload.get("kill_gate", [])
-    )
-    unsearched = tuple(KillCategory(name) for name in payload.get("unsearched_categories", []))
-    return KillGateResult(assessments=assessments, unsearched_categories=unsearched)
