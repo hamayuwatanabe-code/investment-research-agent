@@ -147,6 +147,37 @@ def validate_fact(fact: Fact, *, facts_only: bool = True) -> None:
     if facts_only:
         assert_evaluation_free(fact.claim, where=f"fact:{fact.fact_id}")
 
+    # Requirement M1: a claim read from a search result -- a title, a snippet,
+    # an engine summary -- can never be verified evidence, whatever tier the URL
+    # it points at belongs to. Nobody has read the document. The correct
+    # statuses are SEARCH_EVIDENCE, or PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED
+    # once the document that would settle it has been located.
+    if fact.is_search_derived:
+        if fact.evidence_class == EvidenceClass.VERIFIED_FACT:
+            raise SchemaError(
+                f"a claim derived from a {fact.content_kind} cannot be classified "
+                "VERIFIED_FACT: the source document body was never retrieved "
+                "(requirement M1)"
+            )
+        if fact.verified_status in (
+            VerifiedStatus.VERIFIED,
+            VerifiedStatus.PARTIALLY_VERIFIED,
+        ):
+            raise SchemaError(
+                f"a claim derived from a {fact.content_kind} cannot have status "
+                f"{fact.verified_status}: use SEARCH_EVIDENCE or "
+                "PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED (requirement M1)"
+            )
+
+    if (
+        fact.verified_status is VerifiedStatus.PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED
+        and not fact.primary_source_url
+    ):
+        raise SchemaError(
+            "PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED requires primary_source_url: "
+            "the point of the status is that the next document to read is known"
+        )
+
     # A company's own statement can never be a VERIFIED_FACT on its own.
     if (
         fact.company_claim

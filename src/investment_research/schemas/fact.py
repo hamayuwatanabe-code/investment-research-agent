@@ -163,6 +163,10 @@ class RawFact:
     company_claim: bool = False
     collector: str = UNKNOWN
     raw_payload_ref: str | None = None
+    #: How much of the source document this observation was read from.
+    content_kind: ContentKind = ContentKind.FULL_DOCUMENT
+    #: The document that would settle this claim, when it is known but unread.
+    primary_source_url: str | None = None
 
     def fact_id(self) -> str:
         return make_fact_id(
@@ -207,18 +211,37 @@ class Fact:
     run_id: str = UNKNOWN
     notes: str = ""
     tags: tuple[str, ...] = ()
+    #: How much of the source document this claim was actually read from.
+    #: A claim drawn from a search snippet carries SEARCH_SUMMARY here even when
+    #: the URL it points at is a Tier 1 filing, because the tier describes the
+    #: document and this describes what was read.
+    content_kind: ContentKind = ContentKind.FULL_DOCUMENT
+    #: Set when the document that would settle this claim has been located but
+    #: its body was never fetched (requirement M1).
+    primary_source_url: str | None = None
 
     # -- derived -----------------------------------------------------------
     @property
     def is_decision_grade(self) -> bool:
-        """May this fact, alone, settle a material question? (requirement 2)"""
+        """May this fact, alone, settle a material question? (requirement 2)
+
+        Requirement M1 adds the decisive condition: the body of the source
+        document must actually have been read. A Tier 1 URL discovered through a
+        search engine is a pointer, not a finding.
+        """
         from .enums import DECISION_GRADE_CLASSES, NON_DECISIVE_TIERS
 
         return (
             self.evidence_class in DECISION_GRADE_CLASSES
             and self.source_tier not in NON_DECISIVE_TIERS
             and self.verified_status in (VerifiedStatus.VERIFIED, VerifiedStatus.PARTIALLY_VERIFIED)
+            and self.content_kind.is_primary_text
         )
+
+    @property
+    def is_search_derived(self) -> bool:
+        """Whether this claim came from a search result rather than a body."""
+        return not self.content_kind.is_primary_text
 
     def next_version(self, **changes: Any) -> Fact:
         """Produce the successor version of this fact (requirement 12)."""
@@ -255,6 +278,8 @@ class Fact:
             "run_id": self.run_id,
             "notes": self.notes,
             "tags": ",".join(self.tags),
+            "content_kind": str(self.content_kind),
+            "primary_source_url": self.primary_source_url,
         }
 
 

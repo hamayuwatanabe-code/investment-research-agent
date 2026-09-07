@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS facts (
     run_id                      TEXT NOT NULL,
     notes                       TEXT DEFAULT '',
     tags                        TEXT DEFAULT '',
+    content_kind                TEXT NOT NULL DEFAULT 'FULL_DOCUMENT',
+    primary_source_url          TEXT,
     created_at                  TEXT NOT NULL,
     PRIMARY KEY (fact_id, version)
 );

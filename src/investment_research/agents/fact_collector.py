@@ -144,6 +144,17 @@ class FactCollectorAgent(Agent):
         evidence_class = (
             EvidenceClass.COMPANY_CLAIM if raw.company_claim else EvidenceClass.UNVERIFIED_CLAIM
         )
+        # Requirement M1: a claim read from a search result is discovery
+        # evidence from the moment it is created, not merely unverified.
+        initial_status = (
+            VerifiedStatus.NOT_VERIFIED
+            if raw.content_kind.is_primary_text
+            else (
+                VerifiedStatus.PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED
+                if raw.primary_source_url
+                else VerifiedStatus.SEARCH_EVIDENCE
+            )
+        )
         return Fact(
             fact_id=raw.fact_id(),
             ticker=raw.ticker,
@@ -158,7 +169,7 @@ class FactCollectorAgent(Agent):
             event_date=source.event_date,
             effective_date=source.effective_date,
             filing_date=source.filing_date,
-            verified_status=VerifiedStatus.NOT_VERIFIED,
+            verified_status=initial_status,
             confidence=0.0,
             company_claim=raw.company_claim,
             materiality=Materiality.INFORMATIONAL,
@@ -167,4 +178,6 @@ class FactCollectorAgent(Agent):
             provenance=provenance if provenance != Provenance.LIVE else source.provenance,
             run_id=run_id,
             notes=f"collected_by={raw.collector}",
+            content_kind=raw.content_kind,
+            primary_source_url=raw.primary_source_url,
         )

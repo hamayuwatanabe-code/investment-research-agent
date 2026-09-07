@@ -157,6 +157,11 @@ class EvidenceIntegrityAgent(Agent):
         confidence = self._confidence(fact, evidence_class, confirmed, stale, len(corroborating))
 
         notes = [fact.notes] if fact.notes else []
+        if fact.is_search_derived:
+            notes.append(
+                f"read from a {fact.content_kind}, not the source document body; "
+                "not usable as verified evidence"
+            )
         if fact.company_claim and not confirmed:
             notes.append("company statement; no independent confirmation found")
         if stale:
@@ -180,6 +185,16 @@ class EvidenceIntegrityAgent(Agent):
 
     @staticmethod
     def _classify(fact: Fact, confirmed: bool) -> EvidenceClass:
+        # Requirement M1: nothing read from a search result can be classified as
+        # verified or independent evidence. The tier describes the document; the
+        # content kind describes what was actually read, and only the second one
+        # can make a claim decision-grade.
+        if fact.is_search_derived:
+            return (
+                EvidenceClass.COMPANY_CLAIM
+                if fact.company_claim
+                else EvidenceClass.UNVERIFIED_CLAIM
+            )
         tier = fact.source_tier
         if fact.company_claim:
             return (
@@ -216,6 +231,15 @@ class EvidenceIntegrityAgent(Agent):
 
     @staticmethod
     def _status(fact: Fact, evidence_class: EvidenceClass, confirmed: bool) -> VerifiedStatus:
+        # Requirement M1: a search-derived claim keeps a discovery status. It is
+        # not "unverified because we did not get round to it" -- it is
+        # unverifiable from what we hold, because we hold a summary.
+        if fact.is_search_derived:
+            return (
+                VerifiedStatus.PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED
+                if fact.primary_source_url
+                else VerifiedStatus.SEARCH_EVIDENCE
+            )
         if evidence_class == EvidenceClass.VERIFIED_FACT:
             return VerifiedStatus.VERIFIED
         if evidence_class == EvidenceClass.INDEPENDENT_EVIDENCE:
@@ -262,4 +286,6 @@ class EvidenceIntegrityAgent(Agent):
             base -= 0.10
         if fact.event_date == UNKNOWN:
             base -= 0.05
+        # Requirement M1: scale by how much of the document was actually read.
+        base *= fact.content_kind.confidence_multiplier
         return max(0.0, min(1.0, base))

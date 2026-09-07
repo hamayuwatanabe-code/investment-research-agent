@@ -42,7 +42,8 @@ DECISION_GRADE_CLASSES = frozenset(
 )
 
 #: Statuses that bar a fact from settling a material question, however good its
-#: source tier looks.
+#: source tier looks. A Tier 1 URL found through a search engine is still only a
+#: pointer until somebody reads the document behind it.
 NON_DECISIVE_STATUSES = frozenset(
     {
         "UNVERIFIED_MATERIAL_CLAIM",
@@ -50,8 +51,60 @@ NON_DECISIVE_STATUSES = frozenset(
         "NOT_FOUND",
         "INSUFFICIENT_EVIDENCE",
         "CONTRADICTED",
+        "SEARCH_EVIDENCE",
+        "PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED",
     }
 )
+
+
+class QueryPurpose(StrEnum):
+    """Why a search was issued (requirement M3).
+
+    Purpose is not a label for reporting: it is an isolation boundary. A result
+    retrieved to disconfirm a thesis must not reach the agent building the case
+    for it, and vice versa. Pooling them would rebuild the rebuttal loop that
+    requirement 1C exists to prevent, one search result at a time.
+    """
+
+    BULL = "BULL"
+    BEAR = "BEAR"
+    NEUTRAL = "NEUTRAL"
+    CONTRADICTION = "CONTRADICTION"
+    #: Primary-source escalation. Verification is stance-free: it asks whether a
+    #: document says a thing, not whether that thing is good or bad.
+    VERIFICATION = "VERIFICATION"
+
+    @property
+    def is_stance_bound(self) -> bool:
+        """Whether results from this purpose are restricted to one side."""
+        return self in (QueryPurpose.BULL, QueryPurpose.BEAR)
+
+
+#: Which purposes each agent may read. NEUTRAL, CONTRADICTION and VERIFICATION
+#: results are shared; BULL and BEAR results are not.
+AGENT_QUERY_PURPOSES: dict[str, frozenset[QueryPurpose]] = {
+    "bull_agent": frozenset(
+        {QueryPurpose.BULL, QueryPurpose.NEUTRAL, QueryPurpose.VERIFICATION}
+    ),
+    "bear_agent": frozenset(
+        {QueryPurpose.BEAR, QueryPurpose.NEUTRAL, QueryPurpose.VERIFICATION}
+    ),
+    "kill_agent": frozenset(
+        {QueryPurpose.BEAR, QueryPurpose.NEUTRAL, QueryPurpose.CONTRADICTION,
+         QueryPurpose.VERIFICATION}
+    ),
+    "contradiction": frozenset(
+        {QueryPurpose.NEUTRAL, QueryPurpose.CONTRADICTION, QueryPurpose.VERIFICATION}
+    ),
+}
+#: Everyone not listed above sees the stance-free purposes only.
+DEFAULT_QUERY_PURPOSES: frozenset[QueryPurpose] = frozenset(
+    {QueryPurpose.NEUTRAL, QueryPurpose.CONTRADICTION, QueryPurpose.VERIFICATION}
+)
+
+
+def purposes_for_agent(agent_id: str) -> frozenset[QueryPurpose]:
+    return AGENT_QUERY_PURPOSES.get(agent_id, DEFAULT_QUERY_PURPOSES)
 
 
 class SourceTier(StrEnum):
@@ -89,6 +142,15 @@ class VerifiedStatus(StrEnum):
     #: escalation ran, and the primary source does not (yet) corroborate it.
     #: Barred from decision-grade use (requirement P4).
     UNVERIFIED_MATERIAL_CLAIM = "UNVERIFIED_MATERIAL_CLAIM"
+    #: Derived from a search result -- a title, snippet or engine summary -- and
+    #: NOT from the body of the document it describes. Discovery evidence: it
+    #: tells you where to look, and it is never a verified finding on its own.
+    SEARCH_EVIDENCE = "SEARCH_EVIDENCE"
+    #: The primary document that would settle this claim has been located (its
+    #: URL is known) but its body could not be retrieved. Stronger than
+    #: SEARCH_EVIDENCE, because the next step is identified; still not verified,
+    #: because nobody has read the document.
+    PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED = "PRIMARY_SOURCE_IDENTIFIED_BUT_NOT_FETCHED"
 
 
 #: The single sentinel used everywhere a value is unknown.  Requirement 1G:

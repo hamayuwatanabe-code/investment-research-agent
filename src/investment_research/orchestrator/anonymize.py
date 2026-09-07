@@ -90,6 +90,15 @@ def anonymize_facts(
             "contradicting_evidence": tuple(
                 ref_map.ref_for(other, "", "") for other in fact.contradicting_evidence
             ),
+            # Requirement M1 added primary_source_url: the real document URL
+            # located for a search-derived claim. Like source_url, it must never
+            # reach a blind pack un-mapped, or the domain/path alone can identify
+            # the company (e.g. an issuer's own investor-relations host).
+            "primary_source_url": (
+                f"blindref://{ref_map.ref_for(fact.primary_source_url, fact.primary_source_url, '')}"
+                if fact.primary_source_url
+                else None
+            ),
         }
         for field_name in _IDENTIFYING_FACT_FIELDS:
             if field_name in ("source_title",):
