@@ -120,10 +120,17 @@ class LLMAgent(Agent):
         guard: PromptGuard | None = None,
         chunks: Sequence[Any] = (),
         discovery_summary: str = "",
+        effort: str | None = None,
     ) -> None:
         self.llm = llm
         self.fallback = fallback
         self.guard = guard or PromptGuard()
+        # Requirement G: this agent's own reasoning effort, resolved by the
+        # caller (Pipeline._agent_for, via llm.effort_policy.resolve_effort)
+        # from the per-agent policy and the run's --llm-effort ceiling. None
+        # means "use the client's own configured default effort" -- every
+        # existing caller that never sets this is unaffected.
+        self.effort = effort
         # Held out of band for the same reason as the guard: a Chunk carries the
         # document text, and document text carries the company name. Routing
         # chunks through AgentInput.params would put un-anonymised prose into the
@@ -186,6 +193,11 @@ class LLMAgent(Agent):
                 f"{self.llm.budget.max_total_tokens})",
             )
 
+        # Requirement G diagnostics: how many calls (repairs included) this
+        # invocation actually made, so exact prompt/output usage can be
+        # attributed to THIS agent call below, distinct from the run-wide
+        # by_agent() total (which mixes every call this agent_id ever made).
+        calls_before = len(self.llm.budget.calls)
         try:
             payload = self.llm.structured(
                 agent_id=self.agent_id,
@@ -195,6 +207,7 @@ class LLMAgent(Agent):
                 tool_description=self.tool_description,
                 schema=self.schema,
                 max_tokens=self.max_tokens,
+                effort=self.effort,
             )
         except (LLMUnavailable, SchemaValidationError) as exc:
             return self._fallback(data, f"{type(exc).__name__}: {exc}")
@@ -204,6 +217,16 @@ class LLMAgent(Agent):
         output = self.interpret(payload, data)
         output.metrics["llm_backed"] = True
         output.metrics["llm_model"] = self.llm.model
+        # Requirement G: per-agent diagnostics -- effort used, preflight
+        # reservation, and the actual prompt/output/thinking-adjacent usage
+        # for THIS call (never just the run-wide by_agent() total).
+        output.metrics["llm_effort"] = self.effort or self.llm.effort
+        output.metrics["preflight_reservation"] = estimated
+        calls_made = self.llm.budget.calls[calls_before:]
+        output.metrics["prompt_tokens"] = sum(c.input_tokens for c in calls_made)
+        output.metrics["output_tokens"] = sum(c.output_tokens for c in calls_made)
+        output.metrics["cache_read_tokens"] = sum(c.cache_read_tokens for c in calls_made)
+        output.metrics["actual_total_tokens"] = sum(c.total_tokens for c in calls_made)
         if built.pack is not None:
             output.metrics["pack_tokens"] = built.pack.total_tokens
             output.metrics["pack_chunks"] = len(built.pack.chunks)

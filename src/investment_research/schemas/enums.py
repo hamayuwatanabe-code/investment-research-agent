@@ -241,6 +241,35 @@ class KillCategory(StrEnum):
     LIQUIDITY_KILL = "LIQUIDITY_KILL"
 
 
+class KillSearchFailureReason(StrEnum):
+    """Why one mandatory kill query did not produce results (requirement B).
+
+    A live run reported "no search provider configured" for every
+    unexecuted mandatory kill query even when a real, credentialed provider
+    was wired up -- collapsing budget starvation, transient provider
+    unavailability, and a genuine absence of any search capability into one
+    misleading message. This distinguishes them, so the report never asserts
+    "no provider" merely because a query happened not to execute.
+    """
+
+    #: No research provider AND no legacy SearchProvider were configured for
+    #: this run at all -- the only case that may say "no search provider".
+    NO_PROVIDER = "NO_PROVIDER"
+    #: A provider object exists but reported itself unusable right now (no
+    #: credentials, disabled, ...) -- distinct from it never existing.
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    #: The provider was usable; the stage/global LLM token budget refused
+    #: this call before it ever reached the network.
+    SKIPPED_DUE_TO_BUDGET = "SKIPPED_DUE_TO_BUDGET"
+    #: The provider was usable, budget was not the issue, and the call
+    #: itself failed (network error, malformed response, ...).
+    SEARCH_ERROR = "SEARCH_ERROR"
+    #: The query executed successfully and returned zero documents.
+    EXECUTED_ZERO_RESULTS = "EXECUTED_ZERO_RESULTS"
+    #: The query executed successfully and returned at least one document.
+    EXECUTED_WITH_RESULTS = "EXECUTED_WITH_RESULTS"
+
+
 #: Categories that must always be reported, even when the assessment is K0
 #: (requirement 5: "最低限 ... を出す").
 MANDATORY_KILL_CATEGORIES = (
@@ -412,7 +441,14 @@ REQUIRED_RESEARCH_DOMAINS: tuple[ResearchDomain, ...] = tuple(ResearchDomain)
 
 
 class SearchStatus(StrEnum):
+    #: A web/discovery-path query executed for this domain (requirement F:
+    #: this is what "WEB_SEARCHED" means in this system -- the query record
+    #: itself is always search-path, never inferred from facts existing).
     SEARCHED = "SEARCHED"
+    #: A structured collector (SEC EDGAR / ClinicalTrials.gov / openFDA, ...)
+    #: with a genuine, auditable execution record directly covers this
+    #: domain -- never inferred merely because facts happen to exist for it.
+    DIRECTLY_RESEARCHED = "DIRECTLY_RESEARCHED"
     PARTIAL = "PARTIAL"
     UNSEARCHED = "UNSEARCHED"
     FAILED = "FAILED"

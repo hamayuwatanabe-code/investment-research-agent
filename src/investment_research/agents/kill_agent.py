@@ -14,8 +14,10 @@ failure this system exists to prevent.
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from dataclasses import dataclass
 
-from ..collectors.search import SearchProvider, kill_queries
+from ..collectors.search import NullSearchProvider, SearchProvider, kill_queries
 from ..collectors.tiering import classify_tier
 from ..orchestrator.isolation import Channel
 from ..research.discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, make_query_id
@@ -25,7 +27,9 @@ from ..schemas.enums import (
     MANDATORY_KILL_CATEGORIES,
     UNKNOWN,
     FactCategory,
+    FetchOutcome,
     KillCategory,
+    KillSearchFailureReason,
     Materiality,
     QueryPurpose,
     ResearchDomain,
@@ -75,6 +79,25 @@ QUERY_CATEGORY_MAP: dict[str, KillCategory] = {
 }
 
 
+@dataclass
+class KillQueryOutcome:
+    """Per-mandatory-query audit record (requirement B).
+
+    One of these is recorded for EVERY mandatory kill query, executed or
+    not, so the report can say precisely why -- never collapsing budget
+    starvation, a provider that is configured but currently unusable, and a
+    genuine absence of any search capability into the same message.
+    """
+
+    query: str
+    reason: KillSearchFailureReason
+    #: The provider's own reported unavailability reason, or
+    #: ``ResearchResult.error`` for an executed-but-failed call. Empty for a
+    #: successful execution.
+    detail: str = ""
+    results_count: int = 0
+
+
 class KillAgent(Agent):
     agent_id = "kill_agent"
     purpose = "Find disqualifying facts; never defend the candidate"
@@ -106,6 +129,8 @@ class KillAgent(Agent):
         self.research = research
         self.discovery = discovery if discovery is not None else DiscoveryLog()
         self.queries_skipped_due_to_budget: list[str] = []
+        #: One entry per mandatory query attempted this run (requirement B).
+        self.query_outcomes: list[KillQueryOutcome] = []
 
     def run(self, data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
@@ -179,6 +204,17 @@ class KillAgent(Agent):
             "queries_executed": executed,
             "queries_not_executed": unexecuted,
             "queries_skipped_due_to_budget": list(self.queries_skipped_due_to_budget),
+            # Requirement B: per-query failure-state audit, never collapsed
+            # into a single "no search provider configured" message.
+            "query_outcomes": [
+                {
+                    "query": o.query,
+                    "reason": str(o.reason),
+                    "detail": o.detail,
+                    "results_count": o.results_count,
+                }
+                for o in self.query_outcomes
+            ],
             "unsearched_categories": [str(c) for c in unsearched],
             "program_resolved": (
                 UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
@@ -218,42 +254,62 @@ class KillAgent(Agent):
         hits: list[dict] = []
         already = {q.lower() for q in self.executed_queries}
 
-        research_usable = False
-        if self.research is not None:
-            research_usable, _ = self.research.available()
+        research_usable, research_unavailable_reason = (
+            self.research.available() if self.research is not None else (False, "")
+        )
 
         for query in kill_queries(ticker, company_name):
             if _covered_by(query, already):
                 executed.append(query)
                 continue
-            if research_usable:
-                ok, query_hits, skipped_for_budget = self._search_via_research(
-                    query, ticker=ticker, run_id=run_id
+            if self.research is not None:
+                outcome, query_hits = self._search_via_research(
+                    query,
+                    ticker=ticker,
+                    run_id=run_id,
+                    usable=research_usable,
+                    unavailable_reason=research_unavailable_reason,
                 )
-                if skipped_for_budget:
-                    self.queries_skipped_due_to_budget.append(query)
             else:
-                ok, query_hits = self._search_via_legacy(query)
-            if not ok:
+                outcome, query_hits = self._search_via_legacy(query)
+            self.query_outcomes.append(outcome)
+            if outcome.reason is KillSearchFailureReason.SKIPPED_DUE_TO_BUDGET:
+                self.queries_skipped_due_to_budget.append(query)
+            if outcome.reason in (
+                KillSearchFailureReason.EXECUTED_WITH_RESULTS,
+                KillSearchFailureReason.EXECUTED_ZERO_RESULTS,
+            ):
+                executed.append(query)
+                hits.extend(query_hits)
+            else:
                 unexecuted.append(query)
-                continue
-            executed.append(query)
-            hits.extend(query_hits)
 
         if unexecuted:
-            reason = (
-                "the LLM token budget was exhausted before every mandatory query could run"
-                if self.queries_skipped_due_to_budget
-                else "no search provider configured"
-            )
-            out.errors.append(
-                f"{len(unexecuted)} mandatory kill queries were not executed ({reason})"
-            )
+            out.errors.append(self._unexecuted_summary(unexecuted))
         return executed, unexecuted, hits
 
+    def _unexecuted_summary(self, unexecuted: list[str]) -> str:
+        """Accurate, non-collapsing summary of why queries did not execute.
+
+        Requirement B: never infer "no provider" merely because a query was
+        not executed, and never say "no search provider configured" unless
+        that is genuinely why -- a per-reason breakdown, built from the
+        actual :class:`KillQueryOutcome` recorded for each query, replaces
+        the old single hardcoded message.
+        """
+        unexecuted_set = set(unexecuted)
+        reasons = Counter(
+            outcome.reason for outcome in self.query_outcomes if outcome.query in unexecuted_set
+        )
+        parts = [
+            f"{count} {reason.value}"
+            for reason, count in sorted(reasons.items(), key=lambda kv: kv[0].value)
+        ]
+        return f"{len(unexecuted)} mandatory kill queries were not executed ({'; '.join(parts)})"
+
     def _search_via_research(
-        self, query: str, *, ticker: str, run_id: str
-    ) -> tuple[bool, list[dict], bool]:
+        self, query: str, *, ticker: str, run_id: str, usable: bool, unavailable_reason: str
+    ) -> tuple[KillQueryOutcome, list[dict]]:
         """Execute one mandatory kill query through the live research provider.
 
         Recorded into ``self.discovery`` with QueryPurpose.BEAR (mandatory
@@ -261,8 +317,25 @@ class KillAgent(Agent):
         searches) and agent_id="kill_agent" so it stays auditable exactly like
         adversarial discovery -- never mixed into the Bull agent's context,
         since Bull's isolation policy never reads BEAR-purpose hits.
+
+        Requirement B: distinguishes PROVIDER_UNAVAILABLE (the provider
+        exists but reports itself unusable), SKIPPED_DUE_TO_BUDGET (a
+        BudgetExceeded abort caught by the provider), SEARCH_ERROR (any
+        other failure, including a partial/malformed response with
+        ``executed=True``), and the two successful outcomes -- never
+        collapsing any of these into "no provider configured".
         """
         assert self.research is not None
+        if not usable:
+            return (
+                KillQueryOutcome(
+                    query=query,
+                    reason=KillSearchFailureReason.PROVIDER_UNAVAILABLE,
+                    detail=unavailable_reason,
+                ),
+                [],
+            )
+
         domain = _domain_for_kill_query(query)
         research_query = ResearchQuery(
             query=query,
@@ -292,8 +365,25 @@ class KillAgent(Agent):
             )
         )
         if not result.executed:
-            skipped_for_budget = str(result.error).startswith("BudgetExceeded")
-            return False, [], skipped_for_budget
+            error = str(result.error)
+            if error.startswith("BudgetExceeded"):
+                reason = KillSearchFailureReason.SKIPPED_DUE_TO_BUDGET
+            elif result.outcome is FetchOutcome.DISABLED:
+                reason = KillSearchFailureReason.PROVIDER_UNAVAILABLE
+            else:
+                reason = KillSearchFailureReason.SEARCH_ERROR
+            return KillQueryOutcome(query=query, reason=reason, detail=error), []
+
+        if result.error:
+            # executed=True but the response could not be parsed cleanly --
+            # a real failure, never silently treated as "searched, nothing
+            # found".
+            return (
+                KillQueryOutcome(
+                    query=query, reason=KillSearchFailureReason.SEARCH_ERROR, detail=result.error
+                ),
+                [],
+            )
 
         query_hits: list[dict] = []
         for document in result.documents[: self.max_hits]:
@@ -307,17 +397,43 @@ class KillAgent(Agent):
                     "published_date": document.published_date,
                 }
             )
-        return True, query_hits, False
+        reason = (
+            KillSearchFailureReason.EXECUTED_WITH_RESULTS
+            if query_hits
+            else KillSearchFailureReason.EXECUTED_ZERO_RESULTS
+        )
+        return KillQueryOutcome(query=query, reason=reason, results_count=len(query_hits)), query_hits
 
-    def _search_via_legacy(self, query: str) -> tuple[bool, list[dict]]:
+    def _search_via_legacy(self, query: str) -> tuple[KillQueryOutcome, list[dict]]:
         """Fall back to the offline SearchProvider (Tavily/Brave/none).
 
-        Used only when no live research provider was given, or the one given
-        is unusable -- e.g. a run with no --live at all.
+        Used only when no live research provider was given at all. This is
+        the ONLY path that may report NO_PROVIDER -- and only when the
+        legacy provider is genuinely ``NullSearchProvider``, i.e. nothing
+        was configured for this run whatsoever; a Tavily/Brave provider that
+        exists but lacks credentials is PROVIDER_UNAVAILABLE, not NO_PROVIDER.
         """
+        if isinstance(self.search, NullSearchProvider):
+            return (
+                KillQueryOutcome(
+                    query=query,
+                    reason=KillSearchFailureReason.NO_PROVIDER,
+                    detail="no live research provider and no legacy search provider were "
+                    "configured for this run",
+                ),
+                [],
+            )
+
         response = self.search.search(query, limit=self.max_hits)
         if not response.executed:
-            return False, []
+            return (
+                KillQueryOutcome(
+                    query=query,
+                    reason=KillSearchFailureReason.PROVIDER_UNAVAILABLE,
+                    detail=response.error,
+                ),
+                [],
+            )
         query_hits: list[dict] = []
         for hit in response.hits[: self.max_hits]:
             tier = classify_tier(hit.url)
@@ -331,7 +447,12 @@ class KillAgent(Agent):
                     "published_date": hit.published_date,
                 }
             )
-        return True, query_hits
+        reason = (
+            KillSearchFailureReason.EXECUTED_WITH_RESULTS
+            if query_hits
+            else KillSearchFailureReason.EXECUTED_ZERO_RESULTS
+        )
+        return KillQueryOutcome(query=query, reason=reason, results_count=len(query_hits)), query_hits
 
     @staticmethod
     def _unsearched_categories(unexecuted: list[str]) -> tuple[KillCategory, ...]:

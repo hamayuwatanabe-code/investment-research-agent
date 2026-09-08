@@ -145,6 +145,41 @@ def test_request_uses_current_api_shape(client):
     assert request["tool_choice"] == {"type": "auto"}
 
 
+# --- per-agent effort policy (requirement G) ---------------------------------
+def test_per_agent_effort_override_reaches_the_actual_api_request(client):
+    """Requirement G: a per-agent effort resolved by the caller (e.g. via
+    llm.effort_policy.resolve_effort against --llm-effort's ceiling) must
+    actually change the API request's output_config.effort -- not merely be
+    recorded somewhere and ignored."""
+    fact, data = make_input()
+    global RESPONSE
+    payload = json.loads(json.dumps(REGULATORY_PAYLOAD).replace("FACT_ID", fact.fact_id))
+    RESPONSE = message(tool_use("submit_regulatory_analysis", payload))
+
+    output = LLMRegulatoryAgent(
+        client, fallback=RegulatoryAgent(), effort="medium"
+    ).run(data)
+
+    request = REQUESTS[-1]
+    assert request["output_config"] == {"effort": "medium"}
+    assert output.metrics["llm_effort"] == "medium"
+    assert "preflight_reservation" in output.metrics
+    assert output.metrics["prompt_tokens"] > 0
+    assert output.metrics["actual_total_tokens"] > 0
+
+
+def test_no_effort_override_uses_the_client_default(client):
+    fact, data = make_input()
+    global RESPONSE
+    payload = json.loads(json.dumps(REGULATORY_PAYLOAD).replace("FACT_ID", fact.fact_id))
+    RESPONSE = message(tool_use("submit_regulatory_analysis", payload))
+
+    output = LLMRegulatoryAgent(client, fallback=RegulatoryAgent()).run(data)
+
+    assert REQUESTS[-1]["output_config"] == {"effort": "high"}
+    assert output.metrics["llm_effort"] == "high"
+
+
 def test_evidence_reaches_the_prompt(client):
     fact, data = make_input()
     global RESPONSE

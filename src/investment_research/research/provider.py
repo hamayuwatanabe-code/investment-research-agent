@@ -80,7 +80,11 @@ class DomainCoverage:
 
     @property
     def searched(self) -> bool:
-        return self.status in (SearchStatus.SEARCHED, SearchStatus.PARTIAL)
+        return self.status in (
+            SearchStatus.SEARCHED,
+            SearchStatus.DIRECTLY_RESEARCHED,
+            SearchStatus.PARTIAL,
+        )
 
 
 class ResearchProvider(Protocol):

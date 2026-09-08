@@ -46,8 +46,9 @@ def test_token_diagnostics_reports_search_and_fetch_counts():
         "unexecuted": 2,
         "unexecuted_due_to_budget": 1,
         "deduplicated": 1,
+        "skipped_due_to_direct_coverage": 0,
     }
-    assert diagnostics["fetch"] == {"attempted": 4, "failed": 1}
+    assert diagnostics["fetch"] == {"attempted": 4, "failed": 1, "audit_entries": 0}
 
 
 def test_token_diagnostics_handles_a_run_with_no_llm_activity_at_all():

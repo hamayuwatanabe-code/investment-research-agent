@@ -16,7 +16,9 @@ position on the security.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..research.provider import DomainCoverage
 from ..schemas.enums import (
@@ -27,6 +29,51 @@ from ..schemas.enums import (
 )
 
 log = logging.getLogger(__name__)
+
+#: Which structured collector directly covers which required research domain
+#: (requirement F), and how strongly. This is a STRUCTURAL fact about what a
+#: collector's own API contract can actually establish -- never inferred
+#: from whether facts happen to exist afterward:
+#:
+#:   STRONG  the collector IS the domain's own authority (openFDA/FDA for
+#:           REGULATORY, ClinicalTrials.gov for SCIENCE_TECHNOLOGY, SEC
+#:           EDGAR for CAPITAL_STRUCTURE) -- counts as DIRECTLY_RESEARCHED.
+#:   False   the collector's data can TOUCH the domain (an 8-K may disclose
+#:           a regulatory event) but is not that domain's own authority --
+#:           contributes only toward PARTIAL, alongside actual fact
+#:           evidence, never DIRECTLY_RESEARCHED on its own.
+_DIRECT_COLLECTOR_COVERAGE: dict[str, tuple[tuple[ResearchDomain, bool], ...]] = {
+    "sec_edgar": (
+        (ResearchDomain.CAPITAL_STRUCTURE, True),
+        (ResearchDomain.REGULATORY, False),
+    ),
+    "clinicaltrials": ((ResearchDomain.SCIENCE_TECHNOLOGY, True),),
+    "fda": ((ResearchDomain.REGULATORY, True),),
+}
+
+
+def direct_collector_coverage(
+    collection_results: Sequence[Any],
+) -> tuple[frozenset[ResearchDomain], frozenset[ResearchDomain]]:
+    """``(strong, weak)`` domains a structured collector genuinely covered.
+
+    Requirement F: "there must be an actual collector/query execution
+    record" -- a collection result counts here only when it actually ran
+    successfully (``result.ok``), never merely because facts of the right
+    category later happened to exist. Used both to mark
+    ``SearchStatus.DIRECTLY_RESEARCHED`` on the completeness gate and to let
+    the (expensive) adversarial web-search pass skip domains a collector
+    already materially covers.
+    """
+    strong: set[ResearchDomain] = set()
+    weak: set[ResearchDomain] = set()
+    for result in collection_results:
+        collector = getattr(result, "collector", "")
+        if not getattr(result, "ok", False):
+            continue
+        for domain, is_strong in _DIRECT_COLLECTOR_COVERAGE.get(collector, ()):
+            (strong if is_strong else weak).add(domain)
+    return frozenset(strong), frozenset(weak)
 
 
 @dataclass
@@ -80,16 +127,23 @@ def assess_completeness(
     search_results: list,
     facts_by_domain: dict[ResearchDomain, int] | None = None,
     agents_run: set[str] | None = None,
+    collection_results: Sequence[Any] = (),
 ) -> CompletenessResult:
     """Decide, per domain, whether research actually happened.
 
-    A domain counts as SEARCHED when a query for it executed **or** when the
-    agent responsible for it produced evidence from the collected corpus. Both
-    are real examination; neither is inferred from the other.
+    A domain counts as SEARCHED when a web/discovery query for it executed;
+    DIRECTLY_RESEARCHED when a structured collector (SEC EDGAR /
+    ClinicalTrials.gov / openFDA, ...) with its own genuine execution record
+    is that domain's authority (requirement F); PARTIAL when a
+    collector's data merely touches the domain (weak coverage) or the agent
+    responsible for it produced evidence from the collected corpus. None of
+    these is ever inferred from facts existing alone -- there is always an
+    actual query or collector execution record behind it.
     """
     result = CompletenessResult()
     facts_by_domain = facts_by_domain or {}
     agents_run = agents_run or set()
+    strong_direct, weak_direct = direct_collector_coverage(collection_results)
 
     #: Which agent, having run and produced evidence, satisfies which domain.
     agent_for_domain = {
@@ -127,7 +181,16 @@ def assess_completeness(
         elif entry.queries_executed:
             entry.status = SearchStatus.SEARCHED
             entry.detail = f"{entry.queries_executed} query/queries executed, no documents returned"
-        elif agent_ran and agent_evidence:
+        elif domain in strong_direct:
+            entry.status = SearchStatus.DIRECTLY_RESEARCHED
+            if ResearchPath.DIRECT_API not in paths:
+                paths.append(ResearchPath.DIRECT_API)
+                entry.paths = tuple(paths)
+            entry.detail = (
+                "a structured collector directly authoritative for this domain executed "
+                "successfully (no web search needed)"
+            )
+        elif (agent_ran and agent_evidence) or (domain in weak_direct and agent_evidence):
             entry.status = SearchStatus.PARTIAL
             entry.detail = (
                 f"no dedicated query executed, but {agent_evidence} fact(s) were analysed "

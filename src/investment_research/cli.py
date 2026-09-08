@@ -44,6 +44,7 @@ from .research.provider import (
     ResearchProvider,
 )
 from .schemas.enums import Provenance, RunStatus
+from .scoring.completeness import direct_collector_coverage
 from .storage.db import open_db
 from .storage.repository import Repository
 
@@ -238,25 +239,13 @@ def run_one(
     chunks: list = []
     adversarial = None
 
-    if args.adversarial:
-        # Requirement M2: search results are discovery evidence, never facts.
-        # They are NOT merged into the document set that feeds extraction --
-        # adversarial.discovery (SearchQueryRecord/SearchHit) is what the Kill
-        # Agent's prompt context and the completeness gate read instead. A
-        # search snippet must never become a Fact.
-        #
-        # `research` is the single provider object for this run -- built once
-        # by build_research_stack() above, whether that is a corpus replay, the
-        # live Anthropic provider, a composite of both, or NullResearchProvider
-        # when neither --corpus nor --live is set. Running the adversarial pass
-        # exactly once here, before branching on --corpus, is what makes
-        # `--live --llm --adversarial` (no --corpus) actually search, and what
-        # keeps a run with both flags from searching twice.
-        adversarial = run_adversarial_search(
-            research, build_plan(ticker, company_name), llm=llm,
-            run_id=ticker, ticker=ticker, research_effort=args.research_effort,
-        )
-
+    # Requirement F: collection runs BEFORE adversarial web search (moved
+    # ahead of it deliberately) so the expensive web-search pass can see
+    # which required domains a structured collector (SEC EDGAR /
+    # ClinicalTrials.gov / openFDA) already directly, auditably covers and
+    # skip searching them again -- a live measurement showed ~22k actual
+    # tokens per web-search call even at low effort, so six independent
+    # required-domain searches alone could exhaust a 60k discovery quota.
     if args.corpus:
         documents = corpus.documents(ticker)
         collector = DocumentCollector(
@@ -278,6 +267,25 @@ def run_one(
             settings=settings,
             http=http,
             use_fixtures=args.fixtures,
+        )
+
+    if args.adversarial:
+        # Requirement M2: search results are discovery evidence, never facts.
+        # They are NOT merged into the document set that feeds extraction --
+        # adversarial.discovery (SearchQueryRecord/SearchHit) is what the Kill
+        # Agent's prompt context and the completeness gate read instead. A
+        # search snippet must never become a Fact.
+        #
+        # `research` is the single provider object for this run -- built once
+        # by build_research_stack() above, whether that is a corpus replay, the
+        # live Anthropic provider, a composite of both, or NullResearchProvider
+        # when neither --corpus nor --live is set.
+        strong_direct, _weak_direct = direct_collector_coverage(results)
+        adversarial = run_adversarial_search(
+            research,
+            build_plan(ticker, company_name, already_covered_domains=strong_direct),
+            llm=llm,
+            run_id=ticker, ticker=ticker, research_effort=args.research_effort,
         )
 
     mode = "standard"
@@ -350,10 +358,21 @@ def _token_diagnostics(result: ResearchResult) -> dict:
                 len(adversarial.unexecuted_due_to_budget) if adversarial else 0
             ),
             "deduplicated": len(adversarial.deduplicated) if adversarial else 0,
+            # Requirement F: mandatory-template queries skipped because a
+            # structured collector already directly covered that domain --
+            # never a budget cut, never UNSEARCHED.
+            "skipped_due_to_direct_coverage": (
+                len(adversarial.skipped_due_to_direct_coverage) if adversarial else 0
+            ),
         },
         "fetch": {
             "attempted": escalation.fetches_attempted if escalation else 0,
             "failed": escalation.fetches_failed if escalation else 0,
+            # Requirement E: per-fetch audit trail entry count -- the report's
+            # escalation appendix carries the full detail (subject, url,
+            # authority, candidate rank, outcome, failure reason, tokens,
+            # body obtained/answered, supporting sentence).
+            "audit_entries": len(escalation.fetch_log) if escalation else 0,
         },
     }
 

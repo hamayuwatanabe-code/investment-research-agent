@@ -888,6 +888,30 @@ def _section_escalation(self: ReportRenderer) -> str:
         out.append("")
         out.append(f"  [CONFIRMED] ({attempt.reason}) {self._safe(attempt.claim)[:150]}")
         out.append(f"      confirmed by: {self._safe(attempt.confirming_url)}")
+
+    # Requirement E: per-fetch audit trail. "fetches attempted: 12, fetches
+    # failed: 9" alone does not say which URL, for which question/fact, or
+    # why -- this is the detail behind those two counters.
+    if escalation.fetch_log:
+        out.append("")
+        out.append(
+            f"  fetch audit ({len(escalation.fetch_log)} attempt(s); "
+            f"{escalation.fetches_attempted} attempted, {escalation.fetches_failed} failed):"
+        )
+        for entry in escalation.fetch_log:
+            out.append("")
+            out.append(f"      subject   : {self._safe(entry.subject_id)[:150]}")
+            out.append(f"      url       : {self._safe(entry.url)}")
+            out.append(f"      authority : {entry.authority}   candidate_rank: {entry.candidate_rank}")
+            out.append(f"      outcome   : {entry.outcome}")
+            if entry.failure_reason:
+                out.append(f"      failure   : {self._safe(entry.failure_reason)}")
+            out.append(
+                f"      body obtained: {entry.body_obtained}   answered: {entry.body_answered}"
+                + (f"   tokens: {entry.tokens_used}" if entry.tokens_used else "")
+            )
+            if entry.supporting_sentence:
+                out.append(f"      supporting sentence: {self._safe(entry.supporting_sentence)[:300]}")
     return "\n".join(out)
 
 

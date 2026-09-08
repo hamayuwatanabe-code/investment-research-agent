@@ -16,6 +16,7 @@ finding gets confirmed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from collections.abc import Sequence
@@ -112,6 +113,11 @@ FOLLOW_UP_SCHEMA: dict[str, Any] = {
 class SearchPlan:
     bear: list[ResearchQuery] = field(default_factory=list)
     bull: list[ResearchQuery] = field(default_factory=list)
+    #: Mandatory-template queries dropped BEFORE ever being built because a
+    #: structured collector already directly covers that domain (requirement
+    #: F) -- never counted as "unexecuted"/UNSEARCHED, since the domain is
+    #: covered a different, auditable way (SearchStatus.DIRECTLY_RESEARCHED).
+    skipped_due_to_direct_coverage: list[str] = field(default_factory=list)
 
     def all(self) -> list[ResearchQuery]:
         return [*self.bear, *self.bull]
@@ -145,6 +151,13 @@ class AdversarialOutcome:
     #: F: deduplicate semantically overlapping queries). Distinct from
     #: `unexecuted`: these were never even attempted, by design, not cut off.
     deduplicated: list[str] = field(default_factory=list)
+    #: Mandatory-template queries skipped because a structured collector
+    #: already directly covers that domain (requirement F). Distinct from
+    #: both `deduplicated` (redundant vs. another query) and `unexecuted`
+    #: (budget-cut) -- these were never needed at all, and the domain is
+    #: still auditably covered (SearchStatus.DIRECTLY_RESEARCHED), never
+    #: left UNSEARCHED.
+    skipped_due_to_direct_coverage: list[str] = field(default_factory=list)
     #: Auditable, purpose-separated query and hit log (requirement M3).
     discovery: DiscoveryLog = field(default_factory=DiscoveryLog)
 
@@ -170,10 +183,32 @@ class AdversarialOutcome:
         return out
 
 
-def build_plan(ticker: str, company: str, programmes: Sequence[str] = ()) -> SearchPlan:
-    """Expand the mandatory templates for this candidate."""
+def build_plan(
+    ticker: str,
+    company: str,
+    programmes: Sequence[str] = (),
+    *,
+    already_covered_domains: frozenset[ResearchDomain] = frozenset(),
+) -> SearchPlan:
+    """Expand the mandatory templates for this candidate.
+
+    Requirement F: a live measurement showed ~22k actual tokens per Anthropic
+    web-search call even at low effort, so the six required-domain core
+    queries alone can exhaust a 60k discovery quota before COMPETITION/
+    CONTRADICTION/CATALYST -- the domains no structured collector can ever
+    cover -- get a turn. ``already_covered_domains`` (from
+    ``scoring.completeness.direct_collector_coverage``, strong coverage
+    only) lets a domain a structured collector already genuinely,
+    auditably covers skip its (expensive) web-search templates entirely --
+    it is not left UNSEARCHED, it is DIRECTLY_RESEARCHED a different way.
+    The Kill Agent's own mandatory falsification queries are untouched by
+    this: it always runs its full search set regardless of collector
+    coverage, since that is a distinct duty from domain-completeness
+    discovery.
+    """
     subject = company or ticker
     drug = programmes[0] if programmes else subject
+    skipped: list[str] = []
 
     def expand(
         templates: tuple[tuple[str, ResearchDomain], ...], stance: str
@@ -185,6 +220,9 @@ def build_plan(ticker: str, company: str, programmes: Sequence[str] = ()) -> Sea
             if text.lower() in seen:
                 continue
             seen.add(text.lower())
+            if domain in already_covered_domains:
+                skipped.append(text)
+                continue
             queries.append(
                 ResearchQuery(
                     query=text,
@@ -195,7 +233,9 @@ def build_plan(ticker: str, company: str, programmes: Sequence[str] = ()) -> Sea
             )
         return queries
 
-    return SearchPlan(bear=expand(BEAR_TEMPLATES, "bear"), bull=expand(BULL_TEMPLATES, "bull"))
+    bear = expand(BEAR_TEMPLATES, "bear")
+    bull = expand(BULL_TEMPLATES, "bull")
+    return SearchPlan(bear=bear, bull=bull, skipped_due_to_direct_coverage=skipped)
 
 
 def _prioritize_domain_coverage(queries: Sequence[ResearchQuery]) -> list[ResearchQuery]:
@@ -293,10 +333,10 @@ def run_adversarial_search(
     ``llm`` is given, this sets its budget's current stage to ``"discovery"``
     for the duration of this call (see ``LLMBudget.set_stage``).
     """
-    outcome = AdversarialOutcome()
+    outcome = AdversarialOutcome(
+        skipped_due_to_direct_coverage=list(plan.skipped_due_to_direct_coverage)
+    )
     run_id = run_id or ticker or "unknown-run"
-    if llm is not None:
-        llm.budget.set_stage("discovery")
 
     def _execute(
         query: ResearchQuery,
@@ -336,44 +376,49 @@ def run_adversarial_search(
         if str(result.error).startswith(_BUDGET_ERROR_PREFIX):
             outcome.unexecuted_due_to_budget.append(query.query)
 
-    # --- bear: required-domain coverage first, then near-duplicates dropped
-    bear_queries = _prioritize_domain_coverage(plan.bear)
-    bear_queries, bear_dropped = _dedupe_semantically(bear_queries)
-    outcome.deduplicated.extend(bear_dropped)
-    bear_query_tokens = [_query_tokens(q.query) for q in bear_queries]
+    # Requirement A: a scoped stage context (never ambient) so this pass can
+    # never leave the budget's `current_stage` pointing at "discovery" once
+    # it returns -- restored to whatever it was before, on any exit path.
+    stage_cm = llm.budget.stage("discovery") if llm is not None else contextlib.nullcontext()
+    with stage_cm:
+        # --- bear: required-domain coverage first, then near-duplicates dropped
+        bear_queries = _prioritize_domain_coverage(plan.bear)
+        bear_queries, bear_dropped = _dedupe_semantically(bear_queries)
+        outcome.deduplicated.extend(bear_dropped)
+        bear_query_tokens = [_query_tokens(q.query) for q in bear_queries]
 
-    for query in bear_queries:
-        result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_bear")
-        outcome.bear_results.append(result)
-        _record(result, query)
-
-    # Follow-ups are optional, discovery-budget-scoped work: skip generating
-    # them at all once the discovery stage quota is already spent, rather
-    # than paying for a follow-up proposal call that could never be executed.
-    discovery_exhausted = llm is not None and "discovery" in llm.budget.stage_exhausted
-    if llm is not None and not discovery_exhausted:
-        follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups, research_effort)
-        # Never propose searching for something the mandatory bear pass
-        # already asked.
-        follow_ups, follow_up_dropped = _dedupe_semantically(
-            follow_ups, seed_tokens=bear_query_tokens
-        )
-        outcome.deduplicated.extend(follow_up_dropped)
-        outcome.follow_up_queries = follow_ups
-        for query in follow_ups:
-            result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_followup")
+        for query in bear_queries:
+            result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_bear")
             outcome.bear_results.append(result)
             _record(result, query)
 
-    # --- bull: separate pass, same treatment -----------------------------
-    bull_queries = _prioritize_domain_coverage(plan.bull)
-    bull_queries, bull_dropped = _dedupe_semantically(bull_queries)
-    outcome.deduplicated.extend(bull_dropped)
+        # Follow-ups are optional, discovery-budget-scoped work: skip generating
+        # them at all once the discovery stage quota is already spent, rather
+        # than paying for a follow-up proposal call that could never be executed.
+        discovery_exhausted = llm is not None and "discovery" in llm.budget.stage_exhausted
+        if llm is not None and not discovery_exhausted:
+            follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups, research_effort)
+            # Never propose searching for something the mandatory bear pass
+            # already asked.
+            follow_ups, follow_up_dropped = _dedupe_semantically(
+                follow_ups, seed_tokens=bear_query_tokens
+            )
+            outcome.deduplicated.extend(follow_up_dropped)
+            outcome.follow_up_queries = follow_ups
+            for query in follow_ups:
+                result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_followup")
+                outcome.bear_results.append(result)
+                _record(result, query)
 
-    for query in bull_queries:
-        result = _execute(query, QueryPurpose.BULL, llm_agent_id="adversarial_bull")
-        outcome.bull_results.append(result)
-        _record(result, query)
+        # --- bull: separate pass, same treatment -----------------------------
+        bull_queries = _prioritize_domain_coverage(plan.bull)
+        bull_queries, bull_dropped = _dedupe_semantically(bull_queries)
+        outcome.deduplicated.extend(bull_dropped)
+
+        for query in bull_queries:
+            result = _execute(query, QueryPurpose.BULL, llm_agent_id="adversarial_bull")
+            outcome.bull_results.append(result)
+            _record(result, query)
 
     return outcome
 

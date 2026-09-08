@@ -32,6 +32,7 @@ from investment_research.research.anthropic_web import (
 )
 from investment_research.research.corpus import CorpusResearchProvider
 from investment_research.research.escalation import (
+    domains_for_category,
     escalate,
     escalate_unresolved_questions,
     needs_escalation,
@@ -723,12 +724,39 @@ def test_follow_ups_are_never_generated_once_discovery_quota_already_exhausted()
 
 
 def test_discovery_stage_is_set_on_the_llm_budget_during_the_run():
+    """Requirement A: the stage is scoped, not ambient.
+
+    ``run_adversarial_search`` sets "discovery" for the duration of its own
+    work (every query it issues must be attributed to it) and restores
+    whatever was active before on return, so it can never leak into
+    whatever the caller runs next -- unlike the old ambient
+    ``budget.set_stage("discovery")`` call this replaced, which left
+    "discovery" active indefinitely after the function returned.
+    """
     provider = _BudgetCuttingProvider(allow=1000)
     plan = build_plan("TESTCO", "Generic Biotech Holdings")
     budget = LLMBudget(max_total_tokens=1000)
     llm = _FakeLLMForFollowUps(budget=budget)
+
+    stages_seen: list[str] = []
+    original_search = provider.search
+
+    def _tracking_search(query, *, agent_id: str = "research"):
+        stages_seen.append(budget.current_stage)
+        return original_search(query, agent_id=agent_id)
+
+    provider.search = _tracking_search  # type: ignore[method-assign]
+
     run_adversarial_search(provider, plan, llm=llm, run_id="r1", ticker="TESTCO")
-    assert budget.current_stage == "discovery"
+
+    assert stages_seen, "the provider must have been called at least once"
+    assert all(stage == "discovery" for stage in stages_seen), (
+        "every query issued while the adversarial pass is running must be attributed to the "
+        f"'discovery' stage, got {stages_seen}"
+    )
+    assert budget.current_stage == "", (
+        "the stage must be restored once the pass returns, not left dangling"
+    )
 
 
 # --- escalation -------------------------------------------------------------
@@ -908,3 +936,78 @@ def test_non_material_unresolved_questions_are_never_escalated():
     assert facts == []
     assert report.attempts == []
     assert provider.fetch_calls == 0
+
+
+# --- question-aware domain routing (requirement C) ---------------------------
+def test_domains_for_category_capital_structure_is_sec_only():
+    domains = domains_for_category(FactCategory.CAPITAL_STRUCTURE)
+    assert domains == ("sec.gov",)
+    assert "fda.gov" not in domains
+    assert "clinicaltrials.gov" not in domains
+
+
+def test_domains_for_category_regulatory_includes_fda_and_sec():
+    domains = domains_for_category(FactCategory.REGULATORY)
+    assert "fda.gov" in domains
+    assert "sec.gov" in domains
+
+
+def test_domains_for_category_science_never_queries_sec():
+    domains = domains_for_category(FactCategory.SCIENCE)
+    assert "sec.gov" not in domains
+    assert "clinicaltrials.gov" in domains
+
+
+class _DomainRecordingProvider:
+    """A ResearchProvider double that records every ``allowed_domains`` a
+    search was restricted to, without ever answering from a fetched body --
+    forces escalation past the already-collected-sources step and into an
+    actual search, so the domain routing on the search itself is exercised."""
+
+    def __init__(self) -> None:
+        self.searched_domains: list[str] = []
+
+    def available(self):
+        return True, "ready"
+
+    def search(self, query, *, agent_id: str = "research"):
+        self.searched_domains.extend(query.allowed_domains)
+        return ResearchResult(query=query, outcome=FetchOutcome.NOT_FOUND, path=ResearchPath.ANTHROPIC_WEB)
+
+    def fetch(self, url, *, reason="", agent_id: str = "research", known=None):
+        return None
+
+
+def test_unrelated_capital_structure_question_never_queries_fda_gov():
+    """Requirement C / H4: the exact defect the v3 report showed -- a fully
+    diluted share count question searched fda.gov, which cannot possibly
+    answer it."""
+    question = UnresolvedQuestion(
+        question="What is the fully diluted share count including all outstanding warrants?",
+        why_it_matters="Understates dilution if wrong.",
+        blocking=True,
+        category=FactCategory.CAPITAL_STRUCTURE,
+    )
+    provider = _DomainRecordingProvider()
+    escalate_unresolved_questions(
+        [question], [], provider, company="Generic Biotech Holdings", ticker="TESTCO", run_id="r1"
+    )
+    assert provider.searched_domains, "the question must have actually been searched"
+    assert "fda.gov" not in provider.searched_domains
+    assert "clinicaltrials.gov" not in provider.searched_domains
+    assert all(d == "sec.gov" for d in provider.searched_domains)
+
+
+def test_science_question_never_queries_sec_gov():
+    question = UnresolvedQuestion(
+        question="Was the trial designed as a randomized, double-blind study?",
+        why_it_matters="Trial design determines evidentiary weight.",
+        blocking=True,
+        category=FactCategory.SCIENCE,
+    )
+    provider = _DomainRecordingProvider()
+    escalate_unresolved_questions(
+        [question], [], provider, company="Generic Biotech Holdings", ticker="TESTCO", run_id="r1"
+    )
+    assert provider.searched_domains
+    assert "sec.gov" not in provider.searched_domains

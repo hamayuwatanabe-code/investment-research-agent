@@ -16,10 +16,11 @@ Design constraints that are not negotiable:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -206,6 +207,30 @@ class LLMBudget:
         raises. Pass ``""`` to leave stage tracking off.
         """
         self.current_stage = stage
+
+    @contextlib.contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        """Scoped alternative to ``set_stage()`` (requirement A).
+
+        ``set_stage()`` mutates ``current_stage`` ambiently with no memory of
+        what it replaced -- a pipeline stage that forgets to reset it before
+        the next one runs leaves every later call misattributed (and,
+        because stage quotas are enforced per-stage, potentially blocked by a
+        DIFFERENT stage's exhausted quota). This restores the previous stage
+        on exit unconditionally, including when the ``with`` block raises, so
+        a stage boundary can never leak into whatever runs after it:
+
+            with budget.stage("escalation"):
+                ...
+            # current_stage is back to whatever it was before, even if the
+            # escalation block above raised.
+        """
+        previous = self.current_stage
+        self.set_stage(name)
+        try:
+            yield
+        finally:
+            self.set_stage(previous)
 
     def stage_cap_tokens(self, stage: str) -> int | None:
         """The token ceiling for ``stage``, or ``None`` if it has no quota."""

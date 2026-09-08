@@ -29,6 +29,7 @@ from ..schemas.enums import (
     ContentKind,
     DocumentAuthority,
     EvidenceClass,
+    FactCategory,
     FetchOutcome,
     Materiality,
     ResearchDomain,
@@ -63,7 +64,8 @@ def _evidence_for_authority(authority: DocumentAuthority) -> tuple[EvidenceClass
 
 log = logging.getLogger(__name__)
 
-#: Domains searched when escalating, in preference order.
+#: The full generic domain set -- used only as the fallback for a category
+#: this system has no more specific routing for (requirement C).
 PRIMARY_DOMAINS: tuple[str, ...] = (
     "sec.gov",
     "fda.gov",
@@ -71,6 +73,60 @@ PRIMARY_DOMAINS: tuple[str, ...] = (
     "ema.europa.eu",
     "nih.gov",
 )
+
+#: Question/claim category -> the primary-source domains actually relevant to
+#: it, in preference order (requirement C). Escalating every question against
+#: every domain regardless of topic is expensive AND wrong: a live run
+#: escalated a fully-diluted-share-count question to fda.gov, which cannot
+#: possibly answer it and only spends budget that a regulatory or scientific
+#: question needed. A category absent from this table falls back to
+#: ``PRIMARY_DOMAINS`` (the full generic set) rather than searching nothing.
+_DOMAIN_ROUTING: dict[FactCategory, tuple[str, ...]] = {
+    # REGULATORY / endpoint / FDA interaction.
+    FactCategory.REGULATORY: ("sec.gov", "fda.gov", "clinicaltrials.gov"),
+    FactCategory.CLINICAL: ("clinicaltrials.gov", "fda.gov", "nih.gov"),
+    # CAPITAL_STRUCTURE / dilution / warrants / shares / financing -- sec.gov
+    # only. fda.gov and clinicaltrials.gov can never answer a share-count or
+    # financing question, and must never be queried for one.
+    FactCategory.CAPITAL_STRUCTURE: ("sec.gov",),
+    FactCategory.LIQUIDITY: ("sec.gov",),
+    FactCategory.FINANCIAL: ("sec.gov",),
+    # SCIENCE / trial design -- registries and government scientific sources.
+    FactCategory.SCIENCE: ("clinicaltrials.gov", "pubmed.ncbi.nlm.nih.gov", "nih.gov"),
+    FactCategory.TECHNOLOGY: ("clinicaltrials.gov", "pubmed.ncbi.nlm.nih.gov", "nih.gov"),
+    # COMPETITION -- regulator labels, trial registries, statutory filings,
+    # peer-reviewed sources.
+    FactCategory.COMPETITION: (
+        "clinicaltrials.gov",
+        "fda.gov",
+        "sec.gov",
+        "pubmed.ncbi.nlm.nih.gov",
+    ),
+    FactCategory.COMMERCIAL: ("sec.gov", "fda.gov", "clinicaltrials.gov"),
+    # CATALYST -- statutory filings, company IR, regulator calendars/registries.
+    FactCategory.CATALYST: ("sec.gov", "fda.gov", "clinicaltrials.gov"),
+    # GOVERNANCE / accounting -- sec.gov, exchange/regulator sources.
+    FactCategory.GOVERNANCE: ("sec.gov",),
+    FactCategory.ACCOUNTING: ("sec.gov",),
+    FactCategory.INSIDER: ("sec.gov",),
+    FactCategory.LISTING: ("sec.gov",),
+    FactCategory.CONTRACTS: ("sec.gov",),
+    FactCategory.LEGAL: ("sec.gov",),
+    FactCategory.MARKET_SIZE: ("sec.gov",),
+    FactCategory.MICROSTRUCTURE: ("sec.gov",),
+    FactCategory.MANAGEMENT: ("sec.gov",),
+}
+
+
+def domains_for_category(category: FactCategory) -> tuple[str, ...]:
+    """The primary-source domains relevant to ``category`` (requirement C).
+
+    Never searches an obviously irrelevant domain for a category with a more
+    specific routing (e.g. fda.gov for a capital-structure question); a
+    category with no specific routing falls back to the full generic set
+    rather than being left unsearched.
+    """
+    return _DOMAIN_ROUTING.get(category, PRIMARY_DOMAINS)
 
 #: A claim is material enough to require escalation if it says one of these
 #: things. Deliberately narrow: escalating everything would be noise.
@@ -109,6 +165,37 @@ class EscalationAttempt:
 
 
 @dataclass
+class FetchAttempt:
+    """One fetch, fully auditable (requirement E).
+
+    ``fetches_attempted: 12, fetches_failed: 9`` on its own does not say
+    WHICH twelve URLs, for WHICH question, or WHY nine of them failed. One of
+    these is recorded for every fetch this module issues, whether it came
+    from an already-collected source, a tie-breaking discovery search, or an
+    exhibit followed from a filing already fetched in the same attempt.
+    """
+
+    #: The fact_id being escalated, or the unresolved question's own text
+    #: (truncated) when there is no fact_id -- this module escalates both.
+    subject_id: str
+    url: str
+    #: DocumentAuthority of the candidate BEFORE fetching (from the known
+    #: Source, when known) -- "UNKNOWN" when nothing was known about it yet.
+    authority: str
+    #: 1-based position of this URL among the ranked candidates it was drawn
+    #: from; -1 when it came from a tie-breaking discovery search instead of
+    #: the already-ranked candidate list; -2 when it was an exhibit followed
+    #: from another fetch in the same attempt (filing -> exhibit chain).
+    candidate_rank: int
+    outcome: str  # "answered" | "confirmed" | "no_answer" | "fetch_failed"
+    failure_reason: str = ""
+    tokens_used: int = 0
+    body_obtained: bool = False
+    body_answered: bool = False
+    supporting_sentence: str = ""
+
+
+@dataclass
 class EscalationReport:
     attempts: list[EscalationAttempt] = field(default_factory=list)
     #: Diagnostics (requirement G): how many candidate URLs were actually
@@ -116,6 +203,9 @@ class EscalationReport:
     #: raised, or budget-cut) versus produced a body.
     fetches_attempted: int = 0
     fetches_failed: int = 0
+    #: Per-fetch audit trail (requirement E) -- the appendix-ready detail
+    #: behind the two counters above.
+    fetch_log: list[FetchAttempt] = field(default_factory=list)
 
     @property
     def confirmed(self) -> list[EscalationAttempt]:
@@ -223,38 +313,125 @@ def _extract_answering_sentence(document: Document, question: UnresolvedQuestion
     return None
 
 
-def _rank_candidates_for_question(
+#: How much stronger a top score must be than the runner-up to count as
+#: unambiguous (requirement D). Below this margin, a tie-breaking discovery
+#: search is issued before any fetch is spent guessing among near-equal
+#: candidates.
+_UNAMBIGUOUS_SCORE_MARGIN = 2.0
+
+#: Recognized statutory filing types, checked against a source's own title --
+#: structured metadata the collector already recorded, never a guess.
+_FILING_TYPE_HINTS: tuple[str, ...] = ("8-K", "10-K", "10-Q", "S-1", "S-3", "424B", "DEF 14A", "6-K")
+
+_EXHIBIT_REFERENCE_RE = re.compile(r"(?i)\bexhibit\s+\d+\.\d+\b")
+
+
+def _recency_sort_key(source: Source) -> str:
+    date = source.filing_date if source.filing_date != UNKNOWN else source.event_date
+    return date if date != UNKNOWN else "0000-00-00"
+
+
+def _score_candidates(
     question: UnresolvedQuestion, sources: Sequence[Source], facts: Sequence[Fact]
-) -> list[Source]:
-    """Order already-collected primary sources by relevance to ``question``.
+) -> list[tuple[Source, float]]:
+    """Score already-collected primary sources by relevance to ``question``,
+    using STRUCTURED metadata first (requirement D) -- never lexical title
+    overlap alone. A live run had dozens of collected SEC filings for one
+    material question; "8-K CURRENT REPORT" title overlap could not tell them
+    apart, and three fetches were spent essentially at random.
 
-    Two signals, either sufficient to rank a source ahead of an unranked one:
+    Signals, strongest first, all drawn from fields the collector already
+    populated (never inferred or guessed):
+
     1. The source backs at least one collected fact in the SAME category as
-       the question (e.g. a REGULATORY question and a REGULATORY fact whose
-       ``source_url`` matches) -- the strongest available signal, since it
-       means the collector filed this source under the same topic.
-    2. The source's own title shares distinctive vocabulary with the
-       question -- catches a source not yet backing any fact (or backing one
-       in a different category) whose listing itself names the topic (e.g.
-       "Form 8-K, Regulatory Update").
+       the question -- the collector already filed this source under the
+       same topic.
+    2. The source's host is one of the domains this question's category is
+       actually routed to (requirement C) -- a source outside the routed
+       domain set is far less likely to be the right one.
+    3. A known accession number -- marks a genuinely identified statutory
+       filing, not a placeholder pointer.
+    4. A known filing/event date at all.
+    5. Lexical title overlap with the question -- the weakest signal, used
+       only to break remaining ties, never as the primary ranking basis.
 
-    Ties keep their original relative order (a stable sort), so this never
-    reorders otherwise-equal candidates arbitrarily.
+    Ties within a score band keep their original relative order (a stable
+    sort), then break by recency (a more recent filing is more likely to
+    speak to a currently-unresolved question than an older one).
     """
     same_category_urls = {
         f.source_url for f in facts if f.category == question.category and f.source_url
     }
     question_terms = _distinctive_terms(f"{question.question} {question.why_it_matters}")
+    routed_domains = set(domains_for_category(question.category))
 
-    def _score(source: Source) -> int:
-        score = 0
+    def _score(source: Source) -> float:
+        score = 0.0
         if source.url in same_category_urls:
-            score += 2
+            score += 4.0
+        try:
+            host = (urlparse(source.url).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if any(host == domain or host.endswith("." + domain) for domain in routed_domains):
+            score += 2.0
+        if source.accession and source.accession != UNKNOWN:
+            score += 1.0
+        if source.filing_date != UNKNOWN or source.event_date != UNKNOWN:
+            score += 0.5
         if question_terms and _distinctive_terms(source.title) & question_terms:
-            score += 1
+            score += 0.25
         return score
 
-    return sorted(sources, key=_score, reverse=True)
+    scored = [(source, _score(source)) for source in sources]
+    scored.sort(key=lambda pair: (pair[1], _recency_sort_key(pair[0])), reverse=True)
+    return scored
+
+
+def _rank_candidates_for_question(
+    question: UnresolvedQuestion, sources: Sequence[Source], facts: Sequence[Fact]
+) -> list[Source]:
+    """Order already-collected primary sources by relevance to ``question``
+    (requirement D). See ``_score_candidates`` for the ranking signals."""
+    return [source for source, _score in _score_candidates(question, sources, facts)]
+
+
+def _ranking_is_ambiguous(scored: Sequence[tuple[Source, float]]) -> bool:
+    """Whether the top-ranked candidate(s) do not clearly stand out.
+
+    Requirement D: "if the candidate set is still broad/ambiguous, issue ONE
+    narrowly-scoped discovery search to identify the most likely primary
+    source before spending multiple fetches." Ambiguous means: there is no
+    candidate at all (nothing to rank), the best score is itself
+    uninformative (0 -- no structural signal matched anything), or the top
+    two candidates are within ``_UNAMBIGUOUS_SCORE_MARGIN`` of each other so
+    picking one over the other would be a guess rather than a ranking.
+    """
+    if not scored:
+        return True
+    top_score = scored[0][1]
+    if top_score <= 0:
+        return True
+    if len(scored) > 1:
+        runner_up = scored[1][1]
+        if (top_score - runner_up) < _UNAMBIGUOUS_SCORE_MARGIN:
+            return True
+    return False
+
+
+def _same_filing_exhibits(document: Document, candidates: Sequence[Source]) -> list[Source]:
+    """Already-collected sources that are exhibits/attachments of the SAME
+    statutory filing as ``document`` (requirement D: filing -> exhibit
+    traceability), matched by accession number -- structured metadata, never
+    a URL guess.
+    """
+    if document.accession == UNKNOWN or not document.accession:
+        return []
+    return [
+        source
+        for source in candidates
+        if source.accession == document.accession and source.url != document.url
+    ]
 
 
 def _plausible_primary_candidate(document: Document, domain: str) -> bool:
@@ -324,7 +501,9 @@ def escalate(
         attempt.searched = True
         confirming: Document | None = None
         budget_cut_short = False
-        for domain in PRIMARY_DOMAINS[:max_queries_per_fact]:
+        # Requirement C: routed by this fact's own category, not a fixed
+        # "search everything" domain list.
+        for domain in domains_for_category(fact.category)[:max_queries_per_fact]:
             query = ResearchQuery(
                 query=f"{company} {_key_terms(fact.claim)}",
                 domain=ResearchDomain.REGULATORY,
@@ -366,8 +545,31 @@ def escalate(
                     # Fetch failure (including a BudgetExceeded abort caught by
                     # the provider) leaves the claim unverified, never silently
                     # confirmed and never treated as a contradiction.
+                    report.fetch_log.append(
+                        FetchAttempt(
+                            subject_id=fact.fact_id,
+                            url=url,
+                            authority=str(candidate.tier),
+                            candidate_rank=-1,
+                            outcome="fetch_failed",
+                            failure_reason="fetch returned no document (network/parse/budget)",
+                        )
+                    )
                     continue
-                if _confirms(fetched, fact):
+                confirms_it = _confirms(fetched, fact)
+                report.fetch_log.append(
+                    FetchAttempt(
+                        subject_id=fact.fact_id,
+                        url=url,
+                        authority=str(fetched.authority),
+                        candidate_rank=-1,
+                        outcome="confirmed" if confirms_it else "no_answer",
+                        tokens_used=0,
+                        body_obtained=True,
+                        body_answered=confirms_it,
+                    )
+                )
+                if confirms_it:
                     confirming = fetched
                     break
             if confirming:
@@ -465,6 +667,11 @@ def escalate_unresolved_questions(
     usable, reason = provider.available()
     material = [q for q in questions if q.blocking][:max_questions]
     primary_sources = [s for s in sources if s.tier.is_primary]
+    #: Requirement D: fetch only the top 1-2 plausible bodies initially,
+    #: never three simply because three Tier-1 sources exist. Expansion (up
+    #: to ``max_candidates_per_question``) only happens if those fail to
+    #: answer the question and budget remains.
+    initial_fetch_cap = min(2, max_candidates_per_question)
 
     for question in material:
         attempt = EscalationAttempt(
@@ -477,75 +684,115 @@ def escalate_unresolved_questions(
             report.attempts.append(attempt)
             continue
 
-        answer: str | None = None
-        answering_document: Document | None = None
+        subject_id = question.question[:120]
+        already_tried_urls: set[str] = set()
 
-        # 1. Already-collected Tier 1/2 sources first (requirement C: don't
-        #    force a redundant search when a plausible primary source, e.g. a
-        #    filing the SEC collector already found, is already in hand).
-        #    Ranked by topical relevance to THIS question -- a source behind a
-        #    fact in the same category, or whose own title overlaps the
-        #    question's vocabulary, is tried before an unrelated one, so the
-        #    per-question fetch cap is spent on the most plausible candidate
-        #    first rather than whatever happened to be collected first.
-        ranked_candidates = _rank_candidates_for_question(question, primary_sources, facts)
-        for source in ranked_candidates[:max_candidates_per_question]:
-            report.fetches_attempted += 1
-            try:
-                fetched = provider.fetch(
-                    source.url,
-                    reason=f"resolve unresolved question: {question.question[:120]}",
-                    known=source,
+        def _try_candidates(
+            candidates: list[tuple[Source | Document, int]],
+            *,
+            question: UnresolvedQuestion = question,
+            subject_id: str = subject_id,
+            already_tried_urls: set[str] = already_tried_urls,
+            provider: ResearchProvider = provider,
+            primary_sources: list[Source] = primary_sources,
+            report: EscalationReport = report,
+        ) -> tuple[str | None, Document | None]:
+            for candidate, rank in candidates:
+                if candidate.url in already_tried_urls:
+                    continue
+                already_tried_urls.add(candidate.url)
+                found_answer, fetched = _attempt_fetch_for_question(
+                    provider, candidate, rank, question, subject_id, report
                 )
-            except Exception as exc:  # noqa: BLE001 - a fetch failure never resolves
-                log.warning("escalation (question) fetch failed for %s: %s", source.url, exc)
-                fetched = None
-            if fetched is None:
-                report.fetches_failed += 1
-                continue
-            sentence = _extract_answering_sentence(fetched, question)
-            if sentence is not None:
-                answer, answering_document = sentence, fetched
-                break
+                if found_answer is not None:
+                    return found_answer, fetched
+                # Requirement D: statutory-filing exhibit following, within
+                # THIS SAME attempt -- a filing that references an exhibit
+                # relevant to the question is followed before spending a
+                # fresh search, preserving filing -> exhibit traceability.
+                if fetched is not None and _EXHIBIT_REFERENCE_RE.search(fetched.text or ""):
+                    for exhibit_source in _same_filing_exhibits(fetched, primary_sources):
+                        if exhibit_source.url in already_tried_urls:
+                            continue
+                        already_tried_urls.add(exhibit_source.url)
+                        exhibit_answer, exhibit_fetched = _attempt_fetch_for_question(
+                            provider, exhibit_source, -2, question, subject_id, report
+                        )
+                        if exhibit_answer is not None:
+                            return exhibit_answer, exhibit_fetched
+            return None, None
 
-        # 2. Only search when nothing already collected answered it.
+        # 1. Rank already-collected primary sources by STRUCTURED metadata
+        #    (requirement D): category linkage, domain routing, accession,
+        #    date -- never lexical title overlap alone.
+        scored = _score_candidates(question, primary_sources, facts)
+        ranked_candidates: list[Source] = [source for source, _ in scored]
+
+        # 1b. If the ranking is still ambiguous, issue ONE narrowly-scoped
+        #     discovery search (this question's single best-routed domain)
+        #     to identify the most likely primary source BEFORE spending
+        #     multiple fetches guessing among near-equal candidates.
+        discovered_first: list[Document] = []
+        routed = domains_for_category(question.category)
+        if _ranking_is_ambiguous(scored) and routed:
+            domain = routed[0]
+            query = ResearchQuery(
+                query=f"{company} {_key_terms(question.question)}",
+                domain=ResearchDomain.REGULATORY,
+                stance="verify",
+                allowed_domains=(domain,),
+                rationale=f"identify the most likely primary source for: {subject_id}",
+            )
+            attempt.queries.append(f"{query.query} site:{domain} [tie-break]")
+            result = provider.search(query, agent_id="escalation_question")
+            if result.executed:
+                discovered_first = [
+                    document
+                    for document in result.documents
+                    if _plausible_primary_candidate(document, domain)
+                ][:initial_fetch_cap]
+
+        # 2. Fetch only the top plausible bodies initially: the tie-breaking
+        #    discovery result (if any) first, then the structurally ranked
+        #    already-collected candidates.
+        fetch_plan: list[tuple[Source | Document, int]] = [
+            (document, -1) for document in discovered_first
+        ] + [(source, rank) for rank, source in enumerate(ranked_candidates, start=1)]
+        initial_batch = fetch_plan[:initial_fetch_cap]
+        expansion_batch = fetch_plan[initial_fetch_cap:max_candidates_per_question]
+
+        answer, answering_document = _try_candidates(initial_batch)
+
+        # 3. Expand only if the initial batch failed to answer it and budget
+        #    (more ranked candidates) remains.
+        if answer is None and expansion_batch:
+            answer, answering_document = _try_candidates(expansion_batch)
+
+        # 4. Only issue a broader search when nothing already collected or
+        #    discovered answered it -- routed by the QUESTION's own category
+        #    (requirement C), never a fixed "search everything" domain list.
         if answer is None:
             attempt.searched = True
-            for domain in PRIMARY_DOMAINS[:2]:
+            for domain in domains_for_category(question.category)[:2]:
                 query = ResearchQuery(
                     query=f"{company} {_key_terms(question.question)}",
                     domain=ResearchDomain.REGULATORY,
                     stance="verify",
                     allowed_domains=(domain,),
-                    rationale=f"resolve unresolved question: {question.question[:120]}",
+                    rationale=f"resolve unresolved question: {subject_id}",
                 )
                 attempt.queries.append(f"{query.query} site:{domain}")
                 result = provider.search(query, agent_id="escalation_question")
                 if not result.executed:
                     continue
                 candidates = [
-                    document for document in result.documents
+                    document
+                    for document in result.documents
                     if _plausible_primary_candidate(document, domain)
                 ]
-                for candidate in candidates[:max_candidates_per_question]:
-                    url = candidate.url
-                    report.fetches_attempted += 1
-                    try:
-                        fetched = provider.fetch(
-                            url,
-                            reason=f"resolve unresolved question: {question.question[:120]}",
-                            known=candidate,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("escalation (question) fetch failed for %s: %s", url, exc)
-                        fetched = None
-                    if fetched is None:
-                        report.fetches_failed += 1
-                        continue
-                    sentence = _extract_answering_sentence(fetched, question)
-                    if sentence is not None:
-                        answer, answering_document = sentence, fetched
-                        break
+                answer, answering_document = _try_candidates(
+                    [(c, -1) for c in candidates[:max_candidates_per_question]]
+                )
                 if answer is not None:
                     break
 
@@ -566,6 +813,65 @@ def escalate_unresolved_questions(
         report.attempts.append(attempt)
 
     return new_facts, report
+
+
+def _attempt_fetch_for_question(
+    provider: ResearchProvider,
+    candidate: Source | Document,
+    rank: int,
+    question: UnresolvedQuestion,
+    subject_id: str,
+    report: EscalationReport,
+) -> tuple[str | None, Document | None]:
+    """Fetch one candidate for an unresolved question.
+
+    Always records a :class:`FetchAttempt` (requirement E), whatever the
+    outcome. Returns ``(answer, document)`` when the fetched body answers
+    the question; ``(None, document)`` when it fetched cleanly but did not
+    answer it (the caller uses ``document`` to check for an exhibit
+    reference); ``(None, None)`` when the fetch itself failed.
+    """
+    report.fetches_attempted += 1
+    try:
+        fetched = provider.fetch(
+            candidate.url,
+            reason=f"resolve unresolved question: {subject_id}",
+            known=candidate,
+        )
+    except Exception as exc:  # noqa: BLE001 - a fetch failure never resolves
+        log.warning("escalation (question) fetch failed for %s: %s", candidate.url, exc)
+        fetched = None
+    if fetched is None:
+        report.fetches_failed += 1
+        report.fetch_log.append(
+            FetchAttempt(
+                subject_id=subject_id,
+                url=candidate.url,
+                authority=str(DocumentAuthority.UNKNOWN),
+                candidate_rank=rank,
+                outcome="fetch_failed",
+                failure_reason="fetch returned no document (network/parse/budget)",
+            )
+        )
+        return None, None
+
+    sentence = _extract_answering_sentence(fetched, question)
+    answered = sentence is not None
+    report.fetch_log.append(
+        FetchAttempt(
+            subject_id=subject_id,
+            url=candidate.url,
+            authority=str(fetched.authority),
+            candidate_rank=rank,
+            outcome="answered" if answered else "no_answer",
+            body_obtained=True,
+            body_answered=answered,
+            supporting_sentence=sentence or "",
+        )
+    )
+    if answered:
+        return sentence, fetched
+    return None, fetched
 
 
 def _fact_from_answered_question(

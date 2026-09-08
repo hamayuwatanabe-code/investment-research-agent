@@ -143,6 +143,7 @@ class Pipeline:
         adversarial: AdversarialOutcome | None = None,
         chunks: Sequence[Chunk] = (),
         capture_info: dict[str, Any] | None = None,
+        agent_effort_policy: dict[str, str] | None = None,
     ) -> None:
         self.repo = repository
         self.search = search
@@ -154,6 +155,28 @@ class Pipeline:
         self.adversarial = adversarial
         self.chunks = list(chunks)
         self.capture_info = capture_info or {}
+        # Requirement G: configurable per-agent effort policy (never
+        # hard-coded into agent logic). None means "use
+        # llm.effort_policy.DEFAULT_AGENT_EFFORT_POLICY" -- resolve_effort()
+        # itself falls back to that default when this is None.
+        self.agent_effort_policy = agent_effort_policy
+
+    def _stage(self, name: str) -> Any:
+        """Scoped LLM-budget stage context (requirement A).
+
+        A no-op context manager when no LLM is configured, so every call
+        site can wrap its stage-owned work unconditionally rather than
+        branching on ``self.llm is None``. When an LLM IS configured, this
+        delegates to ``LLMBudget.stage()``, which restores whatever stage
+        was active before the ``with`` block on exit -- including when the
+        block raises -- so one stage's work can never leak into the next
+        stage that runs after it, the way ambient ``set_stage()`` calls used
+        to (Stage 3b's "escalation" call was never reset before Contradiction/
+        Kill/Bear/Bull, so all four ran misattributed to "escalation").
+        """
+        if self.llm is None:
+            return contextlib.nullcontext()
+        return self.llm.budget.stage(name)
 
     def _agent_for(self, stage: str, deterministic: Agent, llm_cls: Any, guard_bus) -> Agent:
         """Return the LLM agent when one is usable, else the deterministic one.
@@ -195,12 +218,21 @@ class Pipeline:
         discovery_summary = "" if not policy.sees_identity else self._discovery_summary_for(
             deterministic.agent_id
         )
+        # Requirement G: per-agent effort, resolved from the configurable
+        # policy (never hard-coded into the agent class itself) against this
+        # run's --llm-effort ceiling.
+        from ..llm.effort_policy import resolve_effort
+
+        effort = resolve_effort(
+            deterministic.agent_id, ceiling=self.llm.effort, policy=self.agent_effort_policy
+        )
         return llm_cls(
             self.llm,
             fallback=deterministic,
             guard=PromptGuard(denied_fingerprints=denied, forbidden_identity=forbidden),
             chunks=chunks,
             discovery_summary=discovery_summary,
+            effort=effort,
         )
 
     def _discovery_summary_for(self, agent_id: str) -> str:
@@ -522,40 +554,39 @@ class Pipeline:
         # ---- Stage 2b: primary-source escalation (requirement P4) --------
         # Stage-aware budgeting (requirement: discovery must not starve later
         # stages): escalation gets its own quota, independent of whatever
-        # adversarial discovery already spent.
-        if self.llm is not None:
-            self.llm.budget.set_stage("escalation")
-        usable_research, research_reason = self.research.available()
-        if usable_research:
-            verified_facts, escalation = escalate(
-                verified_facts, self.research, company=company_name
-            )
-            bus.facts = verified_facts
-            result.escalation = escalation
-            self.repo.save_escalations(ctx.run_id, escalation.attempts)
-            for fact in verified_facts:
-                # Escalation rewrites verified_status and confidence, so the
-                # updated versions are persisted. Failures here were already
-                # reported when the fact was first written.
-                with contextlib.suppress(Exception):
-                    self.repo.save_fact(fact)
-            if escalation.unconfirmed:
-                result.failures.append(
-                    f"escalation: {len(escalation.unconfirmed)} material claim(s) could not be "
-                    "confirmed in a primary source"
+        # adversarial discovery already spent. Scoped so this stage can never
+        # leak into whatever runs after it (requirement A).
+        with self._stage("escalation"):
+            usable_research, research_reason = self.research.available()
+            if usable_research:
+                verified_facts, escalation = escalate(
+                    verified_facts, self.research, company=company_name
                 )
-        else:
-            result.failures.append(f"escalation skipped: {research_reason}")
-        checkpoint(
-            "escalate", {"attempts": len(result.escalation.attempts) if result.escalation else 0}
-        )
+                bus.facts = verified_facts
+                result.escalation = escalation
+                self.repo.save_escalations(ctx.run_id, escalation.attempts)
+                for fact in verified_facts:
+                    # Escalation rewrites verified_status and confidence, so the
+                    # updated versions are persisted. Failures here were already
+                    # reported when the fact was first written.
+                    with contextlib.suppress(Exception):
+                        self.repo.save_fact(fact)
+                if escalation.unconfirmed:
+                    result.failures.append(
+                        f"escalation: {len(escalation.unconfirmed)} material claim(s) could not "
+                        "be confirmed in a primary source"
+                    )
+            else:
+                result.failures.append(f"escalation skipped: {research_reason}")
+            checkpoint(
+                "escalate",
+                {"attempts": len(result.escalation.attempts) if result.escalation else 0},
+            )
 
         # ---- Stage 3: domain agents (facts only) ------------------------
         # Stage-aware budgeting: everything from here through bear/bull
         # (Stage 6) shares the "interpretive" quota, independent of discovery
         # and escalation's spend.
-        if self.llm is not None:
-            self.llm.budget.set_stage("interpretive")
         from ..agents.llm_agents import (
             LLMCompetitiveAgent,
             LLMContradictionAgent,
@@ -569,21 +600,22 @@ class Pipeline:
             LLMKillAgent,
         )
 
-        for deterministic, llm_cls in (
-            (RegulatoryAgent(), LLMRegulatoryAgent),
-            (CapitalStructureAgent(), None),  # arithmetic stays deterministic
-            (ScienceAgent(), LLMScienceAgent),
-            (CompetitiveAgent(), LLMCompetitiveAgent),
-            (CatalystAgent(today=self.today), None),  # date normalisation is rule-based
-            (MicrostructureAgent(), None),  # positioning data is not interpretive
-        ):
-            agent = self._agent_for(deterministic.agent_id, deterministic, llm_cls, bus)
-            output = self._run_agent(
-                agent, guard, result, params=params, user_preferences=user_preferences
-            )
-            if output.metrics.get("llm_backed"):
-                result.llm_agents_used.append(deterministic.agent_id)
-        checkpoint("domain")
+        with self._stage("interpretive"):
+            for deterministic, llm_cls in (
+                (RegulatoryAgent(), LLMRegulatoryAgent),
+                (CapitalStructureAgent(), None),  # arithmetic stays deterministic
+                (ScienceAgent(), LLMScienceAgent),
+                (CompetitiveAgent(), LLMCompetitiveAgent),
+                (CatalystAgent(today=self.today), None),  # date normalisation is rule-based
+                (MicrostructureAgent(), None),  # positioning data is not interpretive
+            ):
+                agent = self._agent_for(deterministic.agent_id, deterministic, llm_cls, bus)
+                output = self._run_agent(
+                    agent, guard, result, params=params, user_preferences=user_preferences
+                )
+                if output.metrics.get("llm_backed"):
+                    result.llm_agents_used.append(deterministic.agent_id)
+            checkpoint("domain")
 
         # ---- Stage 3b: unresolved-question-driven escalation (requirement C) --
         # The Stage 2b escalation pass above only ever looks at Fact objects.
@@ -591,44 +623,49 @@ class Pipeline:
         # acceptable to the regulator?") is only raised by a domain agent
         # HERE, in Stage 3 -- so it could never have been escalated earlier.
         # Same "escalation" budget stage/quota as Stage 2b; this reuses
-        # whatever of it remains, it does not get a second allowance.
-        if self.llm is not None:
-            self.llm.budget.set_stage("escalation")
-        usable_research_now, _ = self.research.available()
-        new_facts: list = []
-        if usable_research_now and bus.unresolved:
-            new_facts, question_escalation = escalate_unresolved_questions(
-                bus.unresolved, bus.sources, self.research, company=company_name,
-                ticker=ctx.ticker, run_id=ctx.run_id, facts=verified_facts,
-            )
-            if new_facts:
-                verified_facts = [*verified_facts, *new_facts]
-                bus.add_facts(new_facts)
-                for fact in new_facts:
-                    with contextlib.suppress(Exception):
-                        self.repo.save_fact(fact)
-            if result.escalation is not None:
-                result.escalation.attempts.extend(question_escalation.attempts)
-                result.escalation.fetches_attempted += question_escalation.fetches_attempted
-                result.escalation.fetches_failed += question_escalation.fetches_failed
-            else:
-                result.escalation = question_escalation
-            if question_escalation.attempts:
-                self.repo.save_escalations(ctx.run_id, question_escalation.attempts)
-        checkpoint("escalate_unresolved", {"new_facts": len(new_facts)})
+        # whatever of it remains, it does not get a second allowance. Scoped
+        # (requirement A) so it restores "interpretive" on exit -- including
+        # on an exception -- rather than leaking into Contradiction/Kill/
+        # Bear/Bull the way the old ambient set_stage() call did.
+        with self._stage("escalation"):
+            usable_research_now, _ = self.research.available()
+            new_facts: list = []
+            if usable_research_now and bus.unresolved:
+                new_facts, question_escalation = escalate_unresolved_questions(
+                    bus.unresolved, bus.sources, self.research, company=company_name,
+                    ticker=ctx.ticker, run_id=ctx.run_id, facts=verified_facts,
+                )
+                if new_facts:
+                    verified_facts = [*verified_facts, *new_facts]
+                    bus.add_facts(new_facts)
+                    for fact in new_facts:
+                        with contextlib.suppress(Exception):
+                            self.repo.save_fact(fact)
+                if result.escalation is not None:
+                    result.escalation.attempts.extend(question_escalation.attempts)
+                    result.escalation.fetches_attempted += question_escalation.fetches_attempted
+                    result.escalation.fetches_failed += question_escalation.fetches_failed
+                else:
+                    result.escalation = question_escalation
+                if question_escalation.attempts:
+                    self.repo.save_escalations(ctx.run_id, question_escalation.attempts)
+            checkpoint("escalate_unresolved", {"new_facts": len(new_facts)})
 
         # ---- Stage 4: contradictions ------------------------------------
-        contradiction_output = self._run_agent(
-            self._agent_for("contradiction", ContradictionAgent(), LLMContradictionAgent, bus),
-            guard,
-            result,
-            params=params,
-            user_preferences=user_preferences,
-        )
-        if contradiction_output.metrics.get("llm_backed"):
-            result.llm_agents_used.append("contradiction")
-        self.repo.save_contradictions(bus.contradictions)
-        checkpoint("contradiction")
+        with self._stage("interpretive"):
+            contradiction_output = self._run_agent(
+                self._agent_for(
+                    "contradiction", ContradictionAgent(), LLMContradictionAgent, bus
+                ),
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+            )
+            if contradiction_output.metrics.get("llm_backed"):
+                result.llm_agents_used.append("contradiction")
+            self.repo.save_contradictions(bus.contradictions)
+            checkpoint("contradiction")
 
         # ---- Stage 5: KILL BEFORE BULL (requirement 27) ------------------
         # The LLM kill agent proposes findings; the deterministic gate below
@@ -653,37 +690,45 @@ class Pipeline:
         # auditable, purpose-tagged store rather than a second, disconnected
         # one; exactly one of the two instances ever actually searches.
         kill_discovery = self.adversarial.discovery if self.adversarial is not None else DiscoveryLog()
-        llm_kill = self._agent_for(
-            "kill_agent",
-            KillAgent(
-                self.search,
-                executed_queries=executed_queries,
-                research=self.research,
-                discovery=kill_discovery,
-            ),
-            LLMKillAgent,
-            bus,
-        )
-        kill_output = self._run_agent(
-            llm_kill, guard, result, params=params, user_preferences=user_preferences
-        )
-        if kill_output.metrics.get("llm_backed"):
-            result.llm_agents_used.append("kill_agent")
-            deterministic_kill = self._run_agent(
+        # Requirement A: Kill's mandatory web searches get their own explicit
+        # "discovery" stage/quota rather than inheriting whatever stage ran
+        # immediately before Stage 5 (previously "escalation", leaked from
+        # Stage 3b). This covers both places the actual searches can happen:
+        # the LLMKillAgent's internal fallback to the deterministic KillAgent
+        # (when the LLM call itself fails) and the explicit deterministic_kill
+        # run below (when the LLM call succeeds).
+        with self._stage("discovery"):
+            llm_kill = self._agent_for(
+                "kill_agent",
                 KillAgent(
                     self.search,
                     executed_queries=executed_queries,
                     research=self.research,
                     discovery=kill_discovery,
                 ),
-                guard,
-                result,
-                params=params,
-                user_preferences=user_preferences,
+                LLMKillAgent,
+                bus,
             )
-            gate = _gate_from_output(deterministic_kill)
-        else:
-            gate = _gate_from_output(kill_output)
+            kill_output = self._run_agent(
+                llm_kill, guard, result, params=params, user_preferences=user_preferences
+            )
+            if kill_output.metrics.get("llm_backed"):
+                result.llm_agents_used.append("kill_agent")
+                deterministic_kill = self._run_agent(
+                    KillAgent(
+                        self.search,
+                        executed_queries=executed_queries,
+                        research=self.research,
+                        discovery=kill_discovery,
+                    ),
+                    guard,
+                    result,
+                    params=params,
+                    user_preferences=user_preferences,
+                )
+                gate = _gate_from_output(deterministic_kill)
+            else:
+                gate = _gate_from_output(kill_output)
         self.repo.save_kill_gate(ctx.run_id, ctx.ticker, gate)
         if kill_discovery.queries:
             self.repo.save_discovery_log(kill_discovery)
@@ -701,21 +746,22 @@ class Pipeline:
         # being asked is "is there a reason to discard this", and constructing
         # a case for it would only invite the reader to weigh one against the
         # other, which is exactly the trade this system refuses to make.
-        if mode != "catalyst":
-            bear = self._agent_for("bear_agent", BearAgent(), LLMBearAgent, bus)
-            bear_output = self._run_agent(
-                bear, guard, result, params=params, user_preferences=user_preferences
-            )
-            if bear_output.metrics.get("llm_backed"):
-                result.llm_agents_used.append("bear_agent")
-        if mode not in ("kill-test", "catalyst"):
-            bull = self._agent_for("bull_agent", BullAgent(), LLMBullAgent, bus)
-            bull_output = self._run_agent(
-                bull, guard, result, params=params, user_preferences=user_preferences
-            )
-            if bull_output.metrics.get("llm_backed"):
-                result.llm_agents_used.append("bull_agent")
-        checkpoint("bear_bull")
+        with self._stage("interpretive"):
+            if mode != "catalyst":
+                bear = self._agent_for("bear_agent", BearAgent(), LLMBearAgent, bus)
+                bear_output = self._run_agent(
+                    bear, guard, result, params=params, user_preferences=user_preferences
+                )
+                if bear_output.metrics.get("llm_backed"):
+                    result.llm_agents_used.append("bear_agent")
+            if mode not in ("kill-test", "catalyst"):
+                bull = self._agent_for("bull_agent", BullAgent(), LLMBullAgent, bus)
+                bull_output = self._run_agent(
+                    bull, guard, result, params=params, user_preferences=user_preferences
+                )
+                if bull_output.metrics.get("llm_backed"):
+                    result.llm_agents_used.append("bull_agent")
+            checkpoint("bear_bull")
 
         # ---- Stage 7: valuation ------------------------------------------
         self._run_agent(
@@ -868,6 +914,7 @@ class Pipeline:
             search_results=search_results,
             facts_by_domain=domain_fact_counts,
             agents_run=agents_run,
+            collection_results=collection_results,
         )
         result.completeness = completeness
         self.repo.save_research_coverage(ctx.run_id, ctx.ticker, completeness.coverage)
@@ -901,24 +948,23 @@ class Pipeline:
         self.repo.save_evidence_sufficiency(ctx.run_id, ctx.ticker, sufficiency)
 
         # ---- Stage 9: blind judgement ------------------------------------
-        if self.llm is not None:
-            self.llm.budget.set_stage("finalization")
-        judge_params = {
-            **params,
-            "evidence_confidence": breakdown.score,
-            "run_status": (
-                RunStatus.INCOMPLETE_RESEARCH.value
-                if (result.failures or ctx.status != RunStatus.COMPLETE)
-                else RunStatus.COMPLETE.value
-            ),
-        }
-        judge_output = self._run_agent(
-            self._agent_for("blind_judge", BlindJudgeAgent(), LLMBlindJudgeAgent, bus),
-            guard,
-            result,
-            params=judge_params,
-            user_preferences=user_preferences,
-        )
+        with self._stage("finalization"):
+            judge_params = {
+                **params,
+                "evidence_confidence": breakdown.score,
+                "run_status": (
+                    RunStatus.INCOMPLETE_RESEARCH.value
+                    if (result.failures or ctx.status != RunStatus.COMPLETE)
+                    else RunStatus.COMPLETE.value
+                ),
+            }
+            judge_output = self._run_agent(
+                self._agent_for("blind_judge", BlindJudgeAgent(), LLMBlindJudgeAgent, bus),
+                guard,
+                result,
+                params=judge_params,
+                user_preferences=user_preferences,
+            )
         if judge_output.metrics.get("llm_backed"):
             result.llm_agents_used.append("blind_judge")
         verdict = judge_output.metrics.get("_verdict_object")
