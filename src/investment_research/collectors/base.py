@@ -31,7 +31,23 @@ class CollectionResult:
 
     @property
     def degraded(self) -> bool:
-        return self.outcome != FetchOutcome.OK
+        """Whether this collection represents a failure worth flagging.
+
+        A collector that executed a valid query and got a definitive,
+        error-free zero-result answer (``NOT_FOUND`` with no ``errors``) is
+        not degraded -- "no Drugs@FDA applications listed for this sponsor"
+        is a correct, informative answer for an ordinary pre-approval
+        biotech, not a failure. Any outcome carrying an error (including
+        NOT_FOUND when the query itself could not be meaningfully attempted,
+        e.g. no company name to search with), or any non-OK outcome other
+        than a clean NOT_FOUND (BLOCKED, RATE_LIMITED, TIMEOUT, ERROR,
+        DISABLED), is degraded.
+        """
+        if self.errors:
+            return True
+        if self.outcome == FetchOutcome.OK:
+            return False
+        return self.outcome != FetchOutcome.NOT_FOUND
 
     def describe(self) -> str:
         return (

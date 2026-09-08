@@ -87,6 +87,11 @@ class EscalationAttempt:
 @dataclass
 class EscalationReport:
     attempts: list[EscalationAttempt] = field(default_factory=list)
+    #: Diagnostics (requirement G): how many candidate URLs were actually
+    #: fetched, and how many of those fetches came back empty (failed,
+    #: raised, or budget-cut) versus produced a body.
+    fetches_attempted: int = 0
+    fetches_failed: int = 0
 
     @property
     def confirmed(self) -> list[EscalationAttempt]:
@@ -229,7 +234,7 @@ def escalate(
                 rationale=f"primary-source confirmation of {why}",
             )
             attempt.queries.append(f"{query.query} site:{domain}")
-            result = provider.search(query)
+            result = provider.search(query, agent_id="escalation")
             if not result.executed:
                 # "We did not look" (budget cutoff, provider unavailable, ...),
                 # never conflated with "we looked and it isn't there".
@@ -246,12 +251,14 @@ def escalate(
                 if _plausible_primary_candidate(document, domain)
             ]
             for url in candidate_urls[:max_queries_per_fact]:
+                report.fetches_attempted += 1
                 try:
-                    fetched = provider.fetch(url, reason=f"confirm: {why}")
+                    fetched = provider.fetch(url, reason=f"confirm: {why}", agent_id="escalation")
                 except Exception as exc:  # noqa: BLE001 - a fetch failure never confirms
                     log.warning("escalation fetch failed for %s: %s", url, exc)
                     fetched = None
                 if fetched is None:
+                    report.fetches_failed += 1
                     # Fetch failure (including a BudgetExceeded abort caught by
                     # the provider) leaves the claim unverified, never silently
                     # confirmed and never treated as a contradiction.

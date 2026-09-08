@@ -319,6 +319,31 @@ def load_portfolio(path: Path | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _token_diagnostics(result: ResearchResult) -> dict:
+    """Where the tokens went (requirement G): by stage, by agent, and search/
+    fetch execution counts, so the next run's spend is visible up front."""
+    budget = result.llm_budget
+    adversarial = result.adversarial
+    escalation = result.escalation
+    return {
+        "remaining": budget.remaining if budget else None,
+        "by_stage": budget.stage_summary() if budget else {},
+        "by_agent": budget.by_agent() if budget else {},
+        "search": {
+            "executed": adversarial.executed if adversarial else 0,
+            "unexecuted": len(adversarial.unexecuted) if adversarial else 0,
+            "unexecuted_due_to_budget": (
+                len(adversarial.unexecuted_due_to_budget) if adversarial else 0
+            ),
+            "deduplicated": len(adversarial.deduplicated) if adversarial else 0,
+        },
+        "fetch": {
+            "attempted": escalation.fetches_attempted if escalation else 0,
+            "failed": escalation.fetches_failed if escalation else 0,
+        },
+    }
+
+
 def result_to_json(result: ResearchResult) -> dict:
     verdict = result.verdict
     card = result.scorecard
@@ -364,6 +389,11 @@ def result_to_json(result: ResearchResult) -> dict:
         ),
         "llm_agents_used": result.llm_agents_used,
         "llm_tokens": result.llm_budget.used_total if result.llm_budget else 0,
+        "token_diagnostics": _token_diagnostics(result),
+        "quarantined_sources": [
+            {"source_id": q.source_id, "url": q.url, "field": q.field, "value": q.value}
+            for q in result.quarantined_sources
+        ],
         "capture_info": result.capture_info,
         "max_kill_level": str(verdict.kill_gate.max_level) if verdict else None,
         "kill_gate": [a.to_row() for a in verdict.kill_gate.assessments] if verdict else [],

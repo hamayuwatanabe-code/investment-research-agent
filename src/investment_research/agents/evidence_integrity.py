@@ -30,7 +30,7 @@ from ..schemas.enums import (
     SourceTier,
     VerifiedStatus,
 )
-from ..schemas.fact import Fact, normalize_claim, parse_iso_date
+from ..schemas.fact import Fact, normalize_claim, parse_date_bounds
 from .base import Agent
 
 log = logging.getLogger(__name__)
@@ -216,15 +216,25 @@ class EvidenceIntegrityAgent(Agent):
         return EvidenceClass.INDEPENDENT_EVIDENCE
 
     def _staleness(self, fact: Fact) -> tuple[bool, str]:
-        """Staleness is judged on the event date, never the publication date."""
+        """Staleness is judged on the event date, never the publication date.
+
+        A partial-precision date ("2023-12", "2023") is judged conservatively
+        against the LATEST possible date in its known range: stale only when
+        even that most-favorable reading is already older than the cutoff.
+        Never marked fresh merely because the exact day is unknown -- if the
+        latest possible date in range is itself old, every date the true
+        value could actually be is at least that old too.
+        """
         for candidate in (fact.event_date, fact.effective_date, fact.filing_date):
-            parsed = parse_iso_date(candidate)
-            if parsed:
-                return (self.today - parsed) > timedelta(days=self.stale_after_days), candidate
-        parsed_pub = parse_iso_date(fact.publication_date)
-        if parsed_pub:
+            bounds = parse_date_bounds(candidate)
+            if bounds:
+                _, latest = bounds
+                return (self.today - latest) > timedelta(days=self.stale_after_days), candidate
+        bounds_pub = parse_date_bounds(fact.publication_date)
+        if bounds_pub:
             # Publication-only dating is itself a weakness; flag conservatively.
-            return (self.today - parsed_pub) > timedelta(
+            _, latest_pub = bounds_pub
+            return (self.today - latest_pub) > timedelta(
                 days=self.stale_after_days
             ), fact.publication_date
         return False, UNKNOWN

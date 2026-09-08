@@ -83,7 +83,7 @@ class _FakeEscalationProvider:
     def available(self) -> tuple[bool, str]:
         return True, "ready"
 
-    def search(self, query: ResearchQuery) -> ResearchResult:
+    def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult:
         self.search_calls.append(query)
         if self._search_disabled:
             return ResearchResult(
@@ -100,7 +100,7 @@ class _FakeEscalationProvider:
             query=query, documents=documents, outcome=outcome, path=ResearchPath.ANTHROPIC_WEB
         )
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
+    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
         self.fetch_calls.append(url)
         if url in self._fetch_raises_for:
             raise self._fetch_raises_for[url]

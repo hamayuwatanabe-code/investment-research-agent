@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from .enums import (
@@ -23,15 +24,42 @@ from .enums import (
     SourceTier,
     VerifiedStatus,
 )
-from .fact import Fact, Source, parse_iso_date
+from .fact import Fact, Source, parse_date_bounds
 
 
 class SchemaError(ValueError):
-    """Raised when a record violates its contract."""
+    """Raised when a record violates its contract.
+
+    Carries structured detail (``field``, ``value``) alongside the message so
+    a caller quarantining one bad record can report *which* field and value
+    failed without re-parsing the human-readable string (requirement 14:
+    a single malformed source must be identifiable, not just rejected).
+    """
+
+    def __init__(self, message: str, *, field: str = "", value: str = "") -> None:
+        super().__init__(message)
+        self.field = field
+        self.value = value
 
 
 class EvaluationLeak(ValueError):
     """Raised when an evaluation appears where only facts are permitted."""
+
+
+@dataclass
+class QuarantinedSource:
+    """One source that failed schema validation and was rejected, not persisted.
+
+    Requirement 14/24: a single malformed source must be visible and
+    identifiable -- never silently dropped, and never allowed to crash the
+    whole run.
+    """
+
+    source_id: str
+    url: str
+    field: str
+    value: str
+    error: str
 
 
 # --- evaluative-language detection -----------------------------------------
@@ -96,22 +124,42 @@ def validate_source_url(url: str) -> None:
     separation is explicit rather than disguised as a real URL.
     """
     if url in ("", UNKNOWN):
-        raise SchemaError("source url is empty; use NOT_FOUND semantics instead of a blank url")
+        raise SchemaError(
+            "source url is empty; use NOT_FOUND semantics instead of a blank url",
+            field="url",
+            value=url,
+        )
     if not _URL_RE.match(url):
-        raise SchemaError(f"malformed source url: {url!r}")
+        raise SchemaError(f"malformed source url: {url!r}", field="url", value=url)
 
 
 def validate_date_field(value: str, field_name: str) -> None:
+    """Accepts UNKNOWN, or a date at day, month ("YYYY-MM"), or year precision.
+
+    Requirement 1G: a legitimate partial-precision date (e.g. "2023-12") must
+    never be rejected as malformed -- only genuinely unparseable values are.
+    See ``parse_date_bounds`` for the precision rules; this never upgrades the
+    stored value to a fake day, it only checks that *some* supported
+    precision resolves.
+    """
     if value == UNKNOWN:
         return
-    if parse_iso_date(value) is None:
-        raise SchemaError(f"{field_name} is neither UNKNOWN nor a parseable date: {value!r}")
+    if parse_date_bounds(value) is None:
+        raise SchemaError(
+            f"{field_name} is neither UNKNOWN nor a parseable date: {value!r}",
+            field=field_name,
+            value=str(value),
+        )
 
 
 def validate_source(source: Source) -> None:
     validate_source_url(source.url)
     if not isinstance(source.tier, SourceTier):
-        raise SchemaError(f"source.tier must be a SourceTier, got {type(source.tier)!r}")
+        raise SchemaError(
+            f"source.tier must be a SourceTier, got {type(source.tier)!r}",
+            field="tier",
+            value=repr(source.tier),
+        )
     for name in ("published_date", "event_date", "effective_date", "filing_date"):
         validate_date_field(getattr(source, name), f"source.{name}")
 

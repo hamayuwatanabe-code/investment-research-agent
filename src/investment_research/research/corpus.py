@@ -115,7 +115,7 @@ class CorpusResearchProvider:
             return False, f"no captured corpus for {self.ticker}"
         return True, "corpus available"
 
-    def search(self, query: ResearchQuery) -> ResearchResult:
+    def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult:
         """Keyword-match the query against the captured documents.
 
         A corpus search is genuinely a search -- it can return nothing -- but it
@@ -147,7 +147,7 @@ class CorpusResearchProvider:
             path=self.path,
         )
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
+    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
         for document in self.documents():
             if document.url == url:
                 return document

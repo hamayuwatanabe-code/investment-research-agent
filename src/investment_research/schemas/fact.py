@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import re
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,57 @@ def parse_iso_date(value: str | None) -> date | None:
             return datetime.strptime(text, fmt).date()
         except ValueError:
             continue
+    return None
+
+
+_MONTH_PRECISION_RE = re.compile(r"^(\d{4})-(\d{2})$")
+_YEAR_PRECISION_RE = re.compile(r"^(\d{4})$")
+
+
+def parse_date_bounds(value: str | None) -> tuple[date, date] | None:
+    """Return ``(earliest, latest)`` for a date at whatever precision it carries.
+
+    Requirement 1G extended to partial precision: a day-precision value (or a
+    parseable datetime) never gets a fake day invented, and a ``"YYYY-MM"`` or
+    ``"YYYY"`` value is never silently upgraded to day precision either --
+    this returns the true bounds of what is actually known, for staleness and
+    validation to reason about, while the stored string keeps its original
+    precision untouched.
+
+    * Day precision (or an ISO datetime, or any ``parse_iso_date`` format):
+      ``earliest == latest == that exact date``.
+    * ``"YYYY-MM"``: bounds to the first and last day of that month.
+    * ``"YYYY"``: bounds to January 1 and December 31 of that year.
+    * ``UNKNOWN``, empty, or anything unparseable at any of the above
+      precisions: ``None`` -- never a guess.
+    """
+    if not value or value == UNKNOWN:
+        return None
+    text = str(value).strip()
+
+    exact = parse_iso_date(text)
+    if exact is not None:
+        return exact, exact
+
+    month_match = _MONTH_PRECISION_RE.match(text)
+    if month_match:
+        year, month = int(month_match.group(1)), int(month_match.group(2))
+        if 1 <= month <= 12:
+            try:
+                last_day = calendar.monthrange(year, month)[1]
+                return date(year, month, 1), date(year, month, last_day)
+            except ValueError:
+                return None
+        return None
+
+    year_match = _YEAR_PRECISION_RE.match(text)
+    if year_match:
+        year = int(year_match.group(1))
+        try:
+            return date(year, 1, 1), date(year, 12, 31)
+        except ValueError:
+            return None
+
     return None
 
 

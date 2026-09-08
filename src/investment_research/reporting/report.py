@@ -940,9 +940,42 @@ def _section_cost(self: ReportRenderer) -> str:
     if budget and budget.calls:
         out.append("")
         out.append(f"  tokens used : {budget.used_total:,} of {budget.max_total_tokens:,} budget")
+        out.append(f"  remaining   : {budget.remaining:,}")
         out.append(f"  calls       : {len(budget.calls)}")
+        out.append("")
+        out.append("  tokens by stage (requirement: discovery must not starve later stages):")
+        for stage, info in budget.stage_summary().items():
+            cap = f"{info['cap']:,}" if info["cap"] is not None else "no quota"
+            remaining = f"{info['remaining']:,}" if info["remaining"] is not None else "n/a"
+            flag = " [EXHAUSTED]" if info["exhausted"] else ""
+            out.append(
+                f"      {stage:<14} used {info['used']:>9,} / cap {cap:<10} "
+                f"remaining {remaining:<10}{flag}"
+            )
+        out.append("")
+        out.append("  tokens by agent/call:")
         for agent_id, tokens in sorted(budget.by_agent().items()):
             out.append(f"      {agent_id:<22} {tokens:>9,}")
+
+    adversarial = self.result.adversarial
+    if adversarial is not None:
+        out.append("")
+        out.append("  adversarial search (bear/bull discovery):")
+        out.append(f"      executed          : {adversarial.executed}")
+        out.append(f"      unexecuted        : {len(adversarial.unexecuted)}")
+        out.append(
+            f"      unexecuted (budget): {len(adversarial.unexecuted_due_to_budget)}"
+        )
+        out.append(f"      deduplicated      : {len(adversarial.deduplicated)}")
+
+    escalation = self.result.escalation
+    if escalation is not None:
+        out.append("")
+        out.append("  primary-source escalation (fetch):")
+        out.append(f"      fetches attempted : {escalation.fetches_attempted}")
+        out.append(f"      fetches failed    : {escalation.fetches_failed}")
+        out.append(f"      confirmed         : {len(escalation.confirmed)}")
+        out.append(f"      unconfirmed       : {len(escalation.unconfirmed)}")
 
     if self.result.chunks:
         out.append("")

@@ -20,7 +20,16 @@ REDACTED = "***REDACTED***"
 
 
 class SecretRedactingFilter(logging.Filter):
-    """Scrubs known secret values and secret-looking tokens from every record."""
+    """Scrubs known secret values and secret-looking tokens from every record.
+
+    Type-preserving: a %-style logging call such as
+    ``logger.info('%s %d', 'GET', 200)`` still works after this filter runs.
+    Only ``str`` values (and strings nested in a list/tuple/dict) are ever
+    scrubbed; every other type -- int, float, bool, None, or anything else --
+    passes through completely untouched, so ``record.getMessage() %
+    record.args`` never sees an int-shaped ``%d`` slot fed a string. A secret
+    can only ever be a string in the first place, so this loses no coverage.
+    """
 
     def __init__(self, secrets: Iterable[str] = ()) -> None:
         super().__init__()
@@ -38,16 +47,40 @@ class SecretRedactingFilter(logging.Filter):
             text = pattern.sub(REDACTED, text)
         return text
 
+    def _scrub_value(self, value: Any) -> Any:
+        """Redact ``value`` if it is (or contains) a string; else return it as-is."""
+        if isinstance(value, str):
+            return self.scrub(value)
+        if isinstance(value, tuple):
+            return tuple(self._scrub_value(v) for v in value)
+        if isinstance(value, list):
+            return [self._scrub_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._scrub_value(v) for k, v in value.items()}
+        # int, float, bool, None, or any other non-string type: never
+        # stringified here. A %-format arg must keep its original type or
+        # %d/%f-style specifiers crash on the next getMessage() call.
+        return value
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
+            # The format string itself is always coerced to a scrubbed str,
+            # exactly as before -- only the %-format *arguments* below need
+            # type preservation, since those are what %d/%f substitute into.
             record.msg = self.scrub(str(record.msg))
         except Exception:  # pragma: no cover - never let logging break a run
             record.msg = "<unloggable>"
         if record.args:
-            record.args = tuple(self.scrub(str(a)) for a in record.args)
+            try:
+                if isinstance(record.args, dict):
+                    record.args = {k: self._scrub_value(v) for k, v in record.args.items()}
+                else:
+                    record.args = tuple(self._scrub_value(a) for a in record.args)
+            except Exception:  # pragma: no cover - never let logging break a run
+                record.args = ()
         extra = getattr(record, "extra_fields", None)
         if isinstance(extra, dict):
-            record.extra_fields = {k: self.scrub(str(v)) for k, v in extra.items()}
+            record.extra_fields = {k: self._scrub_value(v) for k, v in extra.items()}
         return True
 
 

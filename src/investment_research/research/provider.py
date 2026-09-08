@@ -84,7 +84,13 @@ class DomainCoverage:
 
 
 class ResearchProvider(Protocol):
-    """The contract every research channel implements."""
+    """The contract every research channel implements.
+
+    ``agent_id`` is passed through to an LLM-backed provider so its calls are
+    tagged for stage-aware budget quotas and per-stage diagnostics (e.g.
+    "adversarial_bear" vs "escalation"); a provider with no LLM behind it
+    (corpus, null, or any future non-LLM channel) simply ignores it.
+    """
 
     name: str
     path: ResearchPath
@@ -93,9 +99,11 @@ class ResearchProvider(Protocol):
         """``(usable, reason)``. A provider says why it cannot run."""
         ...
 
-    def search(self, query: ResearchQuery) -> ResearchResult: ...
+    def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult: ...
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None: ...
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "research"
+    ) -> Document | None: ...
 
 
 class NullResearchProvider:
@@ -112,7 +120,7 @@ class NullResearchProvider:
     def available(self) -> tuple[bool, str]:
         return False, "no research provider configured"
 
-    def search(self, query: ResearchQuery) -> ResearchResult:
+    def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult:
         return ResearchResult(
             query=query,
             outcome=FetchOutcome.DISABLED,
@@ -121,7 +129,7 @@ class NullResearchProvider:
             error="no research provider configured",
         )
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
+    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
         return None
 
 
@@ -148,7 +156,7 @@ class CompositeResearchProvider:
             reasons.append(f"{provider.name}: {reason}")
         return False, "; ".join(reasons) or "no providers"
 
-    def search(self, query: ResearchQuery) -> ResearchResult:
+    def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult:
         last: ResearchResult | None = None
         for provider in self.providers:
             usable, reason = provider.available()
@@ -161,18 +169,18 @@ class CompositeResearchProvider:
                     error=reason,
                 )
                 continue
-            result = provider.search(query)
+            result = provider.search(query, agent_id=agent_id)
             if result.ok and result.documents:
                 return result
             last = result
-        return last or NullResearchProvider().search(query)
+        return last or NullResearchProvider().search(query, agent_id=agent_id)
 
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
+    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
         for provider in self.providers:
             usable, _ = provider.available()
             if not usable:
                 continue
-            document = provider.fetch(url, reason=reason)
+            document = provider.fetch(url, reason=reason, agent_id=agent_id)
             if document is not None:
                 return document
         return None

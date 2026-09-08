@@ -17,6 +17,7 @@ finding gets confirmed.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,6 +27,12 @@ from .discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, mak
 from .provider import ResearchProvider, ResearchQuery, ResearchResult
 
 log = logging.getLogger(__name__)
+
+#: Prefix on ResearchResult.error set by AnthropicWebResearchProvider when a
+#: BudgetExceeded abort is caught (see research/anthropic_web.py). Used here
+#: to distinguish "we did not look because the discovery budget ran out"
+#: from every other reason a query went unexecuted.
+_BUDGET_ERROR_PREFIX = "BudgetExceeded"
 
 #: The mandatory bear-side set (requirement P3). ``{t}`` is the ticker,
 #: ``{c}`` the company name, ``{d}`` a drug or programme name where known.
@@ -122,6 +129,18 @@ class AdversarialOutcome:
     follow_up_queries: list[ResearchQuery] = field(default_factory=list)
     executed: int = 0
     unexecuted: list[str] = field(default_factory=list)
+    #: The subset of `unexecuted` specifically caused by the discovery stage
+    #: budget quota being exhausted -- "we did not look because we ran out of
+    #: budget", never conflated with "we looked and found nothing" or any
+    #: other reason a query did not run. The Search Completeness Gate reads
+    #: `executed` on each ResearchResult either way, so a required domain
+    #: that lost its only query to a budget cutoff still correctly reads
+    #: UNSEARCHED/FAILED, not silently SEARCHED.
+    unexecuted_due_to_budget: list[str] = field(default_factory=list)
+    #: Queries dropped as near-duplicates before ever being issued (requirement
+    #: F: deduplicate semantically overlapping queries). Distinct from
+    #: `unexecuted`: these were never even attempted, by design, not cut off.
+    deduplicated: list[str] = field(default_factory=list)
     #: Auditable, purpose-separated query and hit log (requirement M3).
     discovery: DiscoveryLog = field(default_factory=DiscoveryLog)
 
@@ -175,6 +194,68 @@ def build_plan(ticker: str, company: str, programmes: Sequence[str] = ()) -> Sea
     return SearchPlan(bear=expand(BEAR_TEMPLATES, "bear"), bull=expand(BULL_TEMPLATES, "bull"))
 
 
+def _prioritize_domain_coverage(queries: Sequence[ResearchQuery]) -> list[ResearchQuery]:
+    """Reorder so every domain's first query runs before any domain's second.
+
+    Guarantees required-domain coverage survives a budget cutoff (requirement
+    F): if a stance's queries stop partway through, every domain that had any
+    query in this stance already got at least one attempt, rather than one
+    domain's extra queries exhausting the quota before a domain later in the
+    original template list ever got a turn. A stable sort within each group
+    keeps the original relative order otherwise.
+    """
+    seen_domains: set[ResearchDomain] = set()
+    first_pass: list[ResearchQuery] = []
+    rest: list[ResearchQuery] = []
+    for query in queries:
+        if query.domain not in seen_domains:
+            first_pass.append(query)
+            seen_domains.add(query.domain)
+        else:
+            rest.append(query)
+    return [*first_pass, *rest]
+
+
+def _query_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _dedupe_semantically(
+    queries: Sequence[ResearchQuery],
+    *,
+    threshold: float = 0.85,
+    seed_tokens: Sequence[set[str]] = (),
+) -> tuple[list[ResearchQuery], list[str]]:
+    """Drop a query whose normalized keyword set nearly duplicates an earlier one.
+
+    A cheap token-overlap heuristic, not a semantic model -- good enough to
+    catch "the same question asked two different ways" (most likely among
+    LLM-generated follow-ups) without spending another LLM call on it. Returns
+    the deduplicated list plus the text of every query dropped, so the caller
+    can record what was skipped and why (requirement F). ``seed_tokens`` lets
+    a caller dedupe a new batch (e.g. follow-ups) against queries already
+    issued in an earlier batch (e.g. the mandatory bear pass) without
+    re-executing or re-listing them.
+    """
+    kept: list[ResearchQuery] = []
+    kept_tokens: list[set[str]] = list(seed_tokens)
+    dropped: list[str] = []
+    for query in queries:
+        tokens = _query_tokens(query.query)
+        if any(_jaccard(tokens, other) >= threshold for other in kept_tokens):
+            dropped.append(query.query)
+            continue
+        kept.append(query)
+        kept_tokens.append(tokens)
+    return kept, dropped
+
+
 def run_adversarial_search(
     provider: ResearchProvider,
     plan: SearchPlan,
@@ -196,12 +277,30 @@ def run_adversarial_search(
     Bull agent's context (or vice versa) -- the isolation is enforced by which
     purposes an agent is allowed to read (``purposes_for_agent``), not by hoping
     nothing gets mixed up downstream.
+
+    Adaptive, not 30 blind calls (requirement F): within each stance, every
+    required domain's first query runs before any domain's second
+    (``_prioritize_domain_coverage``), near-duplicate queries are dropped
+    before ever being issued (``_dedupe_semantically``), follow-ups are
+    generated only from the mandatory bear pass's own results, and every
+    query the discovery budget quota could not afford is recorded as such
+    (``unexecuted_due_to_budget``) rather than looking searched or clean. If
+    ``llm`` is given, this sets its budget's current stage to ``"discovery"``
+    for the duration of this call (see ``LLMBudget.set_stage``).
     """
     outcome = AdversarialOutcome()
     run_id = run_id or ticker or "unknown-run"
+    if llm is not None:
+        llm.budget.set_stage("discovery")
 
-    def _execute(query: ResearchQuery, purpose: QueryPurpose, origin_fact_id: str | None = None):
-        result = provider.search(query)
+    def _execute(
+        query: ResearchQuery,
+        purpose: QueryPurpose,
+        *,
+        llm_agent_id: str,
+        origin_fact_id: str | None = None,
+    ) -> ResearchResult:
+        result = provider.search(query, agent_id=llm_agent_id)
         record = SearchQueryRecord(
             query_id=make_query_id(agent_id, purpose, query.query, run_id),
             run_id=run_id,
@@ -224,32 +323,52 @@ def run_adversarial_search(
         )
         return result
 
-    for query in plan.bear:
-        result = _execute(query, QueryPurpose.BEAR)
-        outcome.bear_results.append(result)
+    def _record(result: ResearchResult, query: ResearchQuery) -> None:
         if result.executed:
             outcome.executed += 1
-        else:
-            outcome.unexecuted.append(query.query)
+            return
+        outcome.unexecuted.append(query.query)
+        if str(result.error).startswith(_BUDGET_ERROR_PREFIX):
+            outcome.unexecuted_due_to_budget.append(query.query)
 
-    if llm is not None:
+    # --- bear: required-domain coverage first, then near-duplicates dropped
+    bear_queries = _prioritize_domain_coverage(plan.bear)
+    bear_queries, bear_dropped = _dedupe_semantically(bear_queries)
+    outcome.deduplicated.extend(bear_dropped)
+    bear_query_tokens = [_query_tokens(q.query) for q in bear_queries]
+
+    for query in bear_queries:
+        result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_bear")
+        outcome.bear_results.append(result)
+        _record(result, query)
+
+    # Follow-ups are optional, discovery-budget-scoped work: skip generating
+    # them at all once the discovery stage quota is already spent, rather
+    # than paying for a follow-up proposal call that could never be executed.
+    discovery_exhausted = llm is not None and "discovery" in llm.budget.stage_exhausted
+    if llm is not None and not discovery_exhausted:
         follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups)
+        # Never propose searching for something the mandatory bear pass
+        # already asked.
+        follow_ups, follow_up_dropped = _dedupe_semantically(
+            follow_ups, seed_tokens=bear_query_tokens
+        )
+        outcome.deduplicated.extend(follow_up_dropped)
         outcome.follow_up_queries = follow_ups
         for query in follow_ups:
-            result = _execute(query, QueryPurpose.BEAR)
+            result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_followup")
             outcome.bear_results.append(result)
-            if result.executed:
-                outcome.executed += 1
-            else:
-                outcome.unexecuted.append(query.query)
+            _record(result, query)
 
-    for query in plan.bull:
-        result = _execute(query, QueryPurpose.BULL)
+    # --- bull: separate pass, same treatment -----------------------------
+    bull_queries = _prioritize_domain_coverage(plan.bull)
+    bull_queries, bull_dropped = _dedupe_semantically(bull_queries)
+    outcome.deduplicated.extend(bull_dropped)
+
+    for query in bull_queries:
+        result = _execute(query, QueryPurpose.BULL, llm_agent_id="adversarial_bull")
         outcome.bull_results.append(result)
-        if result.executed:
-            outcome.executed += 1
-        else:
-            outcome.unexecuted.append(query.query)
+        _record(result, query)
 
     return outcome
 
@@ -266,7 +385,7 @@ def _generate_follow_ups(llm: Any, outcome: AdversarialOutcome, limit: int) -> l
         return []
     try:
         payload = llm.structured(
-            agent_id="adversarial_search",
+            agent_id="adversarial_followup",
             system=FOLLOW_UP_SYSTEM,
             prompt=(
                 "Evidence collected so far by the disconfirming search pass:\n\n"

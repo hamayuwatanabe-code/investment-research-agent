@@ -6,6 +6,8 @@ import pytest
 
 from investment_research.llm.client import (
     DEFAULT_MODEL,
+    DEFAULT_STAGE_QUOTAS,
+    BudgetExceeded,
     LLMBudget,
     LLMCallRecord,
     LLMClient,
@@ -176,3 +178,92 @@ def test_budget_detects_overrun():
     budget.record(LLMCallRecord("a", "m", input_tokens=90, output_tokens=0))
     assert budget.would_exceed(50)
     assert not budget.would_exceed(5)
+
+
+# --- stage-aware budgeting (requirement: discovery must not starve later stages) --
+def test_default_stage_quotas_sum_to_a_defensible_allocation():
+    """30% discovery / 25% escalation / 30% interpretive / 10% finalization,
+    leaving 5% unallocated contingency -- discovery can never again be
+    capable of consuming ~99% of the run budget."""
+    assert DEFAULT_STAGE_QUOTAS["discovery"] == pytest.approx(0.30)
+    assert DEFAULT_STAGE_QUOTAS["escalation"] == pytest.approx(0.25)
+    assert DEFAULT_STAGE_QUOTAS["interpretive"] == pytest.approx(0.30)
+    assert DEFAULT_STAGE_QUOTAS["finalization"] == pytest.approx(0.10)
+    assert sum(DEFAULT_STAGE_QUOTAS.values()) < 1.0, "contingency must be left unallocated"
+
+
+def test_a_stage_never_set_is_completely_unaffected_by_quotas():
+    """Backward compatibility: a caller that never calls set_stage() sees no
+    quota enforcement at all -- only the existing global cap applies."""
+    budget = LLMBudget(max_total_tokens=1000)
+    budget.check(900)  # would consume 90% of the global budget in one call
+    budget.record(LLMCallRecord("a", "m", input_tokens=900, output_tokens=0))
+    assert budget.exhausted is False
+    assert budget.stage_used == {}
+
+
+def test_stage_quota_blocks_further_calls_in_that_stage_once_hit():
+    budget = LLMBudget(max_total_tokens=1000, stage_quotas={"discovery": 0.30})
+    budget.set_stage("discovery")
+    # Cap is 300 tokens. A single call using 250 fits.
+    budget.check(250)
+    budget.record(LLMCallRecord("adversarial_bear", "m", input_tokens=200, output_tokens=50))
+    assert "discovery" not in budget.stage_exhausted
+
+    # A further reservation that would push discovery over its 300-token cap
+    # must be refused, even though the GLOBAL budget has plenty left.
+    with pytest.raises(BudgetExceeded, match="discovery"):
+        budget.check(200)
+    assert "discovery" in budget.stage_exhausted
+    assert budget.exhausted is False, "a stage quota hit must not be a global exhaustion"
+
+
+def test_stage_quota_exhaustion_does_not_block_a_different_stage():
+    budget = LLMBudget(
+        max_total_tokens=1000, stage_quotas={"discovery": 0.10, "interpretive": 0.30}
+    )
+    budget.set_stage("discovery")
+    budget.record(LLMCallRecord("adversarial_bear", "m", input_tokens=100, output_tokens=0))
+    with pytest.raises(BudgetExceeded):
+        budget.check(50)  # discovery's 100-token cap is already used up
+    assert "discovery" in budget.stage_exhausted
+
+    # Switching to a different stage must not be affected by discovery's cap.
+    budget.set_stage("interpretive")
+    budget.check(200)  # well within interpretive's 300-token cap
+    budget.record(LLMCallRecord("regulatory", "m", input_tokens=150, output_tokens=0))
+    assert "interpretive" not in budget.stage_exhausted
+
+
+def test_stage_actual_usage_overrun_marks_that_stage_exhausted():
+    """Mirrors the global-exhaustion case: a stage's ACTUAL usage (not just
+    the preflight estimate) can overrun its cap, and that must be caught
+    too."""
+    budget = LLMBudget(max_total_tokens=1000, stage_quotas={"discovery": 0.10})
+    budget.set_stage("discovery")
+    budget.check(50)  # preflight looks fine
+    # But the real response used far more than reserved.
+    budget.record(LLMCallRecord("adversarial_bear", "m", input_tokens=90, output_tokens=90))
+    assert "discovery" in budget.stage_exhausted
+
+
+def test_stage_summary_reports_used_cap_remaining_exhausted():
+    budget = LLMBudget(max_total_tokens=1000, stage_quotas={"discovery": 0.30})
+    budget.set_stage("discovery")
+    budget.record(LLMCallRecord("adversarial_bear", "m", input_tokens=100, output_tokens=0))
+    summary = budget.stage_summary()
+    assert summary["discovery"] == {
+        "used": 100,
+        "cap": 300,
+        "remaining": 200,
+        "exhausted": False,
+    }
+
+
+def test_llm_call_record_is_stamped_with_the_active_stage():
+    budget = LLMBudget(max_total_tokens=1000)
+    budget.set_stage("escalation")
+    record = LLMCallRecord("escalation", "m", input_tokens=10, output_tokens=5)
+    budget.record(record)
+    assert record.stage == "escalation"
+    assert budget.calls[0].stage == "escalation"

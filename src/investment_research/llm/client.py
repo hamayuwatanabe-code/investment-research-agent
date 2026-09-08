@@ -86,6 +86,27 @@ _SERVER_SIDE_WEB_TOOL_PREFIXES = ("web_search", "web_fetch")
 #: never a prediction of the real cost -- see BudgetExceeded.
 SERVER_TOOL_TOKEN_RESERVE = 20_000
 
+#: Default per-stage budget quotas, as a fraction of ``max_total_tokens``.
+#:
+#: A live run showed adversarial discovery alone consuming 197,353 of a
+#: 200,000-token budget (2,647 remaining) before the interpretive pipeline
+#: -- Evidence Integrity, escalation, Regulatory/Science/Kill/Bear/Bull/
+#: Contradiction, Blind Judge -- ever ran. One hard global cap is not enough
+#: on its own: an early, cheap-per-call stage can still exhaust it before
+#: later, decision-bearing stages get a turn. Each stage below gets its own
+#: cap (a fraction of the global ceiling), enforced independently of the
+#: others, so discovery can never again consume ~99% of the run. The
+#: remaining 5% is deliberately unallocated headroom/contingency.
+#:
+#: A caller that never calls ``set_stage()`` is completely unaffected -- the
+#: quotas exist but are never checked against an unset stage.
+DEFAULT_STAGE_QUOTAS: dict[str, float] = {
+    "discovery": 0.30,  # adversarial bear/follow-up/bull search passes
+    "escalation": 0.25,  # primary-source confirmation search + fetch
+    "interpretive": 0.30,  # regulatory/science/competitive/contradiction/kill/bear/bull
+    "finalization": 0.10,  # blind judge
+}
+
 
 @dataclass
 class LLMCallRecord:
@@ -99,6 +120,9 @@ class LLMCallRecord:
     ok: bool = True
     error: str = ""
     stop_reason: str = ""
+    #: Which budget stage (see LLMBudget.set_stage) was active for this call,
+    #: for diagnostics -- stamped by LLMBudget.record(), not the caller.
+    stage: str = ""
 
     @property
     def total_tokens(self) -> int:
@@ -137,6 +161,19 @@ class LLMBudget:
     #: the budget over its ceiling. Once True, every future call is refused.
     exhausted: bool = False
     exhausted_reason: str = ""
+    #: Stage name -> fraction of max_total_tokens that stage may use (see
+    #: DEFAULT_STAGE_QUOTAS). A stage absent from this mapping has no cap --
+    #: only the global ceiling applies to it.
+    stage_quotas: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_STAGE_QUOTAS))
+    #: The stage the next call belongs to, set by the caller via
+    #: ``set_stage()``. Empty string means "no stage" -- no stage quota is
+    #: ever enforced against it, so existing callers that never set a stage
+    #: are completely unaffected.
+    current_stage: str = ""
+    stage_used: dict[str, int] = field(default_factory=dict)
+    #: Stages whose quota has been hit. Local to that stage -- unlike global
+    #: `exhausted`, this does not block other stages.
+    stage_exhausted: set[str] = field(default_factory=set)
 
     @property
     def used_total(self) -> int:
@@ -149,14 +186,36 @@ class LLMBudget:
     def would_exceed(self, estimated: int) -> bool:
         return self.used_total + estimated > self.max_total_tokens
 
+    def set_stage(self, stage: str) -> None:
+        """Declare which named stage subsequent calls belong to.
+
+        Purely bookkeeping for quota enforcement and diagnostics -- it never
+        raises. Pass ``""`` to leave stage tracking off.
+        """
+        self.current_stage = stage
+
+    def stage_cap_tokens(self, stage: str) -> int | None:
+        """The token ceiling for ``stage``, or ``None`` if it has no quota."""
+        fraction = self.stage_quotas.get(stage)
+        if fraction is None:
+            return None
+        return int(self.max_total_tokens * fraction)
+
+    def stage_remaining(self, stage: str) -> int | None:
+        cap = self.stage_cap_tokens(stage)
+        if cap is None:
+            return None
+        return max(0, cap - self.stage_used.get(stage, 0))
+
     def check(self, reserved_tokens: int) -> None:
         """Preflight guard: call before every API request, make none if it raises.
 
         Raises :class:`BudgetExceeded` -- without making any network call --
-        when the budget is already exhausted, or when ``reserved_tokens``
-        would not fit in what remains. ``reserved_tokens`` is a conservative
-        estimate; it is never treated as an exact prediction, particularly
-        for calls that invoke a server-side web tool.
+        when the budget is already exhausted, when ``reserved_tokens`` would
+        not fit in what remains globally, or when it would not fit the
+        current stage's quota (see ``set_stage``). ``reserved_tokens`` is a
+        conservative estimate; it is never treated as an exact prediction,
+        particularly for calls that invoke a server-side web tool.
         """
         if self.exhausted:
             raise BudgetExceeded(
@@ -173,10 +232,41 @@ class LLMBudget:
             log.warning(self.exhausted_reason)
             raise BudgetExceeded(self.exhausted_reason)
 
+        stage = self.current_stage
+        if stage:
+            cap = self.stage_cap_tokens(stage)
+            if cap is not None:
+                used = self.stage_used.get(stage, 0)
+                if used + reserved_tokens > cap:
+                    self.stage_exhausted.add(stage)
+                    reason = (
+                        f"stage {stage!r} budget exhausted: a planned request reserving "
+                        f"~{reserved_tokens} tokens would exceed its {cap}-token quota "
+                        f"({used} used, {max(0, cap - used)} remaining of a "
+                        f"{self.max_total_tokens}-token global budget) -- refusing to call "
+                        "the API for this stage. Other stages are unaffected."
+                    )
+                    log.warning(reason)
+                    raise BudgetExceeded(reason)
+
     def record(self, call: LLMCallRecord) -> None:
         self.used_input += call.input_tokens
         self.used_output += call.output_tokens
+        call.stage = self.current_stage
         self.calls.append(call)
+        if self.current_stage:
+            stage = self.current_stage
+            self.stage_used[stage] = self.stage_used.get(stage, 0) + call.total_tokens
+            cap = self.stage_cap_tokens(stage)
+            if cap is not None and stage not in self.stage_exhausted and self.stage_used[stage] > cap:
+                self.stage_exhausted.add(stage)
+                log.warning(
+                    "stage %r actual usage (%d) exceeded its %d-token quota after agent %r",
+                    stage,
+                    self.stage_used[stage],
+                    cap,
+                    call.agent_id,
+                )
         if not self.exhausted and self.used_total > self.max_total_tokens:
             self.exhausted = True
             self.exhausted_reason = (
@@ -193,6 +283,21 @@ class LLMBudget:
         for call in self.calls:
             totals[call.agent_id] = totals.get(call.agent_id, 0) + call.total_tokens
         return totals
+
+    def stage_summary(self) -> dict[str, dict[str, Any]]:
+        """Per-stage token usage/cap/remaining/exhausted, for diagnostics."""
+        stages = set(self.stage_quotas) | set(self.stage_used)
+        summary: dict[str, dict[str, Any]] = {}
+        for stage in sorted(stages):
+            cap = self.stage_cap_tokens(stage)
+            used = self.stage_used.get(stage, 0)
+            summary[stage] = {
+                "used": used,
+                "cap": cap,
+                "remaining": (max(0, cap - used) if cap is not None else None),
+                "exhausted": stage in self.stage_exhausted,
+            }
+        return summary
 
 
 class LLMClient:

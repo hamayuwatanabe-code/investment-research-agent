@@ -111,7 +111,7 @@ class AnthropicWebResearchProvider:
         return self.llm.available()
 
     # -- search ------------------------------------------------------------
-    def search(self, query: ResearchQuery) -> ResearchResult:
+    def search(self, query: ResearchQuery, *, agent_id: str = "anthropic_web_search") -> ResearchResult:
         usable, reason = self.available()
         if not usable:
             return ResearchResult(
@@ -139,6 +139,7 @@ class AnthropicWebResearchProvider:
                 messages=[{"role": "user", "content": query.query}],
                 tools=[tool],
                 max_tokens=SEARCH_MAX_TOKENS,
+                agent_id=agent_id,
             )
         except BudgetExceeded as exc:
             # A budget cutoff is "we did not look", not "we looked and found
@@ -184,7 +185,9 @@ class AnthropicWebResearchProvider:
         return parse_search_response(response, path=self.path)
 
     # -- fetch -------------------------------------------------------------
-    def fetch(self, url: str, *, reason: str = "") -> Document | None:
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "anthropic_web_fetch"
+    ) -> Document | None:
         """Fetch one URL's full text.
 
         ``web_fetch`` only fetches URLs already in the conversation, so the URL
@@ -216,6 +219,7 @@ class AnthropicWebResearchProvider:
                 messages=[{"role": "user", "content": prompt}],
                 tools=[tool],
                 max_tokens=self.max_content_tokens,
+                agent_id=agent_id,
             )
         except BudgetExceeded as exc:
             log.warning("web fetch skipped for %s: %s", url, exc)

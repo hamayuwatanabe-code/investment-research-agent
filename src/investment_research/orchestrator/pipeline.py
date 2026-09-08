@@ -56,6 +56,7 @@ from ..schemas.enums import (
     RunStatus,
 )
 from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
+from ..schemas.validation import QuarantinedSource
 from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
@@ -107,6 +108,9 @@ class ResearchResult:
     llm_agents_used: list[str] = field(default_factory=list)
     capture_info: dict[str, Any] = field(default_factory=dict)
     resume_plan: ResumePlan | None = None
+    #: Sources rejected by schema validation rather than silently persisted
+    #: or allowed to crash the run (requirement 14/24).
+    quarantined_sources: list[QuarantinedSource] = field(default_factory=list)
     #: Decision-Grade Evidence Gate: whether what was found is actually
     #: verified, as opposed to merely searched-for (requirement DG5).
     evidence_sufficiency: EvidenceSufficiencyMatrix | None = None
@@ -475,7 +479,34 @@ class Pipeline:
             verified_facts = list(integrity.facts) or raw_facts
         # The verified set replaces the raw set on the bus.
         bus.facts = verified_facts
-        self.repo.save_sources(bus.sources)
+
+        # A malformed source is rejected and quarantined, never silently
+        # persisted and never allowed to crash the run (requirement 14/24).
+        quarantined_sources = self.repo.save_sources(bus.sources)
+        if quarantined_sources:
+            result.quarantined_sources = quarantined_sources
+            ctx.status = RunStatus.INCOMPLETE_RESEARCH
+            for q in quarantined_sources:
+                result.failures.append(
+                    f"quarantined malformed source {q.source_id} ({q.url}): "
+                    f"{q.field}={q.value!r} -- {q.error}"
+                )
+            # Any fact resting only on a quarantined source is evidence this
+            # run cannot actually stand behind -- exclude it before it can
+            # reach scoring, completeness or the Evidence Sufficiency Matrix,
+            # so a domain that depended on it correctly reads as unresolved
+            # rather than silently sufficient.
+            quarantined_ids = {q.source_id for q in quarantined_sources}
+            before = len(verified_facts)
+            verified_facts = [f for f in verified_facts if f.source_id not in quarantined_ids]
+            bus.facts = verified_facts
+            dropped = before - len(verified_facts)
+            if dropped:
+                result.failures.append(
+                    f"{dropped} fact(s) resting only on a quarantined source were excluded "
+                    "from evidence"
+                )
+
         for fact in verified_facts:
             try:
                 self.repo.save_fact(fact)
@@ -487,6 +518,11 @@ class Pipeline:
         checkpoint("verify", {"verified": len(verified_facts)})
 
         # ---- Stage 2b: primary-source escalation (requirement P4) --------
+        # Stage-aware budgeting (requirement: discovery must not starve later
+        # stages): escalation gets its own quota, independent of whatever
+        # adversarial discovery already spent.
+        if self.llm is not None:
+            self.llm.budget.set_stage("escalation")
         usable_research, research_reason = self.research.available()
         if usable_research:
             verified_facts, escalation = escalate(
@@ -513,6 +549,11 @@ class Pipeline:
         )
 
         # ---- Stage 3: domain agents (facts only) ------------------------
+        # Stage-aware budgeting: everything from here through bear/bull
+        # (Stage 6) shares the "interpretive" quota, independent of discovery
+        # and escalation's spend.
+        if self.llm is not None:
+            self.llm.budget.set_stage("interpretive")
         from ..agents.llm_agents import (
             LLMCompetitiveAgent,
             LLMContradictionAgent,
@@ -797,6 +838,8 @@ class Pipeline:
         self.repo.save_evidence_sufficiency(ctx.run_id, ctx.ticker, sufficiency)
 
         # ---- Stage 9: blind judgement ------------------------------------
+        if self.llm is not None:
+            self.llm.budget.set_stage("finalization")
         judge_params = {
             **params,
             "evidence_confidence": breakdown.score,

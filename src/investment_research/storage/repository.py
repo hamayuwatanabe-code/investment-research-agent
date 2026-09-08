@@ -9,6 +9,7 @@ key.  Identical content is a no-op (duplicate detection).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ from ..schemas.evaluation import (
     Verdict,
 )
 from ..schemas.fact import Contradiction, Fact, Source
-from ..schemas.validation import validate_fact, validate_source
+from ..schemas.validation import QuarantinedSource, SchemaError, validate_fact, validate_source
+
+log = logging.getLogger(__name__)
 
 _CONTENT_FIELDS = (
     "claim",
@@ -137,10 +140,32 @@ class Repository:
             f"INSERT OR REPLACE INTO sources({cols}) VALUES({marks})", tuple(row.values())
         )
 
-    def save_sources(self, sources: Iterable[Source]) -> None:
+    def save_sources(self, sources: Iterable[Source]) -> list[QuarantinedSource]:
+        """Persist every valid source; quarantine, never crash on, a bad one.
+
+        Requirement 14/24: schema integrity stays strict -- a malformed
+        source is never silently persisted -- but one bad record must not
+        abort the whole run. Returns the sources that were rejected, each
+        with enough detail (source_id, url, field, offending value, error)
+        for the run to report exactly what was dropped and why.
+        """
+        quarantined: list[QuarantinedSource] = []
         for s in sources:
-            self.save_source(s)
+            try:
+                self.save_source(s)
+            except SchemaError as exc:
+                log.error("quarantined malformed source %s (%s): %s", s.source_id, s.url, exc)
+                quarantined.append(
+                    QuarantinedSource(
+                        source_id=s.source_id,
+                        url=s.url,
+                        field=exc.field,
+                        value=exc.value,
+                        error=str(exc),
+                    )
+                )
         self.conn.commit()
+        return quarantined
 
     def find_source_by_hash(self, content_hash: str) -> sqlite3.Row | None:
         if not content_hash or content_hash == "UNKNOWN":

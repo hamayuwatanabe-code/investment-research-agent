@@ -12,8 +12,16 @@ from investment_research.collectors.documents import (
     score_chunk,
     split_sentences,
 )
-from investment_research.llm.client import BudgetExceeded
-from investment_research.research.adversarial import BEAR_TEMPLATES, BULL_TEMPLATES, build_plan
+from investment_research.llm.client import BudgetExceeded, LLMBudget
+from investment_research.research.adversarial import (
+    BEAR_TEMPLATES,
+    BULL_TEMPLATES,
+    SearchPlan,
+    _dedupe_semantically,
+    _prioritize_domain_coverage,
+    build_plan,
+    run_adversarial_search,
+)
 from investment_research.research.anthropic_web import (
     SEARCH_MAX_TOKENS,
     WEB_FETCH_TOOL,
@@ -28,6 +36,7 @@ from investment_research.research.provider import (
     CompositeResearchProvider,
     NullResearchProvider,
     ResearchQuery,
+    ResearchResult,
 )
 from investment_research.schemas.enums import (
     ContentKind,
@@ -441,6 +450,159 @@ def test_bear_and_bull_plans_are_separate():
     assert all(q.stance == "bear" for q in plan.bear)
     assert all(q.stance == "bull" for q in plan.bull)
     assert not {q.query for q in plan.bear} & {q.query for q in plan.bull}
+
+
+# --- adaptive adversarial search (requirement F) -----------------------------
+def test_prioritize_domain_coverage_runs_every_domains_first_query_before_seconds():
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    domains_before = [q.domain for q in plan.bear]
+    # The raw template list has at least one domain (CAPITAL_STRUCTURE) with
+    # several queries clustered together -- proving the reorder actually moves
+    # something, not merely confirming an already-sorted list.
+    assert domains_before.count(ResearchDomain.CAPITAL_STRUCTURE) > 1
+
+    reordered = _prioritize_domain_coverage(plan.bear)
+    assert {q.query for q in reordered} == {q.query for q in plan.bear}, "no query lost or added"
+
+    # After exactly one query per distinct domain, every domain must already
+    # have appeared once -- a budget cutoff right there still covered them all.
+    all_domains = {q.domain for q in plan.bear}
+    first_n = reordered[: len(all_domains)]
+    assert {q.domain for q in first_n} == all_domains
+
+
+def test_dedupe_semantically_drops_near_duplicate_queries():
+    queries = [
+        ResearchQuery(query="Generic Biotech Holdings dilution risk", domain=ResearchDomain.CAPITAL_STRUCTURE),
+        # Same keywords, reworded -- the "same question asked two different
+        # ways" case this heuristic exists to catch.
+        ResearchQuery(query="dilution risk Generic Biotech Holdings", domain=ResearchDomain.CAPITAL_STRUCTURE),
+        ResearchQuery(query="Generic Biotech Holdings FDA endpoint concern", domain=ResearchDomain.REGULATORY),
+    ]
+    kept, dropped = _dedupe_semantically(queries, threshold=0.85)
+    assert len(kept) == 2
+    assert dropped == ["dilution risk Generic Biotech Holdings"]
+
+
+def test_dedupe_semantically_does_not_drop_the_standard_mandatory_templates():
+    """The real mandatory bear/bull templates must survive dedup untouched --
+    they are deliberately distinct topics, not near-duplicates of each other."""
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    kept, dropped = _dedupe_semantically(plan.bear)
+    assert dropped == []
+    assert len(kept) == len(plan.bear)
+
+
+def test_dedupe_semantically_respects_seed_tokens_from_an_earlier_batch():
+    already_asked = [_query_tokens_for_test("Generic Biotech Holdings dilution risk")]
+    follow_ups = [
+        ResearchQuery(query="Generic Biotech Holdings dilution risk", domain=ResearchDomain.CAPITAL_STRUCTURE),
+        ResearchQuery(query="Generic Biotech Holdings going concern doubt", domain=ResearchDomain.CAPITAL_STRUCTURE),
+    ]
+    kept, dropped = _dedupe_semantically(follow_ups, seed_tokens=already_asked)
+    assert [q.query for q in kept] == ["Generic Biotech Holdings going concern doubt"]
+    assert dropped == ["Generic Biotech Holdings dilution risk"]
+
+
+def _query_tokens_for_test(text: str) -> set[str]:
+    import re
+
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+class _BudgetCuttingProvider:
+    """A ResearchProvider double: the first `allow` queries execute, then
+    every further one is refused exactly as AnthropicWebResearchProvider
+    refuses one on a BudgetExceeded abort."""
+
+    name = "fake_discovery_provider"
+    path = ResearchPath.ANTHROPIC_WEB
+
+    def __init__(self, allow: int):
+        self.allow = allow
+        self.calls = 0
+        self.agent_ids: list[str] = []
+
+    def available(self):
+        return True, "ready"
+
+    def search(self, query, *, agent_id: str = "research"):
+        self.calls += 1
+        self.agent_ids.append(agent_id)
+        if self.calls > self.allow:
+            return ResearchResult(
+                query=query,
+                outcome=FetchOutcome.DISABLED,
+                path=self.path,
+                executed=False,
+                error="BudgetExceeded: LLM token budget already exhausted",
+            )
+        return ResearchResult(query=query, documents=[], outcome=FetchOutcome.NOT_FOUND, path=self.path)
+
+    def fetch(self, url, *, reason="", agent_id: str = "research"):
+        return None
+
+
+def test_queries_cut_off_by_budget_are_recorded_distinctly_not_as_searched():
+    provider = _BudgetCuttingProvider(allow=3)
+    plan = SearchPlan(
+        bear=[
+            ResearchQuery(query=f"query {i}", domain=domain)
+            for i, domain in enumerate(ResearchDomain)
+        ],
+        bull=[],
+    )
+    outcome = run_adversarial_search(provider, plan, run_id="r1", ticker="TESTCO")
+
+    assert len(outcome.unexecuted_due_to_budget) == len(plan.bear) - 3
+    assert set(outcome.unexecuted_due_to_budget) <= set(outcome.unexecuted)
+    # Every skipped query is still on the record -- the completeness gate can
+    # see it -- just tagged executed=False, never "searched, nothing found".
+    skipped_records = [q for q in outcome.discovery.queries if not q.executed]
+    assert len(skipped_records) == len(outcome.unexecuted_due_to_budget)
+
+
+def test_bear_bull_and_followup_calls_are_tagged_with_distinct_agent_ids():
+    provider = _BudgetCuttingProvider(allow=1000)
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    run_adversarial_search(provider, plan, run_id="r1", ticker="TESTCO")
+    assert "adversarial_bear" in provider.agent_ids
+    assert "adversarial_bull" in provider.agent_ids
+
+
+class _FakeLLMForFollowUps:
+    def __init__(self, *, budget: LLMBudget):
+        self.budget = budget
+        self.structured_calls = 0
+
+    def available(self):
+        return True, "ready"
+
+    def structured(self, **_kw):
+        self.structured_calls += 1
+        return {"queries": []}
+
+
+def test_follow_ups_are_never_generated_once_discovery_quota_already_exhausted():
+    provider = _BudgetCuttingProvider(allow=1000)
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    budget = LLMBudget(max_total_tokens=1000)
+    budget.set_stage("discovery")
+    budget.stage_exhausted.add("discovery")  # simulate the bear pass having used it all
+    llm = _FakeLLMForFollowUps(budget=budget)
+
+    run_adversarial_search(provider, plan, llm=llm, run_id="r1", ticker="TESTCO")
+
+    assert llm.structured_calls == 0, "no point spending tokens proposing searches we can't run"
+
+
+def test_discovery_stage_is_set_on_the_llm_budget_during_the_run():
+    provider = _BudgetCuttingProvider(allow=1000)
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    budget = LLMBudget(max_total_tokens=1000)
+    llm = _FakeLLMForFollowUps(budget=budget)
+    run_adversarial_search(provider, plan, llm=llm, run_id="r1", ticker="TESTCO")
+    assert budget.current_stage == "discovery"
 
 
 # --- escalation -------------------------------------------------------------

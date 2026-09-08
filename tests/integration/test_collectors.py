@@ -13,11 +13,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from investment_research.collectors import clinicaltrials, sec_edgar
+from investment_research.collectors import clinicaltrials, fda, sec_edgar
 from investment_research.collectors.clinicaltrials import ClinicalTrialsCollector, parse_study
+from investment_research.collectors.fda import FdaCollector
 from investment_research.collectors.http import HttpClient
 from investment_research.collectors.sec_edgar import SecEdgarCollector, extract_xbrl_metric
 from investment_research.schemas.enums import UNKNOWN, FactCategory, FetchOutcome, SourceTier
+
+DRUGSFDA_WITH_RESULTS = {
+    "results": [
+        {
+            "application_number": "NDA123456",
+            "products": [{"brand_name": "Examplinib", "marketing_status": "Prescription"}],
+        }
+    ]
+}
 
 pytestmark = pytest.mark.integration
 
@@ -131,6 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             "/submissions/CIK0001595097.json": SUBMISSIONS,
             "/api/v2/studies": STUDIES,
             "/api/xbrl/companyfacts/CIK0001595097.json": COMPANY_FACTS,
+            "/drug/drugsfda_with_results.json": DRUGSFDA_WITH_RESULTS,
         }
         if path in routes:
             body = json.dumps(routes[path]).encode()
@@ -255,3 +266,43 @@ def test_no_company_name_skips_rather_than_guessing(client):
     result = ClinicalTrialsCollector(client).collect("TESTCO", UNKNOWN)
     assert result.outcome is FetchOutcome.NOT_FOUND
     assert "skipped rather than guessed" in result.errors[0]
+
+
+# --- FDA: zero-result 404 vs a real failure (requirement D) -----------------
+def test_fda_zero_result_404_is_not_degraded(base_url, monkeypatch, client):
+    """A valid Drugs@FDA query with no matching applications is NOT_FOUND with
+    no errors -- an ordinary, correct answer for a pre-approval biotech, and
+    must not be reported as a collector failure."""
+    monkeypatch.setattr(fda, "DRUGSFDA_URL", f"{base_url}/drug/drugsfda_zero_results.json")
+    result = FdaCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.errors == []
+    assert result.degraded is False
+    assert any("no Drugs@FDA applications listed" in n for n in result.notes)
+
+
+def test_fda_query_with_results_is_not_degraded(base_url, monkeypatch, client):
+    monkeypatch.setattr(fda, "DRUGSFDA_URL", f"{base_url}/drug/drugsfda_with_results.json")
+    result = FdaCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert result.outcome is FetchOutcome.OK
+    assert result.degraded is False
+    assert result.raw_facts
+    assert result.sources and result.sources[0].tier is SourceTier.TIER_1
+
+
+def test_fda_real_connectivity_failure_still_degrades(monkeypatch, client):
+    """A genuine connectivity/server failure -- not a 404 -- must still degrade."""
+    monkeypatch.setattr(fda, "DRUGSFDA_URL", "http://127.0.0.1:1/nothing")
+    result = FdaCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert result.degraded is True
+    assert result.errors
+    assert result.outcome is not FetchOutcome.NOT_FOUND
+
+
+def test_fda_no_company_name_is_still_degraded():
+    """Distinct from the zero-result case: the query was never meaningfully
+    attempted at all, so this must still count as degraded."""
+    result = FdaCollector(HttpClient(offline=True, cache_dir=None)).collect("TESTCO", UNKNOWN)
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.errors
+    assert result.degraded is True
