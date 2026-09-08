@@ -90,16 +90,54 @@ def validate(instance: Any, schema: dict[str, Any], path: str = "$") -> None:
     raise SchemaValidationError(f"{path}: unsupported schema type {kind!r}")
 
 
+#: JSON-Schema keywords the Anthropic custom-tool ``input_schema`` path
+#: currently rejects outright ("For 'array' type, property 'maxItems' is not
+#: supported", "For 'integer' type, property 'minimum' is not supported"),
+#: even though this module's own ``validate()`` fully supports and enforces
+#: them. This is Anthropic-tool-specific, not a general JSON-Schema
+#: limitation and not applied to any other provider's schema path -- there
+#: is none in this codebase today, and this function is only ever called
+#: from ``as_strict_tool``. Extend this set if a new "property X is not
+#: supported" error is observed in production; never remove a keyword from
+#: here as a way to avoid fixing local validation.
+ANTHROPIC_UNSUPPORTED_KEYWORDS = frozenset({"minItems", "maxItems", "minimum", "maximum"})
+
+
+def to_anthropic_schema(schema: Any) -> Any:
+    """Recursively strip Anthropic-unsupported validation keywords.
+
+    Produces a SEPARATE schema for the wire. The caller's original schema
+    (with these keywords intact) is untouched and remains what ``validate()``
+    checks the model's response against afterward -- local validation is
+    never weakened, only what Anthropic is asked to enforce server-side
+    changes. Type/enum/required/properties/items structure is preserved
+    exactly; only the specific unsupported keywords are dropped, recursively,
+    from every nested object and array.
+    """
+    if isinstance(schema, dict):
+        return {
+            key: to_anthropic_schema(value)
+            for key, value in schema.items()
+            if key not in ANTHROPIC_UNSUPPORTED_KEYWORDS
+        }
+    if isinstance(schema, list):
+        return [to_anthropic_schema(item) for item in schema]
+    return schema
+
+
 def as_strict_tool(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
     """Wrap a schema as a strict tool definition.
 
     ``strict: true`` makes the API guarantee the arguments validate against the
     schema, which removes the most common class of parse failure. Local
-    validation still runs afterwards: the guarantee covers shape, not content.
+    validation still runs afterwards against the ORIGINAL ``schema`` (see
+    ``structured()`` in ``llm/client.py``): the guarantee covers shape, not
+    content, and the wire schema below is a sanitized copy, never the
+    contract itself.
     """
     return {
         "name": name,
         "description": description,
-        "input_schema": schema,
+        "input_schema": to_anthropic_schema(schema),
         "strict": True,
     }

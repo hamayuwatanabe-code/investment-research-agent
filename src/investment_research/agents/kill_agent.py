@@ -18,19 +18,38 @@ import logging
 from ..collectors.search import SearchProvider, kill_queries
 from ..collectors.tiering import classify_tier
 from ..orchestrator.isolation import Channel
+from ..research.discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, make_query_id
+from ..research.provider import ResearchProvider, ResearchQuery
 from ..schemas.agent_io import AgentInput, AgentOutput, RiskFlag
 from ..schemas.enums import (
     MANDATORY_KILL_CATEGORIES,
+    UNKNOWN,
     FactCategory,
     KillCategory,
     Materiality,
-    SourceTier,
+    QueryPurpose,
+    ResearchDomain,
 )
 from ..schemas.fact import UnresolvedQuestion
 from ..scoring.kill_gate import evaluate_kill_gate
+from ..scoring.program_resolution import resolve_current_program
 from .base import Agent
 
 log = logging.getLogger(__name__)
+
+#: Kill category -> the research domain its mandatory queries fall under, for
+#: DiscoveryLog bookkeeping only (auditability requirement E). Not the same
+#: mapping as QUERY_CATEGORY_MAP's FactCategory routing below.
+_KILL_CATEGORY_TO_RESEARCH_DOMAIN: dict[KillCategory, ResearchDomain] = {
+    KillCategory.REGULATORY_KILL: ResearchDomain.REGULATORY,
+    KillCategory.CLINICAL_KILL: ResearchDomain.SCIENCE_TECHNOLOGY,
+    KillCategory.SCIENCE_KILL: ResearchDomain.SCIENCE_TECHNOLOGY,
+    KillCategory.CAPITAL_KILL: ResearchDomain.CAPITAL_STRUCTURE,
+    KillCategory.LIQUIDITY_KILL: ResearchDomain.CAPITAL_STRUCTURE,
+    KillCategory.GOVERNANCE_KILL: ResearchDomain.CONTRADICTION,
+    KillCategory.ACCOUNTING_KILL: ResearchDomain.CONTRADICTION,
+    KillCategory.COMMERCIAL_KILL: ResearchDomain.COMPETITION,
+}
 
 #: Which mandatory query maps to which kill category, so an unexecuted query
 #: marks exactly the categories it would have covered as UNSEARCHED.
@@ -66,6 +85,8 @@ class KillAgent(Agent):
         *,
         max_hits_per_query: int = 5,
         executed_queries: tuple[str, ...] = (),
+        research: ResearchProvider | None = None,
+        discovery: DiscoveryLog | None = None,
     ) -> None:
         self.search = search
         self.max_hits = max_hits_per_query
@@ -74,23 +95,44 @@ class KillAgent(Agent):
         # through the research provider -- understating the work that was done
         # is as misleading as overstating it.
         self.executed_queries = tuple(executed_queries)
+        # The SAME live research provider (e.g. AnthropicWebResearchProvider)
+        # used by adversarial discovery and escalation. A live run reported
+        # "no search provider configured" for all 23 mandatory kill queries
+        # even under --live --llm, because this agent only ever knew about the
+        # unrelated, offline `search: SearchProvider` (Tavily/Brave/none) --
+        # never the provider `--live` actually wired up. When `research` is
+        # given and usable it is preferred; `search` remains the fallback for
+        # a run with no live research provider at all (requirement E).
+        self.research = research
+        self.discovery = discovery if discovery is not None else DiscoveryLog()
+        self.queries_skipped_due_to_budget: list[str] = []
 
     def run(self, data: AgentInput) -> AgentOutput:
         out = AgentOutput(agent_id=self.agent_id)
         ticker = data.ticker or "UNKNOWN"
         company_name = data.company_name or ""
+        run_id = data.run_id or ticker
 
-        executed, unexecuted, hits = self._run_searches(ticker, company_name, out)
+        executed, unexecuted, hits = self._run_searches(ticker, company_name, run_id, out)
         unsearched = self._unsearched_categories(unexecuted)
 
         capital = data.channel(Channel.CAPITAL_STRUCTURE)
         runway = capital.payload.get("runway_months") if capital else None
 
+        # Same deterministic resolution Science uses, over the same fact set
+        # this agent already sees -- so both agree on which trial is current
+        # without introducing a new isolation surface (requirement D).
+        resolution = resolve_current_program(list(data.facts))
         gate = evaluate_kill_gate(
             list(data.facts),
             list(data.risk_flags),
             unsearched_categories=unsearched,
             runway_months=runway,
+            current_program_trial_id=(
+                UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
+            ),
+            program_relevance_unresolved=resolution.relevance_unresolved
+            and len(resolution.candidates) > 1,
         )
 
         for assessment in gate.assessments:
@@ -136,7 +178,12 @@ class KillAgent(Agent):
             "major": [str(a.category) for a in gate.major],
             "queries_executed": executed,
             "queries_not_executed": unexecuted,
+            "queries_skipped_due_to_budget": list(self.queries_skipped_due_to_budget),
             "unsearched_categories": [str(c) for c in unsearched],
+            "program_resolved": (
+                UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
+            ),
+            "program_relevance_unresolved": resolution.relevance_unresolved,
             "search_hits": hits,
             "findings": [
                 {
@@ -164,42 +211,127 @@ class KillAgent(Agent):
         return out
 
     def _run_searches(
-        self, ticker: str, company_name: str, out: AgentOutput
+        self, ticker: str, company_name: str, run_id: str, out: AgentOutput
     ) -> tuple[list[str], list[str], list[dict]]:
         executed: list[str] = list(self.executed_queries)
         unexecuted: list[str] = []
         hits: list[dict] = []
         already = {q.lower() for q in self.executed_queries}
+
+        research_usable = False
+        if self.research is not None:
+            research_usable, _ = self.research.available()
+
         for query in kill_queries(ticker, company_name):
             if _covered_by(query, already):
                 executed.append(query)
                 continue
-            response = self.search.search(query, limit=self.max_hits)
-            if not response.executed:
+            if research_usable:
+                ok, query_hits, skipped_for_budget = self._search_via_research(
+                    query, ticker=ticker, run_id=run_id
+                )
+                if skipped_for_budget:
+                    self.queries_skipped_due_to_budget.append(query)
+            else:
+                ok, query_hits = self._search_via_legacy(query)
+            if not ok:
                 unexecuted.append(query)
                 continue
             executed.append(query)
-            for hit in response.hits[: self.max_hits]:
-                tier = classify_tier(hit.url)
-                hits.append(
-                    {
-                        "query": query,
-                        "title": hit.title,
-                        "url": hit.url,
-                        "tier": str(tier),
-                        "snippet": hit.snippet[:400],
-                        "published_date": hit.published_date,
-                    }
-                )
-                if tier in (SourceTier.TIER_4, SourceTier.TIER_5, SourceTier.UNKNOWN):
-                    # Kept for follow-up, never used to establish a kill alone.
-                    continue
+            hits.extend(query_hits)
+
         if unexecuted:
+            reason = (
+                "the LLM token budget was exhausted before every mandatory query could run"
+                if self.queries_skipped_due_to_budget
+                else "no search provider configured"
+            )
             out.errors.append(
-                f"{len(unexecuted)} mandatory kill queries were not executed "
-                "(no search provider configured)"
+                f"{len(unexecuted)} mandatory kill queries were not executed ({reason})"
             )
         return executed, unexecuted, hits
+
+    def _search_via_research(
+        self, query: str, *, ticker: str, run_id: str
+    ) -> tuple[bool, list[dict], bool]:
+        """Execute one mandatory kill query through the live research provider.
+
+        Recorded into ``self.discovery`` with QueryPurpose.BEAR (mandatory
+        kill queries are, by construction, disconfirming/falsification
+        searches) and agent_id="kill_agent" so it stays auditable exactly like
+        adversarial discovery -- never mixed into the Bull agent's context,
+        since Bull's isolation policy never reads BEAR-purpose hits.
+        """
+        assert self.research is not None
+        domain = _domain_for_kill_query(query)
+        research_query = ResearchQuery(
+            query=query,
+            domain=domain,
+            stance="bear",
+            max_results=self.max_hits,
+            rationale="mandatory kill query",
+        )
+        result = self.research.search(research_query, agent_id="kill_agent")
+        record = SearchQueryRecord(
+            query_id=make_query_id("kill_agent", QueryPurpose.BEAR, query, run_id),
+            run_id=run_id,
+            ticker=ticker,
+            agent_id="kill_agent",
+            query_purpose=QueryPurpose.BEAR,
+            query_text=query,
+            results_count=len(result.documents),
+            executed=result.executed,
+            provider=getattr(self.research, "name", "unknown"),
+            rationale=research_query.rationale,
+            outcome=str(result.outcome),
+        )
+        self.discovery.record_query(record)
+        self.discovery.record_hits(
+            hits_from_documents(
+                result.documents, query=record, provider=record.provider, path=result.path
+            )
+        )
+        if not result.executed:
+            skipped_for_budget = str(result.error).startswith("BudgetExceeded")
+            return False, [], skipped_for_budget
+
+        query_hits: list[dict] = []
+        for document in result.documents[: self.max_hits]:
+            query_hits.append(
+                {
+                    "query": query,
+                    "title": document.title,
+                    "url": document.url,
+                    "tier": str(document.tier),
+                    "snippet": (document.text or "")[:400],
+                    "published_date": document.published_date,
+                }
+            )
+        return True, query_hits, False
+
+    def _search_via_legacy(self, query: str) -> tuple[bool, list[dict]]:
+        """Fall back to the offline SearchProvider (Tavily/Brave/none).
+
+        Used only when no live research provider was given, or the one given
+        is unusable -- e.g. a run with no --live at all.
+        """
+        response = self.search.search(query, limit=self.max_hits)
+        if not response.executed:
+            return False, []
+        query_hits: list[dict] = []
+        for hit in response.hits[: self.max_hits]:
+            tier = classify_tier(hit.url)
+            query_hits.append(
+                {
+                    "query": query,
+                    "title": hit.title,
+                    "url": hit.url,
+                    "tier": str(tier),
+                    "snippet": hit.snippet[:400],
+                    "published_date": hit.published_date,
+                }
+            )
+        return True, query_hits
 
     @staticmethod
     def _unsearched_categories(unexecuted: list[str]) -> tuple[KillCategory, ...]:
@@ -212,6 +344,21 @@ class KillAgent(Agent):
                     categories.add(category)
         # Only mandatory categories are reported, to keep the report readable.
         return tuple(sorted(categories & set(MANDATORY_KILL_CATEGORIES), key=lambda c: c.value))
+
+
+def _domain_for_kill_query(query: str) -> ResearchDomain:
+    """Best-effort ResearchDomain for a mandatory kill query's DiscoveryLog row.
+
+    Purely a diagnostics/audit label (which required domain this query's
+    discovery record falls under) -- it plays no role in the kill gate itself,
+    which reads facts and risk flags, not this mapping.
+    """
+    for token, category in QUERY_CATEGORY_MAP.items():
+        if token.lower() in query.lower():
+            domain = _KILL_CATEGORY_TO_RESEARCH_DOMAIN.get(category)
+            if domain is not None:
+                return domain
+    return ResearchDomain.REGULATORY
 
 
 def _covered_by(query: str, executed: set[str]) -> bool:

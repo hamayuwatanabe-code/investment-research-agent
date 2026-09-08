@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from ..schemas.agent_io import RiskFlag
 from ..schemas.enums import (
     MANDATORY_KILL_CATEGORIES,
+    UNKNOWN,
     FactCategory,
     KillCategory,
     KillConfirmation,
@@ -31,6 +32,7 @@ from ..schemas.enums import (
 )
 from ..schemas.evaluation import KillAssessment, KillFinding, KillGateResult
 from ..schemas.fact import Fact
+from .program_resolution import NCT_RE
 
 log = logging.getLogger(__name__)
 
@@ -290,13 +292,30 @@ def evaluate_kill_gate(
     *,
     unsearched_categories: tuple[KillCategory, ...] = (),
     runway_months: float | None = None,
+    current_program_trial_id: str = UNKNOWN,
+    program_relevance_unresolved: bool = False,
 ) -> KillGateResult:
-    """Run every kill rule over the evidence and return per-category assessments."""
+    """Run every kill rule over the evidence and return per-category assessments.
+
+    ``current_program_trial_id`` (from
+    :func:`investment_research.scoring.program_resolution.resolve_current_program`)
+    scopes any per-trial finding: a fact naming a DIFFERENT trial identifier
+    than the resolved current programme cannot, on its own, produce a
+    company-level kill (requirement D) -- a terminated/withdrawn HISTORICAL
+    trial in a different indication is downgraded and never conflated with
+    the programme the thesis actually rests on. When
+    ``program_relevance_unresolved`` is True (the current programme could not
+    be determined at all), every per-trial finding is kept PROVISIONAL and
+    explicitly marked ``PROGRAM_RELEVANCE_UNRESOLVED`` rather than either
+    being trusted or being dropped.
+    """
     findings: dict[KillCategory, list[KillFinding]] = {c: [] for c in KillCategory}
     fact_by_id = {f.fact_id: f for f in facts}
 
     for fact in facts:
         haystack = f"{fact.claim} {fact.value if isinstance(fact.value, str) else ''}"
+        fact_trial_match = NCT_RE.search(fact.claim)
+        fact_trial_id = fact_trial_match.group(1) if fact_trial_match else ""
         for rule in KILL_RULES:
             if not rule.pattern.search(haystack):
                 continue
@@ -311,12 +330,36 @@ def evaluate_kill_gate(
                 if fact.is_decision_grade
                 else KillConfirmation.PROVISIONAL
             )
+            detail_suffix = ""
+            # Programme scoping only applies when the fact itself names a
+            # specific trial -- a prose regulatory statement with no trial
+            # identifier ("FDA does not consider the endpoint appropriate")
+            # is unaffected; there is no other-programme reading of it.
+            if fact_trial_id:
+                if program_relevance_unresolved:
+                    confirmation = KillConfirmation.PROVISIONAL
+                    detail_suffix = (
+                        " [PROGRAM_RELEVANCE_UNRESOLVED -- the current thesis-relevant "
+                        "programme could not be determined from evidence; this finding is "
+                        "kept provisional rather than treated as a company-level kill]"
+                    )
+                elif (
+                    current_program_trial_id != UNKNOWN
+                    and fact_trial_id != current_program_trial_id
+                ):
+                    level = KillLevel.K1
+                    confirmation = KillConfirmation.PROVISIONAL
+                    detail_suffix = (
+                        f" [DIFFERENT PROGRAMME -- {fact_trial_id} is not the resolved current "
+                        f"lead programme ({current_program_trial_id}); a historical or "
+                        "unrelated trial cannot, on its own, produce a company-level kill]"
+                    )
             findings[rule.category].append(
                 KillFinding(
                     category=rule.category,
                     level=level,
                     title=rule.title,
-                    detail=f"{rule.explanation} Evidence: {fact.claim[:400]}",
+                    detail=f"{rule.explanation} Evidence: {fact.claim[:400]}{detail_suffix}",
                     fact_ids=(fact.fact_id,),
                     source_urls=(fact.source_url,),
                     evidence_is_primary=primary,

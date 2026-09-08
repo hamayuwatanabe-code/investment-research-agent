@@ -332,3 +332,47 @@ def test_run_with_no_evidence_is_incomplete_and_makes_no_claims(repo):
     report = render_report(result)
     assert "INCOMPLETE_RESEARCH" in report
     assert "No sources retrieved." in report
+
+
+# --- decision-gate output consistency (requirement G) ------------------------
+def test_no_actionable_label_survives_anywhere_when_blocked_pending_verification(repo):
+    """A live run showed FINAL_ACTION: NONE and a headline that still read
+    "... action WAIT_FOR_EVENT." -- the Blind Judge bakes its internally
+    selected Action into free text before the pipeline learns the run must
+    be blocked, and nulling verdict.action does not retroactively clean that
+    text. This scans the ENTIRE rendered report and JSON export for every
+    Action-enum token, and the only place any may legitimately appear is the
+    report's one fixed sentence that explicitly says an action was NOT
+    issued (which itself names AVOID and WAIT_FOR_EVENT as examples)."""
+    from investment_research.cli import result_to_json
+    from investment_research.collectors.base import CollectionResult
+    from investment_research.schemas.enums import FetchOutcome, ResearchStatus
+    from investment_research.scoring.decision_gate_consistency import find_action_labels
+
+    blocked = CollectionResult(
+        collector="sec_edgar",
+        outcome=FetchOutcome.BLOCKED,
+        errors=["egress policy denied the request"],
+    )
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    result = pipeline.run("NOTHING", "Nothing Corp", [blocked], price=1.0)
+
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert result.verdict.action is None
+
+    report = render_report(result)
+    _NOT_ISSUED_SENTENCE = (
+        "No action label is issued. Not AVOID, not WAIT_FOR_EVENT -- an action label "
+        "asserts a judgement, and there is not enough research here to support one."
+    )
+    assert _NOT_ISSUED_SENTENCE in report
+    sanitized_report = report.replace(_NOT_ISSUED_SENTENCE, "")
+    leaked = find_action_labels(sanitized_report)
+    assert leaked == [], f"actionable label(s) leaked into the rendered report: {leaked}"
+
+    payload = result_to_json(result)
+    assert payload["action"] is None
+    assert find_action_labels(json.dumps(payload)) == [], (
+        "the JSON export has no equivalent 'not issued' disclaimer, so it must never contain "
+        "any Action-enum token at all while BLOCKED_PENDING_VERIFICATION"
+    )

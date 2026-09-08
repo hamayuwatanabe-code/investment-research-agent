@@ -83,8 +83,21 @@ _SERVER_SIDE_WEB_TOOL_PREFIXES = ("web_search", "web_fetch")
 
 #: Conservative flat pad added to the local preflight estimate when a request
 #: declares one of the server-side web tools above. This is a safety buffer,
-#: never a prediction of the real cost -- see BudgetExceeded.
+#: never a prediction of the real cost -- see BudgetExceeded. Calibrated
+#: against a live HIGH-effort run, where a single search consumed 18k+ tokens
+#: -- most of that being the model's own internal reasoning/thinking budget,
+#: which effort controls directly.
 SERVER_TOOL_TOKEN_RESERVE = 20_000
+
+#: The equivalent reserve for a request explicitly running at LOW effort (see
+#: --research-effort). A low-effort call cannot spend a large internal
+#: reasoning budget, so the worst-case a conservative reservation needs to
+#: cover is smaller too. This is what makes a one-query-per-required-domain
+#: discovery core pass (six domains) actually fit inside the discovery
+#: stage's token quota -- at the full high-effort reserve, six queries alone
+#: would need more than double a typical 30%-of-budget discovery quota,
+#: regardless of how the queries are scheduled or ordered.
+SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT = 8_000
 
 #: Default per-stage budget quotas, as a fraction of ``max_total_tokens``.
 #:
@@ -401,21 +414,30 @@ class LLMClient:
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]] | None,
         max_tokens: int,
+        effort: str | None = None,
     ) -> int:
         """Conservative preflight token estimate for one request.
 
         Deliberately not an exact prediction: it is a local chars/4 estimate of
-        the rendered prompt plus the requested output ceiling, padded with
-        ``SERVER_TOOL_TOKEN_RESERVE`` when a server-side web tool is declared,
-        because that tool's real cost is only known once the response's
-        ``usage`` field comes back.
+        the rendered prompt plus the requested output ceiling, padded with a
+        server-tool reserve when a server-side web tool is declared, because
+        that tool's real cost is only known once the response's ``usage``
+        field comes back. The reserve itself is effort-aware
+        (``SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT`` vs ``SERVER_TOOL_TOKEN_RESERVE``):
+        a low-effort call cannot spend a large internal reasoning budget, so
+        the conservative worst case it needs covering is smaller too.
         """
         prompt_chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages)
         reservation = prompt_chars // _CHARS_PER_TOKEN + max_tokens
         if tools and any(
             str(t.get("type", "")).startswith(_SERVER_SIDE_WEB_TOOL_PREFIXES) for t in tools
         ):
-            reservation += SERVER_TOOL_TOKEN_RESERVE
+            effective_effort = effort or self.effort
+            reservation += (
+                SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT
+                if effective_effort == "low"
+                else SERVER_TOOL_TOKEN_RESERVE
+            )
         return reservation
 
     # -- raw ---------------------------------------------------------------
@@ -429,6 +451,7 @@ class LLMClient:
         agent_id: str = "raw",
         tool_choice: dict[str, Any] | None = None,
         reserved_tokens: int | None = None,
+        effort: str | None = None,
     ) -> Any:
         """One Messages API call, with a preflight budget guard and usage accounting.
 
@@ -439,11 +462,16 @@ class LLMClient:
         :meth:`_default_reservation`; a caller with a better estimate of its
         own cost (e.g. a research provider that knows its fetch ceiling)
         should pass ``reserved_tokens`` directly.
+
+        ``effort`` overrides ``self.effort`` for this call only (research
+        discovery/fetch runs at a lower effort than interpretive analysis --
+        see ``--research-effort`` vs ``--llm-effort``); omitting it uses the
+        client's configured default, so every existing caller is unaffected.
         """
         client = self._require()
         if reserved_tokens is None:
             reserved_tokens = self._default_reservation(
-                system=system, messages=messages, tools=tools, max_tokens=max_tokens
+                system=system, messages=messages, tools=tools, max_tokens=max_tokens, effort=effort
             )
         self.budget.check(reserved_tokens)
 
@@ -452,7 +480,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "system": system,
             "messages": list(messages),
-            "output_config": {"effort": self.effort},
+            "output_config": {"effort": effort or self.effort},
         }
         if any(self.model.startswith(prefix) for prefix in _ADAPTIVE_THINKING_MODELS):
             request["thinking"] = {"type": "adaptive"}
@@ -494,6 +522,8 @@ class LLMClient:
         schema: dict[str, Any],
         max_tokens: int = 16000,
         reserved_tokens: int | None = None,
+        max_repair_attempts: int = 2,
+        effort: str | None = None,
     ) -> dict[str, Any]:
         """Call the model and return a schema-validated object.
 
@@ -501,36 +531,83 @@ class LLMClient:
         turns that into a degraded agent run, which the report shows.
         ``reserved_tokens`` is forwarded to :meth:`raw_message`'s preflight
         budget guard; omit it to use the conservative default derivation.
+
+        The tool sent to Anthropic uses a sanitized copy of ``schema`` (see
+        ``as_strict_tool`` / ``to_anthropic_schema``); the response is always
+        validated against the original, full ``schema`` -- local validation
+        is never weakened by what Anthropic's tool-input path will accept.
+
+        A response that fails that local validation is never silently
+        accepted: it is retried, asking the model to repair the specific
+        violation, up to ``max_repair_attempts`` additional times (bounded --
+        default 2, so 3 attempts total), and only raised -- which degrades
+        the agent explicitly -- once every attempt has failed.
         """
         tool = as_strict_tool(tool_name, tool_description, schema)
-        response = self.raw_message(
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[tool],
-            max_tokens=max_tokens,
-            agent_id=agent_id,
-            # `auto` plus an explicit instruction: forced tool_choice is
-            # rejected on some current models, and `auto` is portable.
-            tool_choice={"type": "auto"},
-            reserved_tokens=reserved_tokens,
+        current_prompt = prompt
+        last_error: Exception = SchemaValidationError(
+            f"{agent_id}: structured() called with max_repair_attempts < 0"
         )
 
-        stop_reason = str(getattr(response, "stop_reason", "") or "")
-        if stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            category = getattr(details, "category", None) if details else None
-            raise LLMUnavailable(f"model declined the request (category={category})")
-
-        payload = _first_tool_input(response, tool_name)
-        if payload is None:
-            payload = _json_from_text(response)
-        if payload is None:
-            raise SchemaValidationError(
-                f"{agent_id}: model returned no parseable structured output "
-                f"(stop_reason={stop_reason!r})"
+        for attempt in range(max_repair_attempts + 1):
+            response = self.raw_message(
+                system=system,
+                messages=[{"role": "user", "content": current_prompt}],
+                tools=[tool],
+                max_tokens=max_tokens,
+                agent_id=agent_id,
+                # `auto` plus an explicit instruction: forced tool_choice is
+                # rejected on some current models, and `auto` is portable.
+                tool_choice={"type": "auto"},
+                reserved_tokens=reserved_tokens,
+                effort=effort,
             )
-        validate(payload, schema)
-        return payload
+
+            stop_reason = str(getattr(response, "stop_reason", "") or "")
+            if stop_reason == "refusal":
+                details = getattr(response, "stop_details", None)
+                category = getattr(details, "category", None) if details else None
+                raise LLMUnavailable(f"model declined the request (category={category})")
+
+            payload = _first_tool_input(response, tool_name)
+            if payload is None:
+                payload = _json_from_text(response)
+            if payload is None:
+                last_error = SchemaValidationError(
+                    f"{agent_id}: model returned no parseable structured output "
+                    f"(stop_reason={stop_reason!r})"
+                )
+                current_prompt = _repair_prompt(prompt, str(last_error))
+                continue
+
+            try:
+                validate(payload, schema)
+            except SchemaValidationError as exc:
+                last_error = exc
+                log.warning(
+                    "%s: structured response failed local validation (attempt %d/%d): %s",
+                    agent_id,
+                    attempt + 1,
+                    max_repair_attempts + 1,
+                    exc,
+                )
+                current_prompt = _repair_prompt(prompt, str(exc))
+                continue
+
+            return payload
+
+        # Never silently accept an invalid object: every attempt failed.
+        raise last_error
+
+
+def _repair_prompt(original_prompt: str, error: str) -> str:
+    return (
+        f"{original_prompt}\n\n"
+        "Your previous response to this exact request did not match the required "
+        f"schema: {error}\n"
+        "Resubmit a corrected call to the same tool that fixes exactly this problem. "
+        "Do not change anything else about your answer."
+    )
 
 
 def _first_tool_input(response: Any, tool_name: str) -> dict[str, Any] | None:

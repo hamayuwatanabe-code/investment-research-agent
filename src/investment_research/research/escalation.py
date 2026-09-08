@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from ..collectors.documents import Document
+from ..collectors.documents import Document, split_sentences
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
@@ -34,7 +34,7 @@ from ..schemas.enums import (
     SourceTier,
     VerifiedStatus,
 )
-from ..schemas.fact import Fact
+from ..schemas.fact import Fact, Source, UnresolvedQuestion, make_fact_id, make_source_id
 from .provider import ResearchProvider, ResearchQuery
 
 log = logging.getLogger(__name__)
@@ -127,35 +127,110 @@ def needs_escalation(fact: Fact) -> tuple[bool, str]:
 _PRIMARY_DOC_TYPES = frozenset({"filing", "registry", "regulator", "docket"})
 
 
-def _confirms(document: Document, fact: Fact) -> bool:
-    """Whether a candidate primary document actually supports the claim.
+def _distinctive_terms(text: str) -> set[str]:
+    return {term for term in re.split(r"[^a-z0-9]+", text.lower()) if len(term) > 5}
 
-    Two independent bars, both required:
 
-    1. **The document must be able to confirm this.** A company press release is
-       not a primary source for what a regulator said -- it is the company's
-       account of it, which is the exact conflation this system exists to stop.
-       Company-controlled material qualifies only when it is a statutory filing,
-       which carries liability that a release does not.
-    2. **It must actually say the same thing.** Overlapping distinctive terms,
-       not merely being about the same company: a 10-K that mentions the FDA
-       does not confirm a specific statement about what the FDA said.
+def _is_admissible_primary_document(document: Document) -> bool:
+    """Whether a fetched document is even eligible to settle a claim/question.
+
+    A company press release is not a primary source for what a regulator
+    said -- it is the company's account of it, which is the exact conflation
+    this system exists to stop. Company-controlled material qualifies only
+    when it is a statutory filing (or an exhibit/attachment to one), which
+    carries liability that a release does not. And only a FETCHED body
+    counts: a search engine's summary about a filing is not the filing.
     """
     if not document.tier.is_primary:
         return False
     if document.is_company_ir and document.doc_type not in _PRIMARY_DOC_TYPES:
         return False
-    if not document.content_kind.is_primary_text:
-        # A search engine's summary about a filing is not the filing.
+    return document.content_kind.is_primary_text
+
+
+def _confirms(document: Document, fact: Fact) -> bool:
+    """Whether a candidate primary document actually supports the claim.
+
+    Two independent bars, both required:
+
+    1. **The document must be able to confirm this** -- see
+       ``_is_admissible_primary_document``.
+    2. **It must actually say the same thing.** Overlapping distinctive terms,
+       not merely being about the same company: a 10-K that mentions the FDA
+       does not confirm a specific statement about what the FDA said.
+    """
+    if not _is_admissible_primary_document(document):
         return False
     haystack = f"{document.title} {document.text}".lower()
     if not haystack.strip():
         return False
-    terms = {term for term in re.split(r"[^a-z0-9]+", fact.claim.lower()) if len(term) > 5}
+    terms = _distinctive_terms(fact.claim)
     if not terms:
         return False
     overlap = sum(1 for term in terms if term in haystack)
     return overlap >= max(3, len(terms) // 4)
+
+
+def _extract_answering_sentence(document: Document, question: UnresolvedQuestion) -> str | None:
+    """The sentence in a fetched body that actually answers this question.
+
+    Positive, negative and contradictory answers are treated symmetrically:
+    this only checks whether the body actually *addresses* the question
+    (shares enough of its distinctive vocabulary), never which direction the
+    answer points. A body that merely mentions the general topic without
+    engaging the specific question does not count -- and only verbatim text
+    from the fetched body is ever returned, never a paraphrase.
+    """
+    if not _is_admissible_primary_document(document):
+        return None
+    terms = _distinctive_terms(f"{question.question} {question.why_it_matters}")
+    if not terms:
+        return None
+    threshold = max(3, len(terms) // 3)
+    best_sentence: str | None = None
+    best_overlap = 0
+    for sentence in split_sentences(document.text):
+        overlap = sum(1 for term in terms if term in sentence.lower())
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_sentence = sentence
+    if best_sentence is not None and best_overlap >= threshold:
+        return best_sentence
+    return None
+
+
+def _rank_candidates_for_question(
+    question: UnresolvedQuestion, sources: Sequence[Source], facts: Sequence[Fact]
+) -> list[Source]:
+    """Order already-collected primary sources by relevance to ``question``.
+
+    Two signals, either sufficient to rank a source ahead of an unranked one:
+    1. The source backs at least one collected fact in the SAME category as
+       the question (e.g. a REGULATORY question and a REGULATORY fact whose
+       ``source_url`` matches) -- the strongest available signal, since it
+       means the collector filed this source under the same topic.
+    2. The source's own title shares distinctive vocabulary with the
+       question -- catches a source not yet backing any fact (or backing one
+       in a different category) whose listing itself names the topic (e.g.
+       "Form 8-K, Regulatory Update").
+
+    Ties keep their original relative order (a stable sort), so this never
+    reorders otherwise-equal candidates arbitrarily.
+    """
+    same_category_urls = {
+        f.source_url for f in facts if f.category == question.category and f.source_url
+    }
+    question_terms = _distinctive_terms(f"{question.question} {question.why_it_matters}")
+
+    def _score(source: Source) -> int:
+        score = 0
+        if source.url in same_category_urls:
+            score += 2
+        if question_terms and _distinctive_terms(source.title) & question_terms:
+            score += 1
+        return score
+
+    return sorted(sources, key=_score, reverse=True)
 
 
 def _plausible_primary_candidate(document: Document, domain: str) -> bool:
@@ -311,6 +386,188 @@ def escalate(
         report.attempts.append(attempt)
 
     return updated, report
+
+
+def escalate_unresolved_questions(
+    questions: Sequence[UnresolvedQuestion],
+    sources: Sequence[Source],
+    provider: ResearchProvider,
+    *,
+    company: str,
+    ticker: str = UNKNOWN,
+    run_id: str = UNKNOWN,
+    facts: Sequence[Fact] = (),
+    max_questions: int = 6,
+    max_candidates_per_question: int = 3,
+) -> tuple[list[Fact], EscalationReport]:
+    """Attempt primary-source confirmation for MATERIAL/CRITICAL unresolved
+    questions (requirement C) -- escalation is not limited to weak facts.
+
+    A live run had a material unresolved question (regulator endpoint
+    acceptability) and reported "no material claim required escalation",
+    because the existing :func:`escalate` only ever looks at ``Fact`` objects.
+    A ``blocking`` :class:`UnresolvedQuestion` is this system's existing
+    "material/critical" marker (the Decision-Grade Evidence Gate already reads
+    it that way), so that is what drives this pass.
+
+    Already-collected Tier 1/2 sources are tried BEFORE issuing any new
+    search -- a filing the SEC/ClinicalTrials/FDA collectors already found is
+    fetched directly rather than forcing a redundant web search for something
+    already in hand. A source's own body is fetched (not merely its listing),
+    so a filing's exhibits/attachments are reachable the same way a filing
+    itself is: whatever URL is in ``sources``.
+
+    Only a FETCHED body can create decision-grade evidence: a body that does
+    not actually address the question (see ``_extract_answering_sentence``)
+    leaves the question unresolved, and a search hit alone is never promoted
+    to a fact.
+    """
+    report = EscalationReport()
+    new_facts: list[Fact] = []
+    usable, reason = provider.available()
+    material = [q for q in questions if q.blocking][:max_questions]
+    primary_sources = [s for s in sources if s.tier.is_primary]
+
+    for question in material:
+        attempt = EscalationAttempt(
+            fact_id="",
+            claim=question.question[:300],
+            reason="unresolved_material_question",
+        )
+        if not usable:
+            attempt.note = reason
+            report.attempts.append(attempt)
+            continue
+
+        answer: str | None = None
+        answering_document: Document | None = None
+
+        # 1. Already-collected Tier 1/2 sources first (requirement C: don't
+        #    force a redundant search when a plausible primary source, e.g. a
+        #    filing the SEC collector already found, is already in hand).
+        #    Ranked by topical relevance to THIS question -- a source behind a
+        #    fact in the same category, or whose own title overlaps the
+        #    question's vocabulary, is tried before an unrelated one, so the
+        #    per-question fetch cap is spent on the most plausible candidate
+        #    first rather than whatever happened to be collected first.
+        ranked_candidates = _rank_candidates_for_question(question, primary_sources, facts)
+        for source in ranked_candidates[:max_candidates_per_question]:
+            report.fetches_attempted += 1
+            try:
+                fetched = provider.fetch(
+                    source.url,
+                    reason=f"resolve unresolved question: {question.question[:120]}",
+                )
+            except Exception as exc:  # noqa: BLE001 - a fetch failure never resolves
+                log.warning("escalation (question) fetch failed for %s: %s", source.url, exc)
+                fetched = None
+            if fetched is None:
+                report.fetches_failed += 1
+                continue
+            sentence = _extract_answering_sentence(fetched, question)
+            if sentence is not None:
+                answer, answering_document = sentence, fetched
+                break
+
+        # 2. Only search when nothing already collected answered it.
+        if answer is None:
+            attempt.searched = True
+            for domain in PRIMARY_DOMAINS[:2]:
+                query = ResearchQuery(
+                    query=f"{company} {_key_terms(question.question)}",
+                    domain=ResearchDomain.REGULATORY,
+                    stance="verify",
+                    allowed_domains=(domain,),
+                    rationale=f"resolve unresolved question: {question.question[:120]}",
+                )
+                attempt.queries.append(f"{query.query} site:{domain}")
+                result = provider.search(query, agent_id="escalation_question")
+                if not result.executed:
+                    continue
+                candidate_urls = [
+                    document.url
+                    for document in result.documents
+                    if _plausible_primary_candidate(document, domain)
+                ]
+                for url in candidate_urls[:max_candidates_per_question]:
+                    report.fetches_attempted += 1
+                    try:
+                        fetched = provider.fetch(
+                            url, reason=f"resolve unresolved question: {question.question[:120]}"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("escalation (question) fetch failed for %s: %s", url, exc)
+                        fetched = None
+                    if fetched is None:
+                        report.fetches_failed += 1
+                        continue
+                    sentence = _extract_answering_sentence(fetched, question)
+                    if sentence is not None:
+                        answer, answering_document = sentence, fetched
+                        break
+                if answer is not None:
+                    break
+
+        if answer is not None and answering_document is not None:
+            attempt.confirmed = True
+            attempt.confirming_url = answering_document.url
+            attempt.confirming_tier = str(answering_document.tier)
+            new_facts.append(
+                _fact_from_answered_question(
+                    answer, answering_document, question, ticker=ticker, run_id=run_id
+                )
+            )
+        else:
+            attempt.note = (
+                "unresolved material question; primary-source confirmation attempted and the "
+                "fetched body(ies) did not address it"
+            )
+        report.attempts.append(attempt)
+
+    return new_facts, report
+
+
+def _fact_from_answered_question(
+    answer: str,
+    document: Document,
+    question: UnresolvedQuestion,
+    *,
+    ticker: str,
+    run_id: str,
+) -> Fact:
+    """Build a decision-grade Fact from a fetched body that answered a
+    material unresolved question. Verbatim text only -- never a paraphrase."""
+    evidence_class = (
+        EvidenceClass.COMPANY_CLAIM
+        if document.is_company_ir
+        else EvidenceClass.INDEPENDENT_EVIDENCE
+    )
+    event_date = document.published_date
+    return Fact(
+        fact_id=make_fact_id(ticker, question.category, answer, document.url, event_date),
+        ticker=ticker,
+        category=question.category,
+        claim=answer,
+        evidence_class=evidence_class,
+        source_id=make_source_id(document.url, document.title),
+        source_url=document.url,
+        source_title=document.title,
+        source_tier=document.tier,
+        publication_date=document.published_date,
+        event_date=event_date,
+        verified_status=VerifiedStatus.VERIFIED,
+        confidence=0.75,
+        company_claim=document.is_company_ir,
+        materiality=Materiality.CRITICAL,
+        provenance=document.provenance,
+        run_id=run_id,
+        notes=(
+            "escalated from a material unresolved question via a fetched primary-source body: "
+            f"{question.question[:200]}"
+        ),
+        content_kind=ContentKind.FULL_DOCUMENT,
+        independent_confirmation=True,
+    )
 
 
 def _key_terms(claim: str, limit: int = 10) -> str:

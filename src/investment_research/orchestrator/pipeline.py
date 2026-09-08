@@ -44,7 +44,8 @@ from ..collectors.search import SearchProvider
 from ..llm.client import LLMBudget, LLMClient
 from ..reporting.traceability import TraceabilityIndex, build_index
 from ..research.adversarial import AdversarialOutcome
-from ..research.escalation import EscalationReport, escalate
+from ..research.discovery import DiscoveryLog
+from ..research.escalation import EscalationReport, escalate, escalate_unresolved_questions
 from ..research.provider import NullResearchProvider, ResearchProvider
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
@@ -58,6 +59,7 @@ from ..schemas.enums import (
 from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
 from ..schemas.validation import QuarantinedSource
 from ..scoring.completeness import CompletenessResult, assess_completeness
+from ..scoring.decision_gate_consistency import blocked_headline, scrub_action_labels
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
 from ..scoring.scenarios import build_scenarios
@@ -583,6 +585,38 @@ class Pipeline:
                 result.llm_agents_used.append(deterministic.agent_id)
         checkpoint("domain")
 
+        # ---- Stage 3b: unresolved-question-driven escalation (requirement C) --
+        # The Stage 2b escalation pass above only ever looks at Fact objects.
+        # A material unresolved question (e.g. "is the primary endpoint
+        # acceptable to the regulator?") is only raised by a domain agent
+        # HERE, in Stage 3 -- so it could never have been escalated earlier.
+        # Same "escalation" budget stage/quota as Stage 2b; this reuses
+        # whatever of it remains, it does not get a second allowance.
+        if self.llm is not None:
+            self.llm.budget.set_stage("escalation")
+        usable_research_now, _ = self.research.available()
+        new_facts: list = []
+        if usable_research_now and bus.unresolved:
+            new_facts, question_escalation = escalate_unresolved_questions(
+                bus.unresolved, bus.sources, self.research, company=company_name,
+                ticker=ctx.ticker, run_id=ctx.run_id, facts=verified_facts,
+            )
+            if new_facts:
+                verified_facts = [*verified_facts, *new_facts]
+                bus.add_facts(new_facts)
+                for fact in new_facts:
+                    with contextlib.suppress(Exception):
+                        self.repo.save_fact(fact)
+            if result.escalation is not None:
+                result.escalation.attempts.extend(question_escalation.attempts)
+                result.escalation.fetches_attempted += question_escalation.fetches_attempted
+                result.escalation.fetches_failed += question_escalation.fetches_failed
+            else:
+                result.escalation = question_escalation
+            if question_escalation.attempts:
+                self.repo.save_escalations(ctx.run_id, question_escalation.attempts)
+        checkpoint("escalate_unresolved", {"new_facts": len(new_facts)})
+
         # ---- Stage 4: contradictions ------------------------------------
         contradiction_output = self._run_agent(
             self._agent_for("contradiction", ContradictionAgent(), LLMContradictionAgent, bus),
@@ -609,9 +643,24 @@ class Pipeline:
             )
             if r.executed
         )
+        # The live research provider (e.g. AnthropicWebResearchProvider under
+        # --live) is passed through so the Kill Agent's mandatory searches
+        # actually execute against it, instead of the unrelated offline
+        # SearchProvider (Tavily/Brave/none) it used to be limited to
+        # (requirement E). Both KillAgent instances below share one
+        # DiscoveryLog -- the same one adversarial discovery already writes to
+        # when it ran -- so mandatory-kill-query records land in the same
+        # auditable, purpose-tagged store rather than a second, disconnected
+        # one; exactly one of the two instances ever actually searches.
+        kill_discovery = self.adversarial.discovery if self.adversarial is not None else DiscoveryLog()
         llm_kill = self._agent_for(
             "kill_agent",
-            KillAgent(self.search, executed_queries=executed_queries),
+            KillAgent(
+                self.search,
+                executed_queries=executed_queries,
+                research=self.research,
+                discovery=kill_discovery,
+            ),
             LLMKillAgent,
             bus,
         )
@@ -621,7 +670,12 @@ class Pipeline:
         if kill_output.metrics.get("llm_backed"):
             result.llm_agents_used.append("kill_agent")
             deterministic_kill = self._run_agent(
-                KillAgent(self.search, executed_queries=executed_queries),
+                KillAgent(
+                    self.search,
+                    executed_queries=executed_queries,
+                    research=self.research,
+                    discovery=kill_discovery,
+                ),
                 guard,
                 result,
                 params=params,
@@ -631,6 +685,15 @@ class Pipeline:
         else:
             gate = _gate_from_output(kill_output)
         self.repo.save_kill_gate(ctx.run_id, ctx.ticker, gate)
+        if kill_discovery.queries:
+            self.repo.save_discovery_log(kill_discovery)
+            if result.adversarial is None:
+                # No adversarial pass ran this time (e.g. --adversarial was not
+                # passed), but the Kill Agent's own mandatory queries still
+                # produced an auditable discovery log -- surface it the same
+                # way regardless, rather than only when adversarial happened
+                # to run too.
+                result.adversarial = AdversarialOutcome(discovery=kill_discovery)
 
         # ---- Stage 6: bear and bull, mutually blind ----------------------
         # Order matters only for reproducibility; neither can see the other.
@@ -884,6 +947,22 @@ class Pipeline:
                     "RESEARCH_STATUS: BLOCKED_PENDING_VERIFICATION -- FINAL_ACTION: NONE -- "
                     + " | ".join(blocking_reasons),
                 )
+                # Requirement G: nulling .action is not enough -- the Blind
+                # Judge (deterministic or LLM-backed) already baked its
+                # internally selected Action into free text (e.g. a headline
+                # reading "... action WAIT_FOR_EVENT.") before this was known.
+                # No output surface -- headline, reasoning, thesis breakers,
+                # red flags, caveats, the report, the JSON export -- may carry
+                # an actionable label once BLOCKED_PENDING_VERIFICATION holds.
+                verdict.headline = blocked_headline(blocking_reasons)
+                verdict.reasoning = tuple(scrub_action_labels(r) for r in verdict.reasoning)
+                verdict.thesis_breakers = tuple(
+                    scrub_action_labels(b) for b in verdict.thesis_breakers
+                )
+                verdict.critical_red_flags = tuple(
+                    scrub_action_labels(f) for f in verdict.critical_red_flags
+                )
+                verdict.caveats = tuple(scrub_action_labels(c) for c in verdict.caveats)
             elif result.failures or ctx.status != RunStatus.COMPLETE:
                 verdict.research_status = ResearchStatus.INCOMPLETE
             else:

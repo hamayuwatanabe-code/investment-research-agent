@@ -25,6 +25,7 @@ from ..orchestrator.isolation import Channel
 from ..schemas.agent_io import AgentInput, AgentOutput, RiskFlag
 from ..schemas.enums import UNKNOWN, FactCategory, Materiality
 from ..schemas.fact import Fact, UnresolvedQuestion
+from ..scoring.program_resolution import resolve_current_program
 from .base import Agent
 
 log = logging.getLogger(__name__)
@@ -82,11 +83,38 @@ class ScienceAgent(Agent):
 
         payload: dict[str, Any] = {"mode": mode}
         if mode == "biotech":
-            payload.update(self._assess_trial(clinical, out))
+            resolution = resolve_current_program(list(data.facts))
+            programme_facts = clinical
+            if not resolution.relevance_unresolved and resolution.trial_id != UNKNOWN:
+                scoped = tuple(f for f in clinical if resolution.trial_id in f.claim)
+                if scoped:
+                    programme_facts = scoped
+            elif resolution.relevance_unresolved and len(resolution.candidates) > 1:
+                # Requirement D: never silently pick a programme when the
+                # evidence does not resolve one -- surface it as a named,
+                # non-blocking unresolved question rather than defaulting to
+                # "first trial encountered".
+                out.unresolved.append(
+                    UnresolvedQuestion(
+                        question=(
+                            "PROGRAM_RELEVANCE_UNRESOLVED: which of "
+                            f"{len(resolution.candidates)} clinical programmes in evidence "
+                            "is the current, thesis-relevant one?"
+                        ),
+                        why_it_matters=resolution.rationale,
+                        category=FactCategory.CLINICAL,
+                        raised_by=self.agent_id,
+                    )
+                )
+            payload.update(self._assess_trial(programme_facts, out))
+            payload["program_resolved"] = resolution.trial_id
+            payload["program_relevance_unresolved"] = resolution.relevance_unresolved
+            payload["program_resolution_rationale"] = resolution.rationale
         else:
             payload.update(self._assess_technology(technology, out))
 
         summary = f"Mode {mode}. " + (
+            f"Programme evaluated: {payload.get('program_resolved', UNKNOWN)}. "
             f"Primary endpoint type: {payload.get('endpoint_type', UNKNOWN)}; "
             f"design: {payload.get('design_summary', UNKNOWN)}; "
             f"design quality {payload.get('design_quality_score', UNKNOWN)}/10."

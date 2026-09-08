@@ -7,6 +7,8 @@ import pytest
 from investment_research.llm.client import (
     DEFAULT_MODEL,
     DEFAULT_STAGE_QUOTAS,
+    SERVER_TOOL_TOKEN_RESERVE,
+    SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT,
     BudgetExceeded,
     LLMBudget,
     LLMCallRecord,
@@ -15,7 +17,13 @@ from investment_research.llm.client import (
     _first_tool_input,
     _json_from_text,
 )
-from investment_research.llm.schema import SchemaValidationError, as_strict_tool, validate
+from investment_research.llm.schema import (
+    ANTHROPIC_UNSUPPORTED_KEYWORDS,
+    SchemaValidationError,
+    as_strict_tool,
+    to_anthropic_schema,
+    validate,
+)
 
 SCHEMA = {
     "type": "object",
@@ -74,7 +82,168 @@ def test_strict_tool_shape():
     tool = as_strict_tool("submit", "desc", SCHEMA)
     assert tool["strict"] is True
     assert tool["name"] == "submit"
-    assert tool["input_schema"] is SCHEMA
+    # The wire schema is a sanitized COPY -- never the original object -- so
+    # the caller's schema is never mutated by what gets sent to Anthropic.
+    assert tool["input_schema"] is not SCHEMA
+    assert "minimum" not in tool["input_schema"]["properties"]["score"]
+
+
+# --- Anthropic schema sanitization (requirement A) --------------------------
+def test_to_anthropic_schema_strips_min_max_items_and_bounds_recursively():
+    cleaned = to_anthropic_schema(SCHEMA)
+
+    assert "minimum" not in cleaned["properties"]["score"]
+    assert "maximum" not in cleaned["properties"]["score"]
+    assert "minimum" not in cleaned["properties"]["count"]
+    assert "maxItems" not in cleaned["properties"]["findings"]
+    # Nested object/array structure survives the strip.
+    assert cleaned["properties"]["findings"]["type"] == "array"
+    assert cleaned["properties"]["findings"]["items"]["type"] == "object"
+    assert cleaned["properties"]["findings"]["items"]["required"] == ["text"]
+
+
+def test_to_anthropic_schema_preserves_type_enum_required_properties():
+    cleaned = to_anthropic_schema(SCHEMA)
+    assert cleaned["type"] == "object"
+    assert cleaned["required"] == ["position", "findings"]
+    assert cleaned["additionalProperties"] is False
+    assert cleaned["properties"]["position"]["enum"] == ["AGREED", "REJECTED", "UNKNOWN"]
+    assert cleaned["properties"]["count"]["type"] == "integer"
+    assert cleaned["properties"]["findings"]["items"]["properties"]["text"]["maxLength"] == 20
+
+
+def test_to_anthropic_schema_leaves_no_unsupported_keyword_anywhere():
+    def _walk(node):
+        if isinstance(node, dict):
+            for key in node:
+                assert key not in ANTHROPIC_UNSUPPORTED_KEYWORDS, f"{key!r} leaked through"
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(to_anthropic_schema(SCHEMA))
+
+
+def test_to_anthropic_schema_does_not_mutate_the_original():
+    import copy
+
+    original = copy.deepcopy(SCHEMA)
+    to_anthropic_schema(SCHEMA)
+    assert original == SCHEMA
+
+
+def test_local_validation_still_enforces_stripped_keywords():
+    """The wire schema drops minimum/maximum/maxItems, but validate() -- run
+    against the ORIGINAL schema -- must still catch a violation of them.
+    Local validation is never weakened by what Anthropic will accept."""
+    as_strict_tool("submit", "desc", SCHEMA)  # exercises the sanitized copy
+    with pytest.raises(SchemaValidationError, match="above maximum"):
+        validate({"position": "AGREED", "score": 999, "findings": []}, SCHEMA)
+    with pytest.raises(SchemaValidationError, match="exceeds maxItems"):
+        validate({"position": "AGREED", "findings": [{"text": "a"}] * 5}, SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "schema_fragment",
+    [
+        {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        {"type": "array", "maxItems": 5, "items": {"type": "string"}},
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "maximum": 100},
+        {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    ],
+)
+def test_to_anthropic_schema_handles_each_unsupported_keyword_in_isolation(schema_fragment):
+    cleaned = to_anthropic_schema(schema_fragment)
+    for keyword in ANTHROPIC_UNSUPPORTED_KEYWORDS:
+        assert keyword not in cleaned
+
+
+def test_to_anthropic_schema_handles_deeply_nested_arrays_of_objects():
+    schema = {
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "scores": {
+                            "type": "array",
+                            "maxItems": 3,
+                            "items": {"type": "number", "minimum": 0, "maximum": 10},
+                        }
+                    },
+                },
+            }
+        },
+    }
+    cleaned = to_anthropic_schema(schema)
+    scores_schema = cleaned["properties"]["groups"]["items"]["properties"]["scores"]
+    assert "maxItems" not in cleaned["properties"]["groups"]
+    assert "minItems" not in cleaned["properties"]["groups"]
+    assert "maxItems" not in scores_schema
+    assert "minimum" not in scores_schema["items"]
+    assert "maximum" not in scores_schema["items"]
+    assert scores_schema["items"]["type"] == "number"
+
+
+def test_every_production_llm_agent_schema_converts_cleanly():
+    """Every one of the eight LLM-backed agents' schemas must produce an
+    Anthropic-safe input_schema with none of the unsupported keywords left,
+    anywhere in the structure."""
+    from investment_research.agents.llm_agents import (
+        LLMCompetitiveAgent,
+        LLMContradictionAgent,
+        LLMRegulatoryAgent,
+        LLMScienceAgent,
+    )
+    from investment_research.agents.llm_agents2 import (
+        LLMBearAgent,
+        LLMBlindJudgeAgent,
+        LLMBullAgent,
+        LLMKillAgent,
+    )
+
+    def _has_unsupported(node) -> bool:
+        if isinstance(node, dict):
+            if any(key in ANTHROPIC_UNSUPPORTED_KEYWORDS for key in node):
+                return True
+            return any(_has_unsupported(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_has_unsupported(item) for item in node)
+        return False
+
+    agent_classes = [
+        LLMRegulatoryAgent,
+        LLMScienceAgent,
+        LLMCompetitiveAgent,
+        LLMContradictionAgent,
+        LLMKillAgent,
+        LLMBearAgent,
+        LLMBullAgent,
+        LLMBlindJudgeAgent,
+    ]
+    for agent_cls in agent_classes:
+        schema = agent_cls.schema
+        # The real production schema must itself use at least one of the
+        # keywords being tested, or this assertion proves nothing.
+        tool = as_strict_tool(agent_cls.tool_name, agent_cls.tool_description, schema)
+        assert not _has_unsupported(tool["input_schema"]), (
+            f"{agent_cls.__name__}.schema still has an Anthropic-unsupported "
+            "keyword in its wire schema"
+        )
+        # This test is only meaningful if the original (pre-sanitization)
+        # schema actually exercises the fix -- i.e. it really does contain at
+        # least one Anthropic-unsupported keyword somewhere in its structure.
+        assert _has_unsupported(schema), (
+            f"{agent_cls.__name__}.schema does not use any Anthropic-unsupported "
+            "keyword, so this test would pass trivially even without the fix"
+        )
 
 
 # --- default model -----------------------------------------------------------
@@ -266,4 +435,49 @@ def test_llm_call_record_is_stamped_with_the_active_stage():
     record = LLMCallRecord("escalation", "m", input_tokens=10, output_tokens=5)
     budget.record(record)
     assert record.stage == "escalation"
-    assert budget.calls[0].stage == "escalation"
+
+
+# --- effort-aware server-tool reservation (requirement F) -------------------
+_SEARCH_TOOL = [{"type": "web_search_20260318", "name": "web_search", "max_uses": 5}]
+
+
+def test_low_effort_server_tool_reservation_is_smaller_than_the_default():
+    """A low-effort discovery call cannot spend a large internal reasoning
+    budget, so its conservative preflight reserve is smaller too -- this is
+    what lets a one-query-per-required-domain core pass (six domains) fit a
+    30%-of-budget discovery stage quota."""
+    client = LLMClient(api_key="sk-ant-test", effort="high")
+    low = client._default_reservation(
+        system="s", messages=[{"role": "user", "content": "q"}], tools=_SEARCH_TOOL,
+        max_tokens=1024, effort="low",
+    )
+    high = client._default_reservation(
+        system="s", messages=[{"role": "user", "content": "q"}], tools=_SEARCH_TOOL,
+        max_tokens=1024, effort="high",
+    )
+    assert low < high
+    assert low - (len("s") // 4 + 1024) == SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT
+    assert high - (len("s") // 4 + 1024) == SERVER_TOOL_TOKEN_RESERVE
+
+
+def test_six_domain_core_pass_reservations_fit_the_default_discovery_quota():
+    """Six required-domain core search calls, each at the low-effort reserve,
+    must fit inside the default discovery stage quota (30% of a 200000-token
+    budget) -- the arithmetic requirement F actually needs to hold."""
+    client = LLMClient(api_key="sk-ant-test")
+    per_call = client._default_reservation(
+        system="s", messages=[{"role": "user", "content": "q"}], tools=_SEARCH_TOOL,
+        max_tokens=1024, effort="low",
+    )
+    discovery_quota = int(200_000 * DEFAULT_STAGE_QUOTAS["discovery"])
+    assert per_call * 6 <= discovery_quota
+
+
+def test_omitting_effort_falls_back_to_the_clients_own_configured_effort():
+    """A caller that never overrides effort (every interpretive agent) is
+    unaffected -- reservation uses the client's own --llm-effort as before."""
+    client = LLMClient(api_key="sk-ant-test", effort="low")
+    reservation = client._default_reservation(
+        system="s", messages=[{"role": "user", "content": "q"}], tools=_SEARCH_TOOL, max_tokens=1024
+    )
+    assert reservation - (len("s") // 4 + 1024) == SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT

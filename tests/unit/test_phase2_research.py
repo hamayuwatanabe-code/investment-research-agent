@@ -31,7 +31,11 @@ from investment_research.research.anthropic_web import (
     tool_types_for,
 )
 from investment_research.research.corpus import CorpusResearchProvider
-from investment_research.research.escalation import escalate, needs_escalation
+from investment_research.research.escalation import (
+    escalate,
+    escalate_unresolved_questions,
+    needs_escalation,
+)
 from investment_research.research.provider import (
     CompositeResearchProvider,
     NullResearchProvider,
@@ -40,6 +44,7 @@ from investment_research.research.provider import (
 )
 from investment_research.schemas.enums import (
     ContentKind,
+    FactCategory,
     FetchOutcome,
     Provenance,
     ResearchDomain,
@@ -47,6 +52,7 @@ from investment_research.schemas.enums import (
     SourceTier,
     VerifiedStatus,
 )
+from investment_research.schemas.fact import Source, UnresolvedQuestion, make_source_id
 from tests.conftest import make_fact
 
 
@@ -203,12 +209,13 @@ class _FakeLLM:
     def available(self):
         return True, "ready"
 
-    def raw_message(self, *, system, messages, tools=None, max_tokens=16000, **_kw):
+    def raw_message(self, *, system, messages, tools=None, max_tokens=16000, effort=None, **_kw):
         self.last_request = {
             "system": system,
             "messages": messages,
             "tools": tools,
             "max_tokens": max_tokens,
+            "effort": effort,
         }
         if self._raises is not None:
             raise self._raises
@@ -340,6 +347,103 @@ def test_search_output_ceiling_is_reduced_for_discovery():
     provider = AnthropicWebResearchProvider(llm)
     provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
     assert llm.last_request["max_tokens"] == SEARCH_MAX_TOKENS
+
+
+# --- research effort decoupled from interpretive (--llm-effort) effort ------
+def test_research_provider_defaults_to_low_effort_search_and_fetch():
+    """The provider must not inherit whatever the client's own .effort is
+    (that governs the interpretive agents via --llm-effort) -- it has its own
+    independently-controlled research_effort, defaulting to low."""
+    llm = _FakeLLM("claude-sonnet-5", {"content": []})
+    provider = AnthropicWebResearchProvider(llm)
+    assert provider.research_effort == "low"
+
+    provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+    assert llm.last_request["effort"] == "low"
+
+    llm2 = _FakeLLM(
+        "claude-sonnet-5",
+        types_namespace_fetch_response(),
+    )
+    provider2 = AnthropicWebResearchProvider(llm2)
+    provider2.fetch("https://www.sec.gov/x", reason="verify")
+    assert llm2.last_request["effort"] == "low"
+
+
+def test_research_provider_uses_explicit_research_effort_not_client_effort():
+    """Even when the shared client's own .effort is 'high' (--llm-effort high,
+    used by the interpretive agents), --research-effort controls discovery
+    independently: a client configured for high-effort interpretation must not
+    silently make discovery high-effort too."""
+    llm = _FakeLLM("claude-sonnet-5", {"content": []})
+    llm.effort = "high"  # what --llm-effort high would set on the shared client
+    provider = AnthropicWebResearchProvider(llm, research_effort="low")
+
+    provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+    assert llm.last_request["effort"] == "low", (
+        "discovery must use --research-effort, never leak the client's --llm-effort"
+    )
+
+
+def types_namespace_fetch_response():
+    import types
+
+    return types.SimpleNamespace(
+        content=[
+            types.SimpleNamespace(
+                type="web_fetch_tool_result",
+                content={
+                    "content": {"source": {"data": "text"}, "title": "t"},
+                    "retrieved_at": "2026-09-08T00:00:00+00:00",
+                },
+            )
+        ]
+    )
+
+
+def test_follow_up_generation_uses_research_effort():
+    """Follow-up query proposal is discovery work, not interpretation -- it
+    must honor --research-effort, not the client's configured --llm-effort."""
+    from investment_research.research.adversarial import _generate_follow_ups
+
+    class _EffortCapturingLLM:
+        def __init__(self):
+            self.structured_kwargs: dict | None = None
+
+        def available(self):
+            return True, "ready"
+
+        def structured(self, **kwargs):
+            self.structured_kwargs = kwargs
+            return {"queries": []}
+
+    outcome = AdversarialOutcomeForTest()
+    llm = _EffortCapturingLLM()
+    _generate_follow_ups(llm, outcome, limit=5, research_effort="low")
+    assert llm.structured_kwargs is not None
+    assert llm.structured_kwargs["effort"] == "low"
+
+
+class AdversarialOutcomeForTest:
+    """Minimal stand-in exposing just what _generate_follow_ups reads."""
+
+    def bear_documents(self):
+        from investment_research.collectors.documents import Document
+        from investment_research.schemas.enums import ContentKind, Provenance
+
+        return [
+            Document(
+                doc_id="d1",
+                url="https://www.sec.gov/a",
+                title="10-Q",
+                publisher="sec.gov",
+                published_date="2026-01-01",
+                doc_type="filing",
+                text="a material disclosure",
+                content_kind=ContentKind.FULL_DOCUMENT,
+                provenance=Provenance.LIVE,
+            )
+        ]
 
 
 def test_search_translates_budget_exceeded_into_unsearched_not_empty_result():
@@ -562,6 +666,28 @@ def test_queries_cut_off_by_budget_are_recorded_distinctly_not_as_searched():
     assert len(skipped_records) == len(outcome.unexecuted_due_to_budget)
 
 
+# --- required-domain core discovery must fit the discovery budget (F) ------
+def test_bear_core_pass_alone_covers_every_required_domain_before_any_second_query():
+    """When the discovery budget can only fund one query per required domain,
+    that must be exactly what gets funded -- not five domains plus a second
+    query for one of them, leaving a sixth domain completely unsearched (the
+    live-run defect: only 2 of 6 required domains got searched before the
+    budget ran out). The bear pass's own first-pass core must cover all six
+    domains on its own, without depending on the (possibly never-reached)
+    bull pass."""
+    provider = _BudgetCuttingProvider(allow=len(ResearchDomain))
+    plan = build_plan("TESTCO", "Generic Biotech Holdings")
+    outcome = run_adversarial_search(provider, plan, run_id="r1", ticker="TESTCO")
+
+    executed_bear_domains = {r.query.domain for r in outcome.bear_results if r.executed}
+    assert executed_bear_domains == set(ResearchDomain), (
+        f"expected all {len(ResearchDomain)} required domains covered by the bear core "
+        f"pass alone, got {executed_bear_domains}"
+    )
+    # And it never pretends the 7th+ (second-round) queries were searched.
+    assert outcome.unexecuted_due_to_budget, "queries past the core pass must be recorded cut"
+
+
 def test_bear_bull_and_followup_calls_are_tagged_with_distinct_agent_ids():
     provider = _BudgetCuttingProvider(allow=1000)
     plan = build_plan("TESTCO", "Generic Biotech Holdings")
@@ -640,3 +766,143 @@ def test_unconfirmed_material_claims_are_marked_and_barred():
     assert facts[0].verified_status is VerifiedStatus.UNVERIFIED_MATERIAL_CLAIM
     assert not facts[0].is_decision_grade
     assert report.not_attempted
+
+
+# --- unresolved-question-driven escalation (requirement C) ------------------
+class _FakeProviderReturningBody:
+    """A ResearchProvider double: fetch() always returns a canned document
+    body; search() should never be reached when a Tier 1/2 source is already
+    in hand (the point of this requirement)."""
+
+    def __init__(self, body_text: str, *, doc_type: str = "filing", is_company_ir: bool = False):
+        self.body_text = body_text
+        self.doc_type = doc_type
+        self.is_company_ir = is_company_ir
+        self.search_calls = 0
+        self.fetch_calls = 0
+
+    def available(self):
+        return True, "ready"
+
+    def search(self, query, *, agent_id: str = "research"):
+        self.search_calls += 1
+        return ResearchResult(query=query, outcome=FetchOutcome.NOT_FOUND, path=ResearchPath.ANTHROPIC_WEB)
+
+    def fetch(self, url, *, reason="", agent_id: str = "research"):
+        self.fetch_calls += 1
+        from investment_research.collectors.documents import Document
+
+        return Document(
+            doc_id="d1",
+            url=url,
+            title="Form 8-K",
+            publisher="sec.gov",
+            published_date="2026-08-01",
+            doc_type=self.doc_type,
+            is_company_ir=self.is_company_ir,
+            text=self.body_text,
+            content_kind=ContentKind.FULL_DOCUMENT,
+            provenance=Provenance.LIVE,
+            tier=SourceTier.TIER_1,
+        )
+
+
+_REGULATOR_QUESTION = UnresolvedQuestion(
+    question="Does the regulator consider the primary endpoint appropriate to establish "
+    "effectiveness for the intended indication?",
+    why_it_matters="A rejected endpoint invalidates the registrational path this thesis "
+    "assumes exists.",
+    blocking=True,
+    category=FactCategory.REGULATORY,
+)
+
+_ALREADY_COLLECTED_FILING = Source(
+    source_id=make_source_id("https://www.sec.gov/filing/8-K", "Form 8-K"),
+    url="https://www.sec.gov/filing/8-K",
+    title="Form 8-K",
+    tier=SourceTier.TIER_1,
+)
+
+
+def test_escalation_resolves_a_material_unresolved_question_from_an_already_collected_filing():
+    """Positive case (requirement C): the collector already found a Tier 1
+    filing pointer; the material question is unresolved; escalation fetches
+    the body; adverse regulator language appears; the resulting fact becomes
+    decision-grade; no search snippet is promoted, and no redundant search
+    is issued when a plausible primary source is already in hand."""
+    provider = _FakeProviderReturningBody(
+        "In written responses, the agency stated that it does not consider the primary "
+        "endpoint appropriate to establish effectiveness for the intended indication."
+    )
+    facts, report = escalate_unresolved_questions(
+        [_REGULATOR_QUESTION],
+        [_ALREADY_COLLECTED_FILING],
+        provider,
+        company="Generic Biotech Holdings",
+        ticker="TESTCO",
+        run_id="r1",
+    )
+    assert provider.search_calls == 0, (
+        "an already-collected Tier 1 source must not force a redundant web search"
+    )
+    assert provider.fetch_calls == 1
+    assert len(facts) == 1
+    assert facts[0].is_decision_grade
+    assert facts[0].content_kind is ContentKind.FULL_DOCUMENT
+    assert "endpoint" in facts[0].claim.lower()
+    assert report.confirmed
+
+
+def test_escalation_leaves_the_question_unresolved_when_the_body_does_not_answer_it():
+    """Inverse case (requirement C): the filing exists and is fetched, but its
+    body does not actually address the question -- it must stay unresolved,
+    and no fact may be fabricated from an unrelated body."""
+    provider = _FakeProviderReturningBody(
+        "The company also announced a new manufacturing facility lease in North Carolina "
+        "and reiterated its quarterly guidance for the coming fiscal year."
+    )
+    facts, report = escalate_unresolved_questions(
+        [_REGULATOR_QUESTION],
+        [_ALREADY_COLLECTED_FILING],
+        provider,
+        company="Generic Biotech Holdings",
+        ticker="TESTCO",
+        run_id="r1",
+    )
+    assert facts == []
+    assert not report.confirmed
+    assert report.attempts[0].note != ""
+
+
+def test_escalation_falls_back_to_search_when_nothing_already_collected_answers():
+    provider = _FakeProviderReturningBody(
+        "In written responses, the agency stated that it does not consider the primary "
+        "endpoint appropriate to establish effectiveness for the intended indication."
+    )
+    # No already-collected sources at all: escalation must fall through to a
+    # search-then-fetch path rather than simply giving up.
+    facts, report = escalate_unresolved_questions(
+        [_REGULATOR_QUESTION],
+        [],
+        provider,
+        company="Generic Biotech Holdings",
+        ticker="TESTCO",
+        run_id="r1",
+    )
+    assert report.attempts[0].searched is True
+
+
+def test_non_material_unresolved_questions_are_never_escalated():
+    non_material = UnresolvedQuestion(
+        question="What is the pre-specified statistical power?",
+        why_it_matters="Nice to know.",
+        blocking=False,
+        category=FactCategory.CLINICAL,
+    )
+    provider = _FakeProviderReturningBody("irrelevant")
+    facts, report = escalate_unresolved_questions(
+        [non_material], [_ALREADY_COLLECTED_FILING], provider, company="Generic Biotech Holdings"
+    )
+    assert facts == []
+    assert report.attempts == []
+    assert provider.fetch_calls == 0

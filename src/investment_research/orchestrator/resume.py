@@ -35,6 +35,7 @@ STAGES: tuple[str, ...] = (
     "verify",
     "escalate",
     "domain",
+    "escalate_unresolved",
     "contradiction",
     "kill",
     "bear_bull",

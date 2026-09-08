@@ -103,7 +103,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-effort",
         default="high",
         choices=["low", "medium", "high", "xhigh", "max"],
-        help="reasoning effort for --llm",
+        help="reasoning effort for the eight INTERPRETIVE agents (Regulatory/Science/"
+        "Competitive/Contradiction/Kill/Bear/Bull/Blind Judge) only. Web discovery and "
+        "primary-source fetch/extraction never inherit this -- see --research-effort.",
+    )
+    parser.add_argument(
+        "--research-effort",
+        default="low",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="reasoning effort for web discovery (adversarial search, follow-up query "
+        "generation) and primary-source fetch/extraction (default low: a live smoke test "
+        "showed two --llm-effort=high discovery searches alone consuming 76,891 tokens). "
+        "Does not change --llm-effort for the interpretive agents; pass a higher value "
+        "explicitly only for a deliberately deeper research pass.",
     )
     parser.add_argument(
         "--token-budget",
@@ -180,7 +192,9 @@ def build_research_stack(ticker: str, args: argparse.Namespace, settings, llm):
     if args.corpus:
         providers.append(CorpusResearchProvider(settings.corpus_dir, ticker))
     if args.live and llm is not None:
-        providers.append(AnthropicWebResearchProvider(llm))
+        providers.append(
+            AnthropicWebResearchProvider(llm, research_effort=args.research_effort)
+        )
     if not providers:
         return NullResearchProvider()
     return providers[0] if len(providers) == 1 else CompositeResearchProvider(providers)
@@ -240,7 +254,7 @@ def run_one(
         # keeps a run with both flags from searching twice.
         adversarial = run_adversarial_search(
             research, build_plan(ticker, company_name), llm=llm,
-            run_id=ticker, ticker=ticker,
+            run_id=ticker, ticker=ticker, research_effort=args.research_effort,
         )
 
     if args.corpus:
@@ -357,6 +371,11 @@ def result_to_json(result: ResearchResult) -> dict:
         ),
         "action": (str(verdict.action) if verdict and verdict.action else None),
         "research_status": str(verdict.research_status) if verdict else None,
+        "headline": verdict.headline if verdict else None,
+        "reasoning": list(verdict.reasoning) if verdict else [],
+        "thesis_breakers": list(verdict.thesis_breakers) if verdict else [],
+        "critical_red_flags": list(verdict.critical_red_flags) if verdict else [],
+        "caveats": list(verdict.caveats) if verdict else [],
         "blocking_verification_required": (
             list(verdict.blocking_verification_required) if verdict else []
         ),

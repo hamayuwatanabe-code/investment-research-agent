@@ -40,6 +40,10 @@ BEAR_TEMPLATES: tuple[tuple[str, ResearchDomain], ...] = (
     ("{t} FDA concern", ResearchDomain.REGULATORY),
     ("{c} regulatory risk", ResearchDomain.REGULATORY),
     ("{d} endpoint concern", ResearchDomain.REGULATORY),
+    # Requirement F: the bear pass alone must cover all six required domains
+    # in its own first-pass core, without depending on the bull pass (which
+    # may never run, or may be cut off first) to reach CATALYST.
+    ("{c} delayed catalyst", ResearchDomain.CATALYST),
     ("{c} failed trial", ResearchDomain.SCIENCE_TECHNOLOGY),
     ("{c} dilution", ResearchDomain.CAPITAL_STRUCTURE),
     ("{c} going concern", ResearchDomain.CAPITAL_STRUCTURE),
@@ -265,6 +269,7 @@ def run_adversarial_search(
     run_id: str = "",
     ticker: str = "",
     agent_id: str = "adversarial_search",
+    research_effort: str = "low",
 ) -> AdversarialOutcome:
     """Execute the bear pass, then the bull pass, then LLM follow-ups.
 
@@ -347,7 +352,7 @@ def run_adversarial_search(
     # than paying for a follow-up proposal call that could never be executed.
     discovery_exhausted = llm is not None and "discovery" in llm.budget.stage_exhausted
     if llm is not None and not discovery_exhausted:
-        follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups)
+        follow_ups = _generate_follow_ups(llm, outcome, max_follow_ups, research_effort)
         # Never propose searching for something the mandatory bear pass
         # already asked.
         follow_ups, follow_up_dropped = _dedupe_semantically(
@@ -373,7 +378,9 @@ def run_adversarial_search(
     return outcome
 
 
-def _generate_follow_ups(llm: Any, outcome: AdversarialOutcome, limit: int) -> list[ResearchQuery]:
+def _generate_follow_ups(
+    llm: Any, outcome: AdversarialOutcome, limit: int, research_effort: str = "low"
+) -> list[ResearchQuery]:
     usable, _ = llm.available()
     if not usable:
         return []
@@ -397,6 +404,7 @@ def _generate_follow_ups(llm: Any, outcome: AdversarialOutcome, limit: int) -> l
             tool_description="Propose additional disconfirming search queries.",
             schema=FOLLOW_UP_SCHEMA,
             max_tokens=4000,
+            effort=research_effort,
         )
     except Exception as exc:  # noqa: BLE001 - a failed follow-up is not fatal
         log.warning("follow-up query generation failed: %s", exc)

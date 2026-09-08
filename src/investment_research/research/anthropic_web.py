@@ -102,10 +102,16 @@ class AnthropicWebResearchProvider:
         *,
         max_uses_per_query: int = 5,
         max_content_tokens: int = 20000,
+        research_effort: str = "low",
     ) -> None:
         self.llm = llm
         self.max_uses_per_query = max_uses_per_query
         self.max_content_tokens = max_content_tokens
+        # Research (discovery/fetch) runs at its own, independently-controlled
+        # effort -- see --research-effort. It must never inherit --llm-effort,
+        # which governs the eight INTERPRETIVE agents only: a single high-effort
+        # discovery pass burned 76,891 tokens on two searches in a live run.
+        self.research_effort = research_effort
 
     def available(self) -> tuple[bool, str]:
         return self.llm.available()
@@ -140,6 +146,7 @@ class AnthropicWebResearchProvider:
                 tools=[tool],
                 max_tokens=SEARCH_MAX_TOKENS,
                 agent_id=agent_id,
+                effort=self.research_effort,
             )
         except BudgetExceeded as exc:
             # A budget cutoff is "we did not look", not "we looked and found
@@ -220,6 +227,7 @@ class AnthropicWebResearchProvider:
                 tools=[tool],
                 max_tokens=self.max_content_tokens,
                 agent_id=agent_id,
+                effort=self.research_effort,
             )
         except BudgetExceeded as exc:
             log.warning("web fetch skipped for %s: %s", url, exc)

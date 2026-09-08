@@ -171,3 +171,100 @@ def test_disqualifying_and_major_partitions():
     )
     assert {a.category for a in gate.disqualifying} == {KillCategory.REGULATORY_KILL}
     assert KillCategory.LIQUIDITY_KILL in {a.category for a in gate.major}
+
+
+# --- programme/thesis-relevance scoping (requirement D) ---------------------
+OLD_TRIAL = "NCT10000001"
+CURRENT_TRIAL = "NCT20000002"
+
+
+def test_a_terminated_trial_in_a_different_programme_is_not_a_company_level_kill():
+    """A historical, unrelated (different-indication) terminated trial must
+    not, on its own, drive a company-level K4 -- only K1, and PROVISIONAL,
+    scoped as a different programme."""
+    gate = evaluate_kill_gate(
+        [
+            make_fact(
+                f"{OLD_TRIAL} overall status is TERMINATED",
+                category=FactCategory.CLINICAL,
+                value="TERMINATED",
+            ),
+        ],
+        [],
+        current_program_trial_id=CURRENT_TRIAL,
+    )
+    clinical = gate.by_category(KillCategory.CLINICAL_KILL)
+    assert clinical.level is KillLevel.K1
+    assert "DIFFERENT PROGRAMME" in clinical.findings[0].detail
+
+
+def test_a_terminated_current_lead_trial_still_produces_the_full_kill():
+    """The SAME trial as the resolved current programme is unaffected by
+    scoping -- a genuinely terminated current lead trial still kills."""
+    gate = evaluate_kill_gate(
+        [
+            make_fact(
+                f"{CURRENT_TRIAL} overall status is TERMINATED",
+                category=FactCategory.CLINICAL,
+                value="TERMINATED",
+                tier=SourceTier.TIER_1,
+            ),
+        ],
+        [],
+        current_program_trial_id=CURRENT_TRIAL,
+    )
+    clinical = gate.by_category(KillCategory.CLINICAL_KILL)
+    assert clinical.level is KillLevel.K4
+    assert "DIFFERENT PROGRAMME" not in clinical.findings[0].detail
+
+
+def test_unresolved_program_relevance_keeps_the_finding_provisional_and_labelled():
+    from investment_research.schemas.enums import KillConfirmation
+
+    gate = evaluate_kill_gate(
+        [
+            make_fact(
+                f"{OLD_TRIAL} overall status is TERMINATED",
+                category=FactCategory.CLINICAL,
+                value="TERMINATED",
+                tier=SourceTier.TIER_1,
+            ),
+        ],
+        [],
+        program_relevance_unresolved=True,
+    )
+    clinical = gate.by_category(KillCategory.CLINICAL_KILL)
+    assert "PROGRAM_RELEVANCE_UNRESOLVED" in clinical.findings[0].detail
+    assert clinical.findings[0].confirmation is KillConfirmation.PROVISIONAL
+
+
+def test_a_trial_specific_finding_with_no_program_context_is_unaffected():
+    """When current_program_trial_id is not supplied (UNKNOWN, the default),
+    behavior is exactly as before this feature -- no accidental downgrade."""
+    gate = evaluate_kill_gate(
+        [
+            make_fact(
+                f"{OLD_TRIAL} overall status is TERMINATED",
+                category=FactCategory.CLINICAL,
+                value="TERMINATED",
+                tier=SourceTier.TIER_1,
+            ),
+        ],
+        [],
+    )
+    clinical = gate.by_category(KillCategory.CLINICAL_KILL)
+    assert clinical.level is KillLevel.K4
+
+
+def test_prose_regulatory_finding_with_no_trial_id_is_never_scoped():
+    """A fact with no trial identifier at all (like the LGVN-type endpoint
+    rejection) must be completely unaffected by programme scoping."""
+    gate = evaluate_kill_gate(
+        [make_fact(ENDPOINT_REJECTED, category=FactCategory.REGULATORY)],
+        [],
+        current_program_trial_id=CURRENT_TRIAL,
+        program_relevance_unresolved=True,
+    )
+    regulatory = gate.by_category(KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5
+    assert "PROGRAM_RELEVANCE_UNRESOLVED" not in regulatory.findings[0].detail
