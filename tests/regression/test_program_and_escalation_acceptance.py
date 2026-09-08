@@ -40,6 +40,7 @@ from investment_research.orchestrator.pipeline import Pipeline
 from investment_research.reporting.report import render_report
 from investment_research.schemas.enums import (
     ContentKind,
+    DocumentAuthority,
     FactCategory,
     KillCategory,
     KillConfirmation,
@@ -94,7 +95,7 @@ class _FilingBodyProvider:
 
         return ResearchResult(query=query, outcome=FetchOutcome.NOT_FOUND, path=self.path)
 
-    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research"):
+    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research", known=None):
         self.fetch_calls.append(url)
         text = self.bodies.get(url)
         if text is None:
@@ -112,6 +113,10 @@ class _FilingBodyProvider:
             provenance=Provenance.FIXTURE,
             research_path=self.path,
             tier=SourceTier.TIER_1,
+            # This is a statutory issuer filing (requirement B3): decision-
+            # grade for "the issuer disclosed this", never independent
+            # regulator confirmation on its own.
+            authority=DocumentAuthority.STATUTORY_FILING,
         )
 
 

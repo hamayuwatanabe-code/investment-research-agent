@@ -147,7 +147,12 @@ class CorpusResearchProvider:
             path=self.path,
         )
 
-    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "research", known: Any = None
+    ) -> Document | None:
+        # Captured documents already carry their real, captured metadata --
+        # `known` (an already-collected Source/Document pointer) has nothing
+        # to add here that the corpus entry does not already have.
         for document in self.documents():
             if document.url == url:
                 return document

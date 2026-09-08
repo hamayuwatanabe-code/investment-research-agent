@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
+    DocumentAuthority,
     Provenance,
     ResearchPath,
     SourceTier,
@@ -51,15 +52,24 @@ class Document:
     publisher: str = UNKNOWN
     published_date: str = UNKNOWN
     event_date: str = UNKNOWN
+    effective_date: str = UNKNOWN
     filing_date: str = UNKNOWN
+    accession: str = UNKNOWN
     doc_type: str = "unknown"
     is_company_ir: bool = False
     text: str = ""
     content_kind: ContentKind = ContentKind.FULL_DOCUMENT
     provenance: Provenance = Provenance.LIVE
     research_path: ResearchPath = ResearchPath.NONE
+    #: When THIS PROCESS fetched/retrieved the document. Never a substitute
+    #: for published_date/event_date/effective_date/filing_date -- retrieval
+    #: time is retrieval time only (requirement B1).
     retrieved_at: str = UNKNOWN
     tier: SourceTier = SourceTier.UNKNOWN
+    #: WHO authored/issued the document -- see DocumentAuthority. Distinct
+    #: from tier (confidence/priority) and from doc_type (a looser, freer
+    #: label some collectors set directly, e.g. "filing"/"registry").
+    authority: DocumentAuthority = DocumentAuthority.UNKNOWN
 
     def token_estimate(self) -> int:
         return estimate_tokens(self.text)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from investment_research.collectors.tiering import (
+    classify_authority,
     classify_tier,
     content_signature,
     independent_source_count,
@@ -12,7 +13,7 @@ from investment_research.collectors.tiering import (
     is_reprint,
     similarity,
 )
-from investment_research.schemas.enums import NON_DECISIVE_TIERS, SourceTier
+from investment_research.schemas.enums import NON_DECISIVE_TIERS, DocumentAuthority, SourceTier
 
 
 @pytest.mark.parametrize(
@@ -113,3 +114,52 @@ def test_content_signature_stable_and_distinct():
     assert content_signature(WIRE) == content_signature(WIRE)
     assert content_signature(WIRE) != content_signature(DISTINCT)
     assert content_signature("") == "UNKNOWN"
+
+
+# --- source authority (requirement B3) ---------------------------------------
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        # A regulator/agency itself is the author.
+        ("https://www.fda.gov/some/letter", DocumentAuthority.REGULATOR),
+        ("https://www.ema.europa.eu/opinion", DocumentAuthority.REGULATOR),
+        # The SITE is government/exchange-operated but the CONTENT is
+        # issuer-authored -- hosting location must never be read as who
+        # speaks (this is the exact bug requirement B3 fixes).
+        (
+            "https://www.sec.gov/Archives/edgar/data/1/8-k.htm",
+            DocumentAuthority.STATUTORY_FILING,
+        ),
+        ("https://www.nasdaq.com/market-activity/x", DocumentAuthority.STATUTORY_FILING),
+        # Sponsor-authored registry entries.
+        ("https://clinicaltrials.gov/study/NCT00000000", DocumentAuthority.REGISTRY),
+        # Company IR / press release, regardless of which wire distributed it.
+        ("https://www.globenewswire.com/news/x", DocumentAuthority.COMPANY_IR),
+        # Independent third-party publications.
+        ("https://www.reuters.com/business/x", DocumentAuthority.INDEPENDENT),
+        ("https://pubmed.ncbi.nlm.nih.gov/12345678/", DocumentAuthority.INDEPENDENT),
+        # Genuinely unrecognised.
+        ("https://unknown-blog.example/post", DocumentAuthority.UNKNOWN),
+    ],
+)
+def test_classify_authority(url, expected):
+    assert classify_authority(url) is expected
+
+
+def test_classify_authority_never_infers_independent_from_sec_gov_hosting():
+    """The exact bug requirement B3 names: a company filing hosted at
+    sec.gov must never be read as independent just because of where it is
+    hosted."""
+    authority = classify_authority("https://www.sec.gov/Archives/edgar/data/1/8-k.htm")
+    assert authority is DocumentAuthority.STATUTORY_FILING
+    assert authority is not DocumentAuthority.INDEPENDENT
+    assert authority is not DocumentAuthority.REGULATOR
+
+
+def test_classify_authority_is_company_ir_override():
+    """A caller-asserted is_company_ir wins regardless of host tables --
+    e.g. the company's own website, not in any wire-service table."""
+    assert (
+        classify_authority("https://ir.example-biotech.com/press/x", is_company_ir=True)
+        is DocumentAuthority.COMPANY_IR
+    )

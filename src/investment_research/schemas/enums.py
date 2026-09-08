@@ -130,6 +130,37 @@ class SourceTier(StrEnum):
 NON_DECISIVE_TIERS = frozenset({SourceTier.TIER_4, SourceTier.TIER_5, SourceTier.UNKNOWN})
 
 
+class DocumentAuthority(StrEnum):
+    """Who actually authored/issued a document -- distinct from SourceTier.
+
+    SourceTier is a confidence/priority ranking; ContentKind is how much of
+    the document is in hand; this is about WHO IS SPEAKING in it. A statutory
+    filing hosted at sec.gov, or a registry entry hosted at
+    clinicaltrials.gov, is still issuer/sponsor-authored: the regulator or
+    exchange lends the filing its hosting, not its voice. Hosting location
+    alone must never be read as who is speaking -- that conflation is exactly
+    how a fetched issuer filing can end up mislabeled as independent
+    regulator confirmation.
+    """
+
+    #: A regulator/agency itself authored this document (an FDA letter,
+    #: meeting minutes, a warning letter, an EMA opinion, ...).
+    REGULATOR = "REGULATOR"
+    #: The issuer's own required statutory disclosure (10-K/10-Q/8-K and
+    #: equivalents), however primary the domain that hosts it.
+    STATUTORY_FILING = "STATUTORY_FILING"
+    #: A government or clinical registry entry -- typically sponsor-authored
+    #: (e.g. a ClinicalTrials.gov record), read directly rather than via a
+    #: search summary.
+    REGISTRY = "REGISTRY"
+    #: Company investor relations material or a press release.
+    COMPANY_IR = "COMPANY_IR"
+    #: An independent publication: wire/trade press, peer-reviewed journal,
+    #: or similar -- authored by neither the issuer nor a regulator.
+    INDEPENDENT = "INDEPENDENT"
+    UNKNOWN = "UNKNOWN"
+
+
 class VerifiedStatus(StrEnum):
     VERIFIED = "VERIFIED"
     PARTIALLY_VERIFIED = "PARTIALLY_VERIFIED"

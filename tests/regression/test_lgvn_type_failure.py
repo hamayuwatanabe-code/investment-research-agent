@@ -37,10 +37,11 @@ from investment_research.orchestrator.pipeline import Pipeline
 from investment_research.reporting.report import render_report
 from investment_research.schemas.enums import (
     UNKNOWN,
-    Action,
     FactCategory,
     KillCategory,
+    KillLevel,
     Provenance,
+    ResearchStatus,
     SourceTier,
 )
 from investment_research.schemas.evaluation import INVESTMENT_QUALITY_DIMENSIONS
@@ -397,7 +398,48 @@ def test_analyst_target_cannot_settle_the_question(result):
 
 # --- 5. the attractive signals cannot rescue the verdict --------------------
 def test_verdict_is_avoid_despite_every_positive_signal(result):
-    assert result.verdict.action is Action.AVOID
+    """ResearchStatus.COMPLETE is the only state that may emit an Action (see
+    ResearchStatus's own docstring), and this fixture has several OTHER
+    degraded agents (competitive/microstructure/kill_agent/valuation), so
+    research_status here is INCOMPLETE, not COMPLETE -- no Action, including
+    AVOID, may be issued. That is not the same as the attractive signals
+    rescuing the verdict: the CONFIRMED K5 must still be reported
+    prominently, as a standalone factual disqualifier signal, and never
+    silently weakened or hidden just because the run overall is incomplete.
+    """
+    assert result.verdict.research_status is not ResearchStatus.COMPLETE
+    assert result.verdict.action is None
+    assert result.verdict.kill_gate.max_confirmed_level is KillLevel.K5
+    assert any(
+        "CONFIRMED_DISQUALIFYING_EVIDENCE_PRESENT" in caveat for caveat in result.verdict.caveats
+    )
+
+
+def test_no_actionable_label_leaks_anywhere_for_a_plain_incomplete_verdict(result):
+    """The report/JSON-wide scan required for the COMPLETE-only Action
+    invariant, exercised here against a plain INCOMPLETE run (not the
+    stricter BLOCKED_PENDING_VERIFICATION case) -- distinguishing it from
+    the equivalent BLOCKED regression elsewhere."""
+    import json as json_module
+
+    from investment_research.cli import result_to_json
+    from investment_research.scoring.decision_gate_consistency import find_action_labels
+
+    assert result.verdict.research_status is ResearchStatus.INCOMPLETE
+
+    report = render_report(result)
+    not_issued_sentence = (
+        "No action label is issued. Not AVOID, not WAIT_FOR_EVENT -- an action label "
+        "asserts a judgement, and there is not enough research here to support one."
+    )
+    sanitized_report = report.replace(not_issued_sentence, "")
+    leaked = find_action_labels(sanitized_report)
+    assert leaked == [], f"actionable label(s) leaked into the rendered report: {leaked}"
+
+    payload = result_to_json(result)
+    assert payload["action"] is None
+    leaked_json = find_action_labels(json_module.dumps(payload))
+    assert leaked_json == [], f"actionable label(s) leaked into the JSON export: {leaked_json}"
 
 
 def test_thesis_breakers_lead_with_the_regulator_position(result):

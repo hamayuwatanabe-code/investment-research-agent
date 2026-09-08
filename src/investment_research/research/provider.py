@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..collectors.documents import Document
 from ..schemas.enums import FetchOutcome, ResearchDomain, ResearchPath, SearchStatus
@@ -102,7 +102,12 @@ class ResearchProvider(Protocol):
     def search(self, query: ResearchQuery, *, agent_id: str = "research") -> ResearchResult: ...
 
     def fetch(
-        self, url: str, *, reason: str = "", agent_id: str = "research"
+        self,
+        url: str,
+        *,
+        reason: str = "",
+        agent_id: str = "research",
+        known: Any = None,
     ) -> Document | None: ...
 
 
@@ -129,7 +134,9 @@ class NullResearchProvider:
             error="no research provider configured",
         )
 
-    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "research", known: Any = None
+    ) -> Document | None:
         return None
 
 
@@ -175,12 +182,14 @@ class CompositeResearchProvider:
             last = result
         return last or NullResearchProvider().search(query, agent_id=agent_id)
 
-    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "research", known: Any = None
+    ) -> Document | None:
         for provider in self.providers:
             usable, _ = provider.available()
             if not usable:
                 continue
-            document = provider.fetch(url, reason=reason, agent_id=agent_id)
+            document = provider.fetch(url, reason=reason, agent_id=agent_id, known=known)
             if document is not None:
                 return document
         return None

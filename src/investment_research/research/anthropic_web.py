@@ -22,16 +22,30 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..collectors.documents import Document
-from ..collectors.tiering import classify_tier
+from ..collectors.tiering import classify_authority, classify_tier
 from ..llm.client import BudgetExceeded
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
+    DocumentAuthority,
     FetchOutcome,
     Provenance,
     ResearchPath,
 )
+from ..schemas.fact import Source
 from .provider import ResearchQuery, ResearchResult
+
+#: doc_type label to attach for each DocumentAuthority, matching the
+#: vocabulary escalation.py's admissibility check already reads
+#: (_PRIMARY_DOC_TYPES = {"filing", "registry", "regulator", "docket"}).
+_DOC_TYPE_FOR_AUTHORITY: dict[DocumentAuthority, str] = {
+    DocumentAuthority.REGULATOR: "regulator",
+    DocumentAuthority.STATUTORY_FILING: "filing",
+    DocumentAuthority.REGISTRY: "registry",
+    DocumentAuthority.COMPANY_IR: "press_release",
+    DocumentAuthority.INDEPENDENT: "independent",
+    DocumentAuthority.UNKNOWN: "unknown",
+}
 
 log = logging.getLogger(__name__)
 
@@ -193,12 +207,27 @@ class AnthropicWebResearchProvider:
 
     # -- fetch -------------------------------------------------------------
     def fetch(
-        self, url: str, *, reason: str = "", agent_id: str = "anthropic_web_fetch"
+        self,
+        url: str,
+        *,
+        reason: str = "",
+        agent_id: str = "anthropic_web_fetch",
+        known: Source | Document | None = None,
     ) -> Document | None:
         """Fetch one URL's full text.
 
         ``web_fetch`` only fetches URLs already in the conversation, so the URL
         is placed in the user turn and the model is instructed to fetch it.
+
+        ``known`` is the already-collected ``Source`` or ``Document`` (a
+        SearchHit-shaped pointer) that led here, when there is one. Its real
+        metadata -- title, publisher, published/event/effective/filing date,
+        accession, tier -- is carried forward onto the fetched Document
+        wherever it is actually known (requirement B2); nothing is invented
+        for a field ``known`` does not have. Retrieval time
+        (``retrieved_at``, stamped below) is NEVER used as a substitute for
+        any of those dates (requirement B1) -- a historical filing fetched
+        today stays dated when it was filed, not when it was fetched.
         """
         usable, _ = self.available()
         if not usable:
@@ -236,23 +265,66 @@ class AnthropicWebResearchProvider:
             log.warning("web fetch failed for %s: %s", url, exc)
             return None
 
-        text, title, retrieved = _extract_fetch_result(response)
+        # `retrieved` here is when Anthropic's server retrieved the page --
+        # retrieval time, same axis as our own retrieved_at below. It is
+        # deliberately NEVER used as published_date/event_date/etc.
+        text, fetched_title, retrieved = _extract_fetch_result(response)
         if not text:
             return None
+
+        seed = _seed_from(known)
+        is_company_ir = bool(getattr(known, "is_company_ir", False))
+        authority = classify_authority(url, is_company_ir=is_company_ir)
         return Document(
             doc_id=_doc_id(url),
             url=url,
-            title=title or url,
-            publisher=_publisher(url),
-            published_date=retrieved or UNKNOWN,
-            doc_type="web",
+            title=seed.get("title") or fetched_title or url,
+            publisher=seed.get("publisher") or _publisher(url),
+            published_date=seed.get("published_date", UNKNOWN),
+            event_date=seed.get("event_date", UNKNOWN),
+            effective_date=seed.get("effective_date", UNKNOWN),
+            filing_date=seed.get("filing_date", UNKNOWN),
+            accession=seed.get("accession", UNKNOWN),
+            doc_type=seed.get("doc_type") or _DOC_TYPE_FOR_AUTHORITY[authority],
+            is_company_ir=authority is DocumentAuthority.COMPANY_IR,
             text=text,
             content_kind=ContentKind.FULL_DOCUMENT,
             provenance=Provenance.LIVE,
             research_path=self.path,
+            # Retrieval time only -- see the docstring above.
             retrieved_at=_now(),
-            tier=classify_tier(url),
+            tier=seed.get("tier") or classify_tier(url, is_company_ir=is_company_ir),
+            authority=authority,
         )
+
+
+#: Fields carried forward from an already-known Source/Document seed, when
+#: (and only when) the seed actually has them -- never invented.
+_SEED_DATE_FIELDS = ("published_date", "event_date", "effective_date", "filing_date")
+
+
+def _seed_from(known: Source | Document | None) -> dict[str, Any]:
+    """Extract known, non-UNKNOWN metadata from an already-collected
+    Source or SearchHit-shaped Document, for carrying forward onto a
+    fetched Document (requirement B2). Both dataclasses share these field
+    names; a field either object does not have, or holds UNKNOWN in, is
+    simply absent from the result -- callers fall back to UNKNOWN, never to
+    retrieval time.
+    """
+    if known is None:
+        return {}
+    seed: dict[str, Any] = {}
+    for field_name in ("title", "publisher", *_SEED_DATE_FIELDS, "accession"):
+        value = getattr(known, field_name, None)
+        if value and value != UNKNOWN:
+            seed[field_name] = value
+    tier = getattr(known, "tier", None)
+    if tier is not None and str(tier) != "UNKNOWN":
+        seed["tier"] = tier
+    doc_type = getattr(known, "doc_type", None)
+    if doc_type and doc_type not in ("unknown", "web"):
+        seed["doc_type"] = doc_type
+    return seed
 
 
 def _extract_fetch_result(response: Any) -> tuple[str, str, str]:
@@ -333,14 +405,19 @@ def parse_search_response(
             url = _get(item, "url")
             if not url:
                 continue
+            authority = classify_authority(url)
             documents.append(
                 Document(
                     doc_id=_doc_id(url),
                     url=url,
                     title=_get(item, "title") or url,
                     publisher=_publisher(url),
+                    # Only what the search engine actually reports about the
+                    # page; never invented, and never retrieval time (see
+                    # retrieved_at below, which IS retrieval time).
                     published_date=_get(item, "page_age") or UNKNOWN,
-                    doc_type="web",
+                    doc_type=_DOC_TYPE_FOR_AUTHORITY[authority],
+                    is_company_ir=authority is DocumentAuthority.COMPANY_IR,
                     text=_get(item, "text") or "",
                     # A search result is a pointer, not the document. Fetch is
                     # what upgrades it to FULL_DOCUMENT.
@@ -348,7 +425,8 @@ def parse_search_response(
                     provenance=Provenance.LIVE,
                     research_path=path,
                     retrieved_at=_now(),
-                    tier=classify_tier(url),
+                    tier=classify_tier(url, is_company_ir=authority is DocumentAuthority.COMPANY_IR),
+                    authority=authority,
                 )
             )
     return documents, error

@@ -54,7 +54,14 @@ class PortfolioAgent(Agent):
             )
             return out
 
-        action = Action(verdict_channel.payload.get("action", Action.HOLD.value))
+        # ResearchStatus.COMPLETE is the only state that may leave an Action
+        # on the verdict -- the channel payload's "action" is None whenever
+        # it was withheld (BLOCKED_PENDING_VERIFICATION or plain INCOMPLETE).
+        # That is a real, valid state to apply guidance under, never
+        # defaulted away to Action.HOLD (which would itself be an
+        # unearned judgement) and never force-coerced into the Action enum.
+        raw_action = verdict_channel.payload.get("action")
+        action: Action | None = Action(raw_action) if raw_action else None
         max_kill = KillLevel(verdict_channel.payload.get("max_kill_level", "K0"))
         confidence = float(verdict_channel.payload.get("evidence_confidence", 0.0))
 
@@ -74,6 +81,12 @@ class PortfolioAgent(Agent):
         )
 
         guidance: list[str] = []
+        if action is None:
+            guidance.append(
+                "No action has been issued for this run: research_status is not COMPLETE, "
+                "so the verdict itself is withheld, not merely cautious. Any guidance below "
+                "is limited to what does not depend on that withheld action."
+            )
         if action in _EXIT_ACTIONS or max_kill.level >= 4:
             guidance.append(
                 "The verdict is a disqualification. The entry price is not a reason to hold: "
@@ -116,7 +129,7 @@ class PortfolioAgent(Agent):
             "position_value": position_value,
             "portfolio_concentration_pct": concentration,
             "unrealised_pct": unrealised_pct,
-            "verdict_action": str(action),
+            "verdict_action": str(action) if action is not None else "NONE",
             "verdict_max_kill": str(max_kill),
             "guidance": guidance,
             "verdict_unchanged": True,
@@ -124,8 +137,9 @@ class PortfolioAgent(Agent):
         out.evaluation = self.evaluation(
             "portfolio_guidance",
             (
-                f"Applying the fixed verdict ({action}) to the existing position. "
-                "The verdict itself was reached without any knowledge of this position."
+                f"Applying the fixed verdict ({action if action is not None else 'NONE'}) to "
+                "the existing position. The verdict itself was reached without any knowledge "
+                "of this position."
             ),
             tuple(guidance),
             payload,

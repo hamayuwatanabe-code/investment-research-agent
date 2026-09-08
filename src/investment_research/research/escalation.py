@@ -27,6 +27,7 @@ from ..collectors.documents import Document, split_sentences
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
+    DocumentAuthority,
     EvidenceClass,
     FetchOutcome,
     Materiality,
@@ -36,6 +37,29 @@ from ..schemas.enums import (
 )
 from ..schemas.fact import Fact, Source, UnresolvedQuestion, make_fact_id, make_source_id
 from .provider import ResearchProvider, ResearchQuery
+
+#: What evidence_class/company_claim/independent_confirmation a fetched
+#: document's DocumentAuthority may support (requirement B3). The central
+#: distinction: a statutory issuer filing is authoritative evidence that the
+#: issuer made the filed disclosure -- decision-grade for THAT -- but it is
+#: NOT independent confirmation of an underlying regulator communication a
+#: genuine regulator-issued document would be. A company press release stays
+#: COMPANY_CLAIM and never becomes decision-grade merely because its body
+#: was fetched.
+_EVIDENCE_FOR_AUTHORITY: dict[DocumentAuthority, tuple[EvidenceClass, bool, bool]] = {
+    DocumentAuthority.REGULATOR: (EvidenceClass.INDEPENDENT_EVIDENCE, False, True),
+    DocumentAuthority.STATUTORY_FILING: (EvidenceClass.VERIFIED_FACT, True, False),
+    DocumentAuthority.REGISTRY: (EvidenceClass.VERIFIED_FACT, True, False),
+    DocumentAuthority.COMPANY_IR: (EvidenceClass.COMPANY_CLAIM, True, False),
+    DocumentAuthority.INDEPENDENT: (EvidenceClass.INDEPENDENT_EVIDENCE, False, True),
+    DocumentAuthority.UNKNOWN: (EvidenceClass.UNVERIFIED_CLAIM, False, False),
+}
+
+
+def _evidence_for_authority(authority: DocumentAuthority) -> tuple[EvidenceClass, bool, bool]:
+    """``(evidence_class, company_claim, independent_confirmation)`` for a
+    fetched document of this authority. See ``_EVIDENCE_FOR_AUTHORITY``."""
+    return _EVIDENCE_FOR_AUTHORITY[authority]
 
 log = logging.getLogger(__name__)
 
@@ -320,15 +344,20 @@ def escalate(
             # The search hit is a pointer (METADATA_ONLY): it can tell us a
             # candidate URL is worth fetching, but it can never itself confirm
             # anything -- _confirms() below only runs against a fetched body.
-            candidate_urls = [
-                document.url
-                for document in result.documents
+            # Kept as full SearchHit-shaped Documents (not just URLs) so the
+            # fetch below can carry forward whatever real metadata the hit
+            # already had (requirement B2).
+            candidates = [
+                document for document in result.documents
                 if _plausible_primary_candidate(document, domain)
             ]
-            for url in candidate_urls[:max_queries_per_fact]:
+            for candidate in candidates[:max_queries_per_fact]:
+                url = candidate.url
                 report.fetches_attempted += 1
                 try:
-                    fetched = provider.fetch(url, reason=f"confirm: {why}", agent_id="escalation")
+                    fetched = provider.fetch(
+                        url, reason=f"confirm: {why}", agent_id="escalation", known=candidate
+                    )
                 except Exception as exc:  # noqa: BLE001 - a fetch failure never confirms
                     log.warning("escalation fetch failed for %s: %s", url, exc)
                     fetched = None
@@ -350,21 +379,30 @@ def escalate(
             # hit that merely pointed at it.
             attempt.confirming_url = confirming.url
             attempt.confirming_tier = str(confirming.tier)
+            # Requirement B3: WHO authored the confirming document decides
+            # what this confirmation actually establishes. A statutory
+            # issuer filing confirms "the issuer disclosed this" -- not
+            # independent confirmation of an underlying regulator statement,
+            # which only a genuine regulator-issued document supports.
+            evidence_class, _, independent_confirmation = _evidence_for_authority(
+                confirming.authority
+            )
             updated.append(
                 replace(
                     fact,
                     verified_status=VerifiedStatus.VERIFIED,
-                    evidence_class=EvidenceClass.INDEPENDENT_EVIDENCE,
+                    evidence_class=evidence_class,
                     # The claim was read from an actual document body just now
                     # (the confirming fetch) -- that is what content_kind
                     # records, independent of how the original claim was
                     # sourced (requirement M1).
                     content_kind=ContentKind.FULL_DOCUMENT,
-                    independent_confirmation=True,
+                    independent_confirmation=independent_confirmation,
                     corroborating_source_ids=(*fact.corroborating_source_ids, confirming.doc_id),
                     confidence=min(1.0, fact.confidence + 0.25),
                     notes=(fact.notes + "; " if fact.notes else "")
-                    + f"escalated and confirmed in a primary source body: {confirming.url}",
+                    + f"escalated and confirmed in a primary source body "
+                    f"({confirming.authority}): {confirming.url}",
                 )
             )
         else:
@@ -457,6 +495,7 @@ def escalate_unresolved_questions(
                 fetched = provider.fetch(
                     source.url,
                     reason=f"resolve unresolved question: {question.question[:120]}",
+                    known=source,
                 )
             except Exception as exc:  # noqa: BLE001 - a fetch failure never resolves
                 log.warning("escalation (question) fetch failed for %s: %s", source.url, exc)
@@ -484,16 +523,18 @@ def escalate_unresolved_questions(
                 result = provider.search(query, agent_id="escalation_question")
                 if not result.executed:
                     continue
-                candidate_urls = [
-                    document.url
-                    for document in result.documents
+                candidates = [
+                    document for document in result.documents
                     if _plausible_primary_candidate(document, domain)
                 ]
-                for url in candidate_urls[:max_candidates_per_question]:
+                for candidate in candidates[:max_candidates_per_question]:
+                    url = candidate.url
                     report.fetches_attempted += 1
                     try:
                         fetched = provider.fetch(
-                            url, reason=f"resolve unresolved question: {question.question[:120]}"
+                            url,
+                            reason=f"resolve unresolved question: {question.question[:120]}",
+                            known=candidate,
                         )
                     except Exception as exc:  # noqa: BLE001
                         log.warning("escalation (question) fetch failed for %s: %s", url, exc)
@@ -535,14 +576,27 @@ def _fact_from_answered_question(
     ticker: str,
     run_id: str,
 ) -> Fact:
-    """Build a decision-grade Fact from a fetched body that answered a
-    material unresolved question. Verbatim text only -- never a paraphrase."""
-    evidence_class = (
-        EvidenceClass.COMPANY_CLAIM
-        if document.is_company_ir
-        else EvidenceClass.INDEPENDENT_EVIDENCE
+    """Build a Fact from a fetched body that answered a material unresolved
+    question. Verbatim text only -- never a paraphrase.
+
+    Requirement B5: dates are the document's OWN known dates, never
+    retrieval time (fetch() itself already never substitutes one for the
+    other, but this function must not reintroduce that substitution either).
+    evidence_class/company_claim/independent_confirmation are derived from
+    the fetched document's real DocumentAuthority -- never unconditionally
+    "independent" just because a body was successfully fetched.
+    """
+    evidence_class, company_claim, independent_confirmation = _evidence_for_authority(
+        document.authority
     )
-    event_date = document.published_date
+    # Prefer the document's own event_date; fall back to published_date only
+    # when no event_date is known. Neither ever falls back to retrieved_at.
+    event_date = document.event_date if document.event_date != UNKNOWN else document.published_date
+    verified_status = (
+        VerifiedStatus.VERIFIED
+        if document.authority is not DocumentAuthority.UNKNOWN
+        else VerifiedStatus.NOT_VERIFIED
+    )
     return Fact(
         fact_id=make_fact_id(ticker, question.category, answer, document.url, event_date),
         ticker=ticker,
@@ -555,18 +609,20 @@ def _fact_from_answered_question(
         source_tier=document.tier,
         publication_date=document.published_date,
         event_date=event_date,
-        verified_status=VerifiedStatus.VERIFIED,
-        confidence=0.75,
-        company_claim=document.is_company_ir,
+        effective_date=document.effective_date,
+        filing_date=document.filing_date,
+        verified_status=verified_status,
+        confidence=0.75 if independent_confirmation or evidence_class == EvidenceClass.VERIFIED_FACT else 0.3,
+        company_claim=company_claim,
         materiality=Materiality.CRITICAL,
         provenance=document.provenance,
         run_id=run_id,
         notes=(
-            "escalated from a material unresolved question via a fetched primary-source body: "
-            f"{question.question[:200]}"
+            f"escalated from a material unresolved question via a fetched primary-source body "
+            f"({document.authority}): {question.question[:200]}"
         ),
         content_kind=ContentKind.FULL_DOCUMENT,
-        independent_confirmation=True,
+        independent_confirmation=independent_confirmation,
     )
 
 

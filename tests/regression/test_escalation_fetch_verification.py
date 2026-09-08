@@ -34,6 +34,7 @@ from investment_research.research.escalation import (
 from investment_research.research.provider import ResearchQuery, ResearchResult
 from investment_research.schemas.enums import (
     ContentKind,
+    DocumentAuthority,
     EvidenceClass,
     FetchOutcome,
     ResearchPath,
@@ -100,7 +101,9 @@ class _FakeEscalationProvider:
             query=query, documents=documents, outcome=outcome, path=ResearchPath.ANTHROPIC_WEB
         )
 
-    def fetch(self, url: str, *, reason: str = "", agent_id: str = "research") -> Document | None:
+    def fetch(
+        self, url: str, *, reason: str = "", agent_id: str = "research", known=None
+    ) -> Document | None:
         self.fetch_calls.append(url)
         if url in self._fetch_raises_for:
             raise self._fetch_raises_for[url]
@@ -131,8 +134,19 @@ def _search_hit(url: str, *, tier: SourceTier = SourceTier.TIER_1) -> Document:
     )
 
 
-def _fetched_body(url: str, text: str, *, tier: SourceTier = SourceTier.TIER_1) -> Document:
-    """A FULL_DOCUMENT -- what a real fetch of the candidate URL returns."""
+def _fetched_body(
+    url: str,
+    text: str,
+    *,
+    tier: SourceTier = SourceTier.TIER_1,
+    authority: DocumentAuthority = DocumentAuthority.REGULATOR,
+) -> Document:
+    """A FULL_DOCUMENT -- what a real fetch of the candidate URL returns.
+
+    Defaults to REGULATOR authority (these tests fetch fda.gov URLs) --
+    requirement B3: evidence_class/independent_confirmation are now derived
+    from authority, not granted unconditionally to any fetched body.
+    """
     return Document(
         doc_id=f"doc::{url}",
         url=url,
@@ -141,6 +155,7 @@ def _fetched_body(url: str, text: str, *, tier: SourceTier = SourceTier.TIER_1) 
         content_kind=ContentKind.FULL_DOCUMENT,
         tier=tier,
         doc_type="regulator",
+        authority=authority,
     )
 
 

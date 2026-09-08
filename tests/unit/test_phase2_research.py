@@ -643,7 +643,7 @@ class _BudgetCuttingProvider:
             )
         return ResearchResult(query=query, documents=[], outcome=FetchOutcome.NOT_FOUND, path=self.path)
 
-    def fetch(self, url, *, reason="", agent_id: str = "research"):
+    def fetch(self, url, *, reason="", agent_id: str = "research", known=None):
         return None
 
 
@@ -788,9 +788,10 @@ class _FakeProviderReturningBody:
         self.search_calls += 1
         return ResearchResult(query=query, outcome=FetchOutcome.NOT_FOUND, path=ResearchPath.ANTHROPIC_WEB)
 
-    def fetch(self, url, *, reason="", agent_id: str = "research"):
+    def fetch(self, url, *, reason="", agent_id: str = "research", known=None):
         self.fetch_calls += 1
         from investment_research.collectors.documents import Document
+        from investment_research.collectors.tiering import classify_authority
 
         return Document(
             doc_id="d1",
@@ -804,6 +805,7 @@ class _FakeProviderReturningBody:
             content_kind=ContentKind.FULL_DOCUMENT,
             provenance=Provenance.LIVE,
             tier=SourceTier.TIER_1,
+            authority=classify_authority(url, is_company_ir=self.is_company_ir),
         )
 
 

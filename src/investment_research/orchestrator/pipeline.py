@@ -59,7 +59,7 @@ from ..schemas.enums import (
 from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
 from ..schemas.validation import QuarantinedSource
 from ..scoring.completeness import CompletenessResult, assess_completeness
-from ..scoring.decision_gate_consistency import blocked_headline, scrub_action_labels
+from ..scoring.decision_gate_consistency import enforce_complete_only_action, sync_verdict_channel
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
 from ..scoring.scenarios import build_scenarios
@@ -939,7 +939,6 @@ class Pipeline:
             if blocking_reasons:
                 verdict.blocked = True
                 verdict.blocked_reason = " | ".join(blocking_reasons)
-                verdict.action = None
                 verdict.research_status = ResearchStatus.BLOCKED_PENDING_VERIFICATION
                 verdict.blocking_verification_required = tuple(blocking_reasons)
                 verdict.caveats = (
@@ -947,26 +946,28 @@ class Pipeline:
                     "RESEARCH_STATUS: BLOCKED_PENDING_VERIFICATION -- FINAL_ACTION: NONE -- "
                     + " | ".join(blocking_reasons),
                 )
-                # Requirement G: nulling .action is not enough -- the Blind
-                # Judge (deterministic or LLM-backed) already baked its
-                # internally selected Action into free text (e.g. a headline
-                # reading "... action WAIT_FOR_EVENT.") before this was known.
-                # No output surface -- headline, reasoning, thesis breakers,
-                # red flags, caveats, the report, the JSON export -- may carry
-                # an actionable label once BLOCKED_PENDING_VERIFICATION holds.
-                verdict.headline = blocked_headline(blocking_reasons)
-                verdict.reasoning = tuple(scrub_action_labels(r) for r in verdict.reasoning)
-                verdict.thesis_breakers = tuple(
-                    scrub_action_labels(b) for b in verdict.thesis_breakers
-                )
-                verdict.critical_red_flags = tuple(
-                    scrub_action_labels(f) for f in verdict.critical_red_flags
-                )
-                verdict.caveats = tuple(scrub_action_labels(c) for c in verdict.caveats)
             elif result.failures or ctx.status != RunStatus.COMPLETE:
                 verdict.research_status = ResearchStatus.INCOMPLETE
             else:
                 verdict.research_status = ResearchStatus.COMPLETE
+
+            # ResearchStatus.COMPLETE is the ONLY state that may emit an
+            # Action (see ResearchStatus's own docstring: "the single gate
+            # that decides whether Verdict.action may be non-None"). This
+            # applies uniformly to BLOCKED_PENDING_VERIFICATION AND a plain
+            # INCOMPLETE run (e.g. a degraded agent elsewhere) alike -- an
+            # Action selected before this was known (including a prior
+            # AVOID/BUY/WAIT_FOR_EVENT) must not survive, and a CONFIRMED K5
+            # must still be reported prominently rather than hidden.
+            enforce_complete_only_action(verdict, blocking_reasons)
+            # The Blind Judge already published a (now stale) snapshot of its
+            # action/headline/reasoning to the VERDICT channel before this
+            # correction ran. The Portfolio agent (Stage 10) reads that
+            # channel directly, after the verdict is finalized -- so the
+            # published Evaluation must be corrected too, or the pre-
+            # correction action leaks straight through to it.
+            if judge_output.evaluation is not None:
+                sync_verdict_channel(judge_output.evaluation, verdict)
         checkpoint("judge")
 
         if result.failures and ctx.status == RunStatus.COMPLETE:
