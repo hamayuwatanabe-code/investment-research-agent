@@ -54,7 +54,7 @@ class Settings:
             "IRA_SEC_USER_AGENT", "investment-research-agent contact@example.com"
         )
     )
-    anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
+    anthropic_api_key: str = field(default_factory=lambda: _env("IRA_ANTHROPIC_API_KEY"))
     search_provider: str = field(default_factory=lambda: _env("IRA_SEARCH_PROVIDER", "none"))
     tavily_api_key: str = field(default_factory=lambda: _env("TAVILY_API_KEY"))
     brave_api_key: str = field(default_factory=lambda: _env("BRAVE_API_KEY"))

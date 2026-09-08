@@ -37,7 +37,7 @@ through Anthropic's server-side `web_search` / `web_fetch` tools
 ([ADR 0005](docs/adr/0005-live-research-provider.md)):
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export IRA_ANTHROPIC_API_KEY=sk-ant-...
 python3 main.py LGVN --live --llm --adversarial
 ```
 
@@ -349,7 +349,7 @@ resulting gaps rather than filling them.
 | Variable | Purpose |
 |---|---|
 | `IRA_SEC_USER_AGENT` | SEC requires a descriptive UA with a contact address |
-| `ANTHROPIC_API_KEY` | optional narrative synthesis of verified facts |
+| `IRA_ANTHROPIC_API_KEY` | optional narrative synthesis of verified facts |
 | `IRA_SEARCH_PROVIDER` + key | `none` / `tavily` / `brave` — enables the kill-search set |
 | `IRA_MARKET_PROVIDER` + key | optional microstructure data |
 

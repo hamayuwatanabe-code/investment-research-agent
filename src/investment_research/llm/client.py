@@ -154,8 +154,9 @@ class LLMClient:
         # credentials now and say plainly if there are none.
         if not self._has_credentials():
             self._unavailable_reason = (
-                "no Anthropic credentials resolvable (set ANTHROPIC_API_KEY, or run "
-                "`ant auth login`); LLM agents disabled, deterministic agents will run"
+                "no Anthropic credentials resolvable (set IRA_ANTHROPIC_API_KEY, or the "
+                "global ANTHROPIC_API_KEY, or run `ant auth login`); LLM agents disabled, "
+                "deterministic agents will run"
             )
             self._client = None
 
