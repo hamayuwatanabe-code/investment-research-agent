@@ -21,11 +21,14 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from ..collectors.documents import Document
 from ..schemas.enums import (
     UNKNOWN,
+    ContentKind,
     EvidenceClass,
+    FetchOutcome,
     Materiality,
     ResearchDomain,
     SourceTier,
@@ -150,6 +153,28 @@ def _confirms(document: Document, fact: Fact) -> bool:
     return overlap >= max(3, len(terms) // 4)
 
 
+def _plausible_primary_candidate(document: Document, domain: str) -> bool:
+    """Whether a search hit is worth spending a fetch on.
+
+    A fetch is a real cost (LLM/tool budget), so this is a cheap pre-filter on
+    the SearchHit-shaped candidate alone -- it never confirms anything by
+    itself. Only ``_confirms()``, run against the FETCHED body, does that. Two
+    checks, both required: the hit's own tier classification (derived from its
+    URL, same as any other search result) must already look primary, and its
+    host must actually be the domain this query was restricted to -- a search
+    tool's domain filter is a request, not a guarantee.
+    """
+    if not document.tier.is_primary:
+        return False
+    try:
+        host = urlparse(document.url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    domain = domain.lower()
+    return host == domain or host.endswith("." + domain)
+
+
 def escalate(
     facts: Sequence[Fact],
     provider: ResearchProvider,
@@ -194,6 +219,7 @@ def escalate(
         escalated += 1
         attempt.searched = True
         confirming: Document | None = None
+        budget_cut_short = False
         for domain in PRIMARY_DOMAINS[:max_queries_per_fact]:
             query = ResearchQuery(
                 query=f"{company} {_key_terms(fact.claim)}",
@@ -205,16 +231,41 @@ def escalate(
             attempt.queries.append(f"{query.query} site:{domain}")
             result = provider.search(query)
             if not result.executed:
+                # "We did not look" (budget cutoff, provider unavailable, ...),
+                # never conflated with "we looked and it isn't there".
+                if result.outcome is FetchOutcome.DISABLED:
+                    budget_cut_short = True
                 continue
-            for document in result.documents:
-                if _confirms(document, fact):
-                    confirming = document
+
+            # The search hit is a pointer (METADATA_ONLY): it can tell us a
+            # candidate URL is worth fetching, but it can never itself confirm
+            # anything -- _confirms() below only runs against a fetched body.
+            candidate_urls = [
+                document.url
+                for document in result.documents
+                if _plausible_primary_candidate(document, domain)
+            ]
+            for url in candidate_urls[:max_queries_per_fact]:
+                try:
+                    fetched = provider.fetch(url, reason=f"confirm: {why}")
+                except Exception as exc:  # noqa: BLE001 - a fetch failure never confirms
+                    log.warning("escalation fetch failed for %s: %s", url, exc)
+                    fetched = None
+                if fetched is None:
+                    # Fetch failure (including a BudgetExceeded abort caught by
+                    # the provider) leaves the claim unverified, never silently
+                    # confirmed and never treated as a contradiction.
+                    continue
+                if _confirms(fetched, fact):
+                    confirming = fetched
                     break
             if confirming:
                 break
 
         if confirming is not None:
             attempt.confirmed = True
+            # Recorded from the FETCHED document only -- never from the search
+            # hit that merely pointed at it.
             attempt.confirming_url = confirming.url
             attempt.confirming_tier = str(confirming.tier)
             updated.append(
@@ -222,21 +273,32 @@ def escalate(
                     fact,
                     verified_status=VerifiedStatus.VERIFIED,
                     evidence_class=EvidenceClass.INDEPENDENT_EVIDENCE,
+                    # The claim was read from an actual document body just now
+                    # (the confirming fetch) -- that is what content_kind
+                    # records, independent of how the original claim was
+                    # sourced (requirement M1).
+                    content_kind=ContentKind.FULL_DOCUMENT,
                     independent_confirmation=True,
                     corroborating_source_ids=(*fact.corroborating_source_ids, confirming.doc_id),
                     confidence=min(1.0, fact.confidence + 0.25),
                     notes=(fact.notes + "; " if fact.notes else "")
-                    + f"escalated and confirmed in a primary source: {confirming.url}",
+                    + f"escalated and confirmed in a primary source body: {confirming.url}",
                 )
             )
         else:
+            note = "material claim; primary-source confirmation attempted and not found"
+            if budget_cut_short:
+                note = (
+                    "material claim; primary-source confirmation incomplete -- the LLM token "
+                    "budget was exhausted before every candidate domain could be searched or "
+                    "fetched (not the same as searching and finding nothing)"
+                )
             updated.append(
                 replace(
                     fact,
                     verified_status=VerifiedStatus.UNVERIFIED_MATERIAL_CLAIM,
                     confidence=min(fact.confidence, 0.3),
-                    notes=(fact.notes + "; " if fact.notes else "")
-                    + "material claim; primary-source confirmation attempted and not found",
+                    notes=(fact.notes + "; " if fact.notes else "") + note,
                 )
             )
         report.attempts.append(attempt)

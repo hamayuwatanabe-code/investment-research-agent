@@ -224,18 +224,27 @@ def run_one(
     chunks: list = []
     adversarial = None
 
+    if args.adversarial:
+        # Requirement M2: search results are discovery evidence, never facts.
+        # They are NOT merged into the document set that feeds extraction --
+        # adversarial.discovery (SearchQueryRecord/SearchHit) is what the Kill
+        # Agent's prompt context and the completeness gate read instead. A
+        # search snippet must never become a Fact.
+        #
+        # `research` is the single provider object for this run -- built once
+        # by build_research_stack() above, whether that is a corpus replay, the
+        # live Anthropic provider, a composite of both, or NullResearchProvider
+        # when neither --corpus nor --live is set. Running the adversarial pass
+        # exactly once here, before branching on --corpus, is what makes
+        # `--live --llm --adversarial` (no --corpus) actually search, and what
+        # keeps a run with both flags from searching twice.
+        adversarial = run_adversarial_search(
+            research, build_plan(ticker, company_name), llm=llm,
+            run_id=ticker, ticker=ticker,
+        )
+
     if args.corpus:
         documents = corpus.documents(ticker)
-        if args.adversarial:
-            # Requirement M2: search results are discovery evidence, never
-            # facts. They are NOT merged into the document set that feeds
-            # extraction -- adversarial.discovery (SearchQueryRecord/SearchHit)
-            # is what the Kill Agent's prompt context and the completeness gate
-            # read instead. A search snippet must never become a Fact.
-            adversarial = run_adversarial_search(
-                research, build_plan(ticker, company_name), llm=llm,
-                run_id=ticker, ticker=ticker,
-            )
         collector = DocumentCollector(
             documents,
             provenance=Provenance.CAPTURED,
