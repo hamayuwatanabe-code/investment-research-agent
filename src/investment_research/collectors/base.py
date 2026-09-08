@@ -24,6 +24,16 @@ class CollectionResult:
     errors: list[str] = field(default_factory=list)
     attempted_urls: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: True only when a specific collector's own semantic boundary has
+    #: determined that a query executed successfully and definitively found
+    #: nothing -- e.g. Drugs@FDA returning no applications for a sponsor. This
+    #: is never inferred generically from an HTTP-layer outcome (a 404/
+    #: NOT_FOUND is not, by itself, evidence of a clean zero-result search):
+    #: only the collector that actually knows what its API's 404 means may
+    #: set this, and in doing so it must also set ``outcome`` to ``OK`` --
+    #: this flag exists purely to make that determination explicit and
+    #: auditable, not to change what "degraded" means generically.
+    zero_results: bool = False
 
     @property
     def ok(self) -> bool:
@@ -33,21 +43,16 @@ class CollectionResult:
     def degraded(self) -> bool:
         """Whether this collection represents a failure worth flagging.
 
-        A collector that executed a valid query and got a definitive,
-        error-free zero-result answer (``NOT_FOUND`` with no ``errors``) is
-        not degraded -- "no Drugs@FDA applications listed for this sponsor"
-        is a correct, informative answer for an ordinary pre-approval
-        biotech, not a failure. Any outcome carrying an error (including
-        NOT_FOUND when the query itself could not be meaningfully attempted,
-        e.g. no company name to search with), or any non-OK outcome other
-        than a clean NOT_FOUND (BLOCKED, RATE_LIMITED, TIMEOUT, ERROR,
-        DISABLED), is degraded.
+        Generic and collector-agnostic: any outcome other than ``OK`` is
+        degraded, full stop. ``NOT_FOUND`` (including an HTTP 404) is NOT
+        globally reinterpreted as a successful zero-result search here --
+        that would silently paper over a collector that genuinely could not
+        resolve its query. A collector that knows its own API well enough to
+        tell "zero results" apart from "not found" (see ``zero_results``)
+        must say so explicitly by returning ``outcome=OK``; this property
+        does not guess on any collector's behalf.
         """
-        if self.errors:
-            return True
-        if self.outcome == FetchOutcome.OK:
-            return False
-        return self.outcome != FetchOutcome.NOT_FOUND
+        return self.outcome != FetchOutcome.OK
 
     def describe(self) -> str:
         return (

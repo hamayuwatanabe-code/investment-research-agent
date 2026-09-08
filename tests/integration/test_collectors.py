@@ -29,6 +29,8 @@ DRUGSFDA_WITH_RESULTS = {
     ]
 }
 
+STUDIES_EMPTY = {"studies": []}
+
 pytestmark = pytest.mark.integration
 
 TICKER_MAP = {
@@ -142,6 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/v2/studies": STUDIES,
             "/api/xbrl/companyfacts/CIK0001595097.json": COMPANY_FACTS,
             "/drug/drugsfda_with_results.json": DRUGSFDA_WITH_RESULTS,
+            "/api/v2/studies_empty": STUDIES_EMPTY,
         }
         if path in routes:
             body = json.dumps(routes[path]).encode()
@@ -266,19 +269,55 @@ def test_no_company_name_skips_rather_than_guessing(client):
     result = ClinicalTrialsCollector(client).collect("TESTCO", UNKNOWN)
     assert result.outcome is FetchOutcome.NOT_FOUND
     assert "skipped rather than guessed" in result.errors[0]
+    assert result.degraded is True
+
+
+def test_clinicaltrials_zero_studies_found_is_still_degraded(patched_endpoints, monkeypatch, client):
+    """Generic NOT_FOUND semantics are restored: unlike FdaCollector, this
+    collector makes no explicit zero-result determination, so a clean,
+    error-free "no registered studies" answer is NOT globally reinterpreted
+    as success -- it stays degraded, exactly as it did before any FDA-specific
+    exemption existed."""
+    monkeypatch.setattr(clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_empty")
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Nobody Sponsors This Inc")
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.errors == []
+    assert any("no registered studies found" in n for n in result.notes)
+    assert result.degraded is True, (
+        "a non-FDA collector's NOT_FOUND must never be silently treated as success"
+    )
 
 
 # --- FDA: zero-result 404 vs a real failure (requirement D) -----------------
-def test_fda_zero_result_404_is_not_degraded(base_url, monkeypatch, client):
-    """A valid Drugs@FDA query with no matching applications is NOT_FOUND with
-    no errors -- an ordinary, correct answer for a pre-approval biotech, and
-    must not be reported as a collector failure."""
+def test_fda_zero_result_404_is_explicit_ok_zero_results_not_degraded(base_url, monkeypatch, client):
+    """A valid Drugs@FDA query with no matching applications is openFDA's own
+    normal 404 response. FdaCollector -- and only FdaCollector -- translates
+    that into an explicit outcome=OK, zero_results=True; the 404 itself is
+    never globally reinterpreted as success."""
     monkeypatch.setattr(fda, "DRUGSFDA_URL", f"{base_url}/drug/drugsfda_zero_results.json")
     result = FdaCollector(client).collect("TESTCO", "Test Company Holdings Inc")
-    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.outcome is FetchOutcome.OK
+    assert result.zero_results is True
     assert result.errors == []
     assert result.degraded is False
-    assert any("no Drugs@FDA applications listed" in n for n in result.notes)
+    assert any("ZERO_RESULTS" in n and "no Drugs@FDA applications listed" in n for n in result.notes)
+
+
+def test_fda_zero_results_note_does_not_resolve_other_regulatory_questions(
+    base_url, monkeypatch, client
+):
+    monkeypatch.setattr(fda, "DRUGSFDA_URL", f"{base_url}/drug/drugsfda_zero_results.json")
+    result = FdaCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    note = " ".join(result.notes)
+    for phrase in (
+        "Type A/B/C",
+        "endpoint acceptability",
+        "Special Protocol Assessment",
+        "CMC",
+        "clinical hold",
+        "unresolved",
+    ):
+        assert phrase in note, f"zero-result note must not imply {phrase!r} is settled"
 
 
 def test_fda_query_with_results_is_not_degraded(base_url, monkeypatch, client):

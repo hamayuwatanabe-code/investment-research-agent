@@ -57,8 +57,24 @@ class FdaCollector:
         result = self.http.get(DRUGSFDA_URL, params={"search": search, "limit": self.limit})
         out.attempted_urls.append(result.url)
         if result.outcome == FetchOutcome.NOT_FOUND:
-            out.outcome = FetchOutcome.NOT_FOUND
-            out.notes.append(f"no Drugs@FDA applications listed for {company_name!r}")
+            # Drugs@FDA's own normal response for "no matching application"
+            # is an HTTP 404 -- that is this API's documented zero-result
+            # shape, not a network or server failure. This translation is
+            # made explicitly, only here, at this collector's own semantic
+            # boundary: HttpClient's NOT_FOUND stays a generic, collector-
+            # agnostic outcome, and CollectionResult.degraded is never
+            # globally taught that NOT_FOUND means success. A 404 from any
+            # other collector is unaffected and still degrades as before.
+            out.outcome = FetchOutcome.OK
+            out.zero_results = True
+            out.notes.append(
+                f"ZERO_RESULTS: no Drugs@FDA applications listed for {company_name!r}. "
+                "This means only that Drugs@FDA has no matching application on file for "
+                "this sponsor -- it does NOT resolve whether FDA has had any other "
+                "interaction with this programme. Type A/B/C meetings, endpoint "
+                "acceptability, a Special Protocol Assessment, CMC issues, and a prior "
+                "clinical hold all remain unresolved unless separately researched."
+            )
             return out
         if not result.ok:
             out.outcome = result.outcome
