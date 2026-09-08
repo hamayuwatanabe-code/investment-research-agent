@@ -7,13 +7,18 @@ name = "investment-research-agent"
 version = "0.1.0"
 description = "Institutional-grade, falsification-first investment research multi-agent system"
 requires-python = ">=3.10"
-# Deliberately ZERO runtime dependencies: the deterministic core (kill gate,
-# capital-structure math, valuation math, contradiction detection) must be
-# reproducible anywhere and must not depend on a network library or an LLM.
+# Deliberately ZERO required runtime dependencies: the deterministic core
+# (kill gate, capital-structure math, valuation math, contradiction detection)
+# must be reproducible anywhere and must not depend on a network library or an
+# LLM. The LLM-backed agents are optional and declare their own dependency
+# below under the `llm` extra, so they degrade gracefully when it is absent
+# and install reproducibly (no manual `pip install anthropic`) when it is
+# wanted.
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.4", "mypy>=1.8"]
+llm = ["anthropic>=1.4.0,<2"]
+dev = ["pytest>=7.4", "ruff>=0.4", "mypy>=1.8", "anthropic>=1.4.0,<2"]
 
 [project.scripts]
 investment-research = "investment_research.cli:main"
