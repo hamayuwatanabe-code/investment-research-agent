@@ -426,3 +426,51 @@ def test_positive_and_negative_evidence_use_the_same_decision_grade_rule():
     )
     assert negative_verified.is_decision_grade is True
     assert positive_verified.is_decision_grade is True
+
+
+# =========================== 11 ==============================================
+def test_budget_exhausted_search_leaves_domain_unsearched_and_blocks_action():
+    """A budget cutoff must never quietly downgrade into a lower-quality Action.
+
+    AnthropicWebResearchProvider.search() must translate a BudgetExceeded
+    abort into executed=False -- "we did not look", not "we looked and found
+    nothing" (CLAUDE.md rule 8) -- and a domain that reads FAILED must, exactly
+    like an UNSEARCHED domain, block the Action entirely rather than let the
+    run complete on a partial research base.
+    """
+    from investment_research.llm.client import BudgetExceeded
+    from investment_research.research.anthropic_web import AnthropicWebResearchProvider
+    from investment_research.research.provider import ResearchQuery
+
+    class _ExhaustedLLM:
+        model = "claude-sonnet-5"
+
+        def available(self):
+            return True, "ready"
+
+        def raw_message(self, **_kw):
+            raise BudgetExceeded("LLM token budget already exhausted; no further calls this run")
+
+    provider = AnthropicWebResearchProvider(_ExhaustedLLM())
+    aborted = provider.search(ResearchQuery(query="q", domain=ResearchDomain.COMPETITION))
+    assert aborted.executed is False, "a budget cutoff must never look like a completed search"
+    assert aborted.documents == []
+
+    completeness = _empty_completeness()
+    completeness.coverage[ResearchDomain.COMPETITION] = DomainCoverage(
+        domain=ResearchDomain.COMPETITION, status=SearchStatus.FAILED
+    )
+    assert completeness.blocked is True
+
+    gate = evaluate_kill_gate([], [])
+    matrix = assess_evidence_sufficiency(facts=[], completeness=completeness, gate=gate)
+
+    # Mirrors the pipeline's own gating rule (orchestrator/pipeline.py).
+    blocking_reasons: list[str] = []
+    if completeness.blocked:
+        blocking_reasons.append(completeness.reason())
+    if not matrix.sufficient:
+        blocking_reasons.extend(matrix.blocking_reasons())
+
+    action = None if blocking_reasons else "would-be-action"
+    assert action is None, "budget exhaustion must block the Action, never silently downgrade it"

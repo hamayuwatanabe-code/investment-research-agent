@@ -20,7 +20,7 @@ from investment_research.agents.llm_agents2 import LLMBearAgent, LLMBullAgent, L
 from investment_research.agents.llm_base import PromptGuard
 from investment_research.agents.regulatory import RegulatoryAgent
 from investment_research.collectors.documents import Document, chunk_document
-from investment_research.llm.client import LLMClient
+from investment_research.llm.client import BudgetExceeded, LLMBudget, LLMClient
 from investment_research.orchestrator.isolation import Channel, LeakageError
 from investment_research.schemas.agent_io import AgentInput
 from investment_research.schemas.enums import ContentKind, FactCategory, SourceTier
@@ -369,3 +369,79 @@ def test_agent_reads_only_its_relevant_chunks(client):
     assert output.metrics["pack_chunks"] < len(chunks), "the agent must not read every chunk"
     prompt = REQUESTS[-1]["messages"][0]["content"]
     assert "not sufficient to demonstrate" in prompt
+
+
+# --- budget enforcement (cost-control fix) ----------------------------------
+def test_budget_preflight_blocks_the_call_before_any_request(base_url):
+    """A planned request that cannot fit the remaining budget must never reach the API."""
+    global RESPONSE
+    RESPONSE = message([{"type": "text", "text": "ok"}])
+    REQUESTS.clear()
+    budget = LLMBudget(max_total_tokens=100)
+    tiny_client = LLMClient(
+        api_key="sk-ant-test", base_url=base_url, max_retries=0, timeout=10, budget=budget
+    )
+
+    with pytest.raises(BudgetExceeded):
+        tiny_client.raw_message(
+            system="s" * 1000,
+            messages=[{"role": "user", "content": "x"}],
+            max_tokens=16000,
+        )
+
+    assert REQUESTS == [], "a preflight-rejected call must never reach the Anthropic API"
+    assert budget.exhausted is True
+
+
+def test_exhausted_budget_blocks_every_subsequent_call(base_url):
+    """Once exhausted, even a call that would otherwise easily fit is refused."""
+    global RESPONSE
+    RESPONSE = message([{"type": "text", "text": "ok"}])
+    REQUESTS.clear()
+    budget = LLMBudget(max_total_tokens=1_000_000)
+    budget.exhausted = True
+    budget.exhausted_reason = "test: pre-exhausted"
+    tiny_client = LLMClient(
+        api_key="sk-ant-test", base_url=base_url, max_retries=0, timeout=10, budget=budget
+    )
+
+    usable, reason = tiny_client.available()
+    assert usable is False
+    assert "exhausted" in reason.lower()
+
+    with pytest.raises(BudgetExceeded):
+        tiny_client.raw_message(
+            system="tiny", messages=[{"role": "user", "content": "x"}], max_tokens=10
+        )
+    assert REQUESTS == [], "no call may reach the API once the budget is exhausted"
+
+
+def test_actual_usage_crossing_the_budget_is_recorded_but_blocks_the_next_call(base_url):
+    """A single call's real usage can overshoot; that must latch exhaustion for the next one."""
+    global RESPONSE
+    REQUESTS.clear()
+    budget = LLMBudget(max_total_tokens=1000)
+    tiny_client = LLMClient(
+        api_key="sk-ant-test", base_url=base_url, max_retries=0, timeout=10, budget=budget
+    )
+    # The preflight reservation for this small prompt comfortably fits -- the
+    # overshoot below can only be detected after the fact, from real usage.
+    RESPONSE = message(
+        [{"type": "text", "text": "ok"}],
+        usage={"input_tokens": 800, "output_tokens": 500},
+    )
+
+    response = tiny_client.raw_message(
+        system="s", messages=[{"role": "user", "content": "x"}], max_tokens=50
+    )
+
+    assert response is not None
+    assert budget.used_total == 1300
+    assert budget.exhausted is True, "actual usage over the ceiling must latch exhaustion"
+
+    REQUESTS.clear()
+    with pytest.raises(BudgetExceeded):
+        tiny_client.raw_message(
+            system="s", messages=[{"role": "user", "content": "x"}], max_tokens=1
+        )
+    assert REQUESTS == [], "no further call may reach the API once exhausted"

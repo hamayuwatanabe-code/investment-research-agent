@@ -12,8 +12,10 @@ from investment_research.collectors.documents import (
     score_chunk,
     split_sentences,
 )
+from investment_research.llm.client import BudgetExceeded
 from investment_research.research.adversarial import BEAR_TEMPLATES, BULL_TEMPLATES, build_plan
 from investment_research.research.anthropic_web import (
+    SEARCH_MAX_TOKENS,
     WEB_FETCH_TOOL,
     WEB_SEARCH_TOOL,
     AnthropicWebResearchProvider,
@@ -182,17 +184,25 @@ def test_no_search_block_is_neither_documents_nor_error():
 class _FakeLLM:
     """Records the request `raw_message` was called with; returns a canned reply."""
 
-    def __init__(self, model: str, response: dict):
+    def __init__(self, model: str, response: dict, *, raises: Exception | None = None):
         self.model = model
         self.last_usage_tokens = 0
         self._response = response
+        self._raises = raises
         self.last_request: dict | None = None
 
     def available(self):
         return True, "ready"
 
     def raw_message(self, *, system, messages, tools=None, max_tokens=16000, **_kw):
-        self.last_request = {"system": system, "messages": messages, "tools": tools}
+        self.last_request = {
+            "system": system,
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": max_tokens,
+        }
+        if self._raises is not None:
+            raise self._raises
         return self._response
 
 
@@ -267,6 +277,88 @@ def test_provider_keeps_search_hits_separate_from_fetched_document_bodies():
     # The two are still distinct records -- fetching one URL never upgrades or
     # mutates a search hit recorded separately.
     assert search_result.documents[0].content_kind is ContentKind.METADATA_ONLY
+
+
+def _search_result_response(count: int) -> dict:
+    return {
+        "content": [
+            {
+                "type": "web_search_tool_result",
+                "content": [
+                    {"url": f"https://www.sec.gov/{i}", "title": f"Doc {i}"}
+                    for i in range(count)
+                ],
+            }
+        ]
+    }
+
+
+def test_search_enforces_query_max_results():
+    """A provider returning 10 hits for a max_results=3 query must yield exactly 3."""
+    llm = _FakeLLM("claude-sonnet-5", _search_result_response(10))
+    provider = AnthropicWebResearchProvider(llm)
+
+    result = provider.search(
+        ResearchQuery(query="q", domain=ResearchDomain.REGULATORY, max_results=3)
+    )
+
+    assert len(result.documents) == 3
+    # Ordering preserved: the first 3 of the original 10, in order.
+    assert [d.url for d in result.documents] == [
+        "https://www.sec.gov/0",
+        "https://www.sec.gov/1",
+        "https://www.sec.gov/2",
+    ]
+    # Evidence integrity untouched by the cap.
+    assert all(d.content_kind is ContentKind.METADATA_ONLY for d in result.documents)
+
+
+def test_search_max_results_never_exceeded_even_when_fewer_returned():
+    llm = _FakeLLM("claude-sonnet-5", _search_result_response(2))
+    provider = AnthropicWebResearchProvider(llm)
+
+    result = provider.search(
+        ResearchQuery(query="q", domain=ResearchDomain.REGULATORY, max_results=3)
+    )
+    assert len(result.documents) == 2
+
+
+def test_search_output_ceiling_is_reduced_for_discovery():
+    """Discovery-only search calls must not need a long model answer (cost control)."""
+    assert SEARCH_MAX_TOKENS < 2000, "search is discovery-only; it never needed 8000 tokens"
+
+    llm = _FakeLLM("claude-sonnet-5", {"content": []})
+    provider = AnthropicWebResearchProvider(llm)
+    provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+    assert llm.last_request["max_tokens"] == SEARCH_MAX_TOKENS
+
+
+def test_search_translates_budget_exceeded_into_unsearched_not_empty_result():
+    """A budget cutoff is 'we did not look', not 'we looked and found nothing'.
+
+    executed=False is what lets the Search Completeness Gate mark this domain
+    FAILED/UNSEARCHED rather than silently SEARCHED with zero documents --
+    the exact distinction CLAUDE.md rule 8 exists to protect.
+    """
+    llm = _FakeLLM(
+        "claude-sonnet-5", {"content": []}, raises=BudgetExceeded("budget exhausted")
+    )
+    provider = AnthropicWebResearchProvider(llm)
+
+    result = provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+
+    assert result.executed is False
+    assert result.documents == []
+    assert result.outcome is FetchOutcome.DISABLED
+    assert "BudgetExceeded" in result.error
+
+
+def test_fetch_returns_none_on_budget_exceeded():
+    llm = _FakeLLM(
+        "claude-sonnet-5", {"content": []}, raises=BudgetExceeded("budget exhausted")
+    )
+    provider = AnthropicWebResearchProvider(llm)
+    assert provider.fetch("https://www.sec.gov/x", reason="verify") is None
 
 
 # --- providers --------------------------------------------------------------

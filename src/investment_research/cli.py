@@ -108,8 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--token-budget",
         type=int,
-        default=2_000_000,
-        help="maximum total LLM tokens for the run",
+        default=500_000,
+        help=(
+            "maximum total LLM tokens for the run (default 500000: a materially safer "
+            "ceiling for normal live Sonnet research after a live smoke test showed a "
+            "single server-side web search consuming 18k+ tokens; pass a higher explicit "
+            "value for a deliberately larger run). If this is insufficient, the run reports "
+            "RESEARCH STATUS: INCOMPLETE/BLOCKED_PENDING_VERIFICATION with no action label "
+            "rather than completing on partial research."
+        ),
     )
     parser.add_argument(
         "--adversarial",

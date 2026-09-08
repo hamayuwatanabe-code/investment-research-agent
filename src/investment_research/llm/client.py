@@ -51,6 +51,42 @@ class LLMUnavailable(RuntimeError):
     """Raised when an LLM call is attempted with no usable credentials."""
 
 
+class BudgetExceeded(RuntimeError):
+    """Raised when a call cannot be funded by the remaining LLM token budget.
+
+    The guarantee this class is part of is **"no further calls after
+    exhaustion, plus a conservative preflight reservation"** -- it is
+    deliberately NOT "mathematically guaranteed zero overshoot from a single
+    server-side call". Anthropic's server-side tools (``web_search``,
+    ``web_fetch``) execute on Anthropic's infrastructure, and their real
+    token cost is not knowable to this client until the response's ``usage``
+    field comes back. So one in-flight call can still push actual usage past
+    ``max_total_tokens`` even though its preflight reservation looked fine --
+    see :meth:`LLMBudget.record`. What *is* guaranteed: :meth:`LLMBudget.check`
+    never lets a request whose conservative reservation does not fit proceed,
+    and once the budget is marked exhausted (whether by a failed preflight
+    check or by an actual-usage overrun), every subsequent call is refused.
+    """
+
+
+#: Rough, deliberately conservative chars-per-token ratio for the local
+#: preflight estimate below (same heuristic as
+#: ``collectors.documents.estimate_tokens``, kept local so this module stays
+#: dependency-light).
+_CHARS_PER_TOKEN = 4
+
+#: Tool `type` prefixes for Anthropic's server-side web tools. Unlike a local
+#: strict-schema tool (whose cost is just the schema plus a JSON object the
+#: model writes as part of its own bounded output), these execute remotely
+#: and their token cost is unknown until the response comes back.
+_SERVER_SIDE_WEB_TOOL_PREFIXES = ("web_search", "web_fetch")
+
+#: Conservative flat pad added to the local preflight estimate when a request
+#: declares one of the server-side web tools above. This is a safety buffer,
+#: never a prediction of the real cost -- see BudgetExceeded.
+SERVER_TOOL_TOKEN_RESERVE = 20_000
+
+
 @dataclass
 class LLMCallRecord:
     agent_id: str
@@ -71,12 +107,36 @@ class LLMCallRecord:
 
 @dataclass
 class LLMBudget:
-    """Per-run token accounting (requirement P9)."""
+    """Per-run token accounting AND enforcement (requirement P9).
+
+    Two distinct mechanisms, not one:
+
+    1. **Preflight** (:meth:`check`): refuses a call whose conservative
+       reservation would not fit in what remains. This runs before any
+       network request, so a rejected call never reaches the Anthropic API.
+    2. **Post-hoc exhaustion** (:meth:`record`): inspects *actual* usage
+       after a call completes. A server-side tool call's real cost is not
+       knowable in advance (see :class:`BudgetExceeded`), so actual usage can
+       still push ``used_total`` past ``max_total_tokens`` even when the
+       preflight reservation looked fine. When that happens, the budget
+       latches ``exhausted`` and every subsequent call is refused for the
+       rest of this run -- permanently; there is no reset.
+
+    This class does NOT guarantee that a single in-flight call can never
+    overshoot ``max_total_tokens``. The guarantee is: no further calls after
+    exhaustion, plus a conservative preflight reservation on every call --
+    not a mathematically bounded zero overshoot from one server-side call
+    whose cost was unknown before it ran.
+    """
 
     max_total_tokens: int = 2_000_000
     used_input: int = 0
     used_output: int = 0
     calls: list[LLMCallRecord] = field(default_factory=list)
+    #: Latched permanently once a preflight check fails or actual usage puts
+    #: the budget over its ceiling. Once True, every future call is refused.
+    exhausted: bool = False
+    exhausted_reason: str = ""
 
     @property
     def used_total(self) -> int:
@@ -89,10 +149,44 @@ class LLMBudget:
     def would_exceed(self, estimated: int) -> bool:
         return self.used_total + estimated > self.max_total_tokens
 
+    def check(self, reserved_tokens: int) -> None:
+        """Preflight guard: call before every API request, make none if it raises.
+
+        Raises :class:`BudgetExceeded` -- without making any network call --
+        when the budget is already exhausted, or when ``reserved_tokens``
+        would not fit in what remains. ``reserved_tokens`` is a conservative
+        estimate; it is never treated as an exact prediction, particularly
+        for calls that invoke a server-side web tool.
+        """
+        if self.exhausted:
+            raise BudgetExceeded(
+                self.exhausted_reason
+                or "LLM token budget already exhausted; no further calls this run"
+            )
+        if self.would_exceed(reserved_tokens):
+            self.exhausted = True
+            self.exhausted_reason = (
+                f"preflight: a planned request reserving ~{reserved_tokens} tokens would "
+                f"exceed the LLM budget ({self.used_total}/{self.max_total_tokens} used, "
+                f"{self.remaining} remaining) -- refusing to call the API"
+            )
+            log.warning(self.exhausted_reason)
+            raise BudgetExceeded(self.exhausted_reason)
+
     def record(self, call: LLMCallRecord) -> None:
         self.used_input += call.input_tokens
         self.used_output += call.output_tokens
         self.calls.append(call)
+        if not self.exhausted and self.used_total > self.max_total_tokens:
+            self.exhausted = True
+            self.exhausted_reason = (
+                f"actual usage after agent {call.agent_id!r} put the LLM budget over its "
+                f"ceiling ({self.used_total}/{self.max_total_tokens} tokens used). A "
+                "server-side tool call's real cost is not known until the response comes "
+                "back, so this can happen even after a conservative preflight reservation. "
+                "No further LLM calls will be made this run."
+            )
+            log.warning(self.exhausted_reason)
 
     def by_agent(self) -> dict[str, int]:
         totals: dict[str, int] = {}
@@ -186,12 +280,38 @@ class LLMClient:
     def available(self) -> tuple[bool, str]:
         if self._client is None:
             return False, self._unavailable_reason or "no client"
+        if self.budget.exhausted:
+            return False, self.budget.exhausted_reason or "LLM token budget exhausted"
         return True, "ready"
 
     def _require(self) -> Any:
         if self._client is None:
             raise LLMUnavailable(self._unavailable_reason or "LLM client unavailable")
         return self._client
+
+    def _default_reservation(
+        self,
+        *,
+        system: str,
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]] | None,
+        max_tokens: int,
+    ) -> int:
+        """Conservative preflight token estimate for one request.
+
+        Deliberately not an exact prediction: it is a local chars/4 estimate of
+        the rendered prompt plus the requested output ceiling, padded with
+        ``SERVER_TOOL_TOKEN_RESERVE`` when a server-side web tool is declared,
+        because that tool's real cost is only known once the response's
+        ``usage`` field comes back.
+        """
+        prompt_chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages)
+        reservation = prompt_chars // _CHARS_PER_TOKEN + max_tokens
+        if tools and any(
+            str(t.get("type", "")).startswith(_SERVER_SIDE_WEB_TOOL_PREFIXES) for t in tools
+        ):
+            reservation += SERVER_TOOL_TOKEN_RESERVE
+        return reservation
 
     # -- raw ---------------------------------------------------------------
     def raw_message(
@@ -203,9 +323,25 @@ class LLMClient:
         max_tokens: int = 16000,
         agent_id: str = "raw",
         tool_choice: dict[str, Any] | None = None,
+        reserved_tokens: int | None = None,
     ) -> Any:
-        """One Messages API call, with usage accounting."""
+        """One Messages API call, with a preflight budget guard and usage accounting.
+
+        Before any network request, ``self.budget.check()`` is given a
+        conservative token reservation and may raise :class:`BudgetExceeded`,
+        in which case no request is made at all. When the caller does not
+        supply ``reserved_tokens`` explicitly, one is derived by
+        :meth:`_default_reservation`; a caller with a better estimate of its
+        own cost (e.g. a research provider that knows its fetch ceiling)
+        should pass ``reserved_tokens`` directly.
+        """
         client = self._require()
+        if reserved_tokens is None:
+            reserved_tokens = self._default_reservation(
+                system=system, messages=messages, tools=tools, max_tokens=max_tokens
+            )
+        self.budget.check(reserved_tokens)
+
         request: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -252,11 +388,14 @@ class LLMClient:
         tool_description: str,
         schema: dict[str, Any],
         max_tokens: int = 16000,
+        reserved_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Call the model and return a schema-validated object.
 
         Raises on failure rather than returning something partial. The caller
         turns that into a degraded agent run, which the report shows.
+        ``reserved_tokens`` is forwarded to :meth:`raw_message`'s preflight
+        budget guard; omit it to use the conservative default derivation.
         """
         tool = as_strict_tool(tool_name, tool_description, schema)
         response = self.raw_message(
@@ -268,6 +407,7 @@ class LLMClient:
             # `auto` plus an explicit instruction: forced tool_choice is
             # rejected on some current models, and `auto` is portable.
             tool_choice={"type": "auto"},
+            reserved_tokens=reserved_tokens,
         )
 
         stop_reason = str(getattr(response, "stop_reason", "") or "")

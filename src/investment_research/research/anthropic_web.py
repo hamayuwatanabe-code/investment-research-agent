@@ -23,6 +23,7 @@ from typing import Any
 
 from ..collectors.documents import Document
 from ..collectors.tiering import classify_tier
+from ..llm.client import BudgetExceeded
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
@@ -49,6 +50,12 @@ WEB_FETCH_TOOL_BASIC = "web_fetch_20250910"
 #: to via server-side code execution / programmatic tool calling). This
 #: provider only ever issues them directly from the top-level agent turn.
 _DIRECT_CALLER = ["direct"]
+
+#: Search is discovery-only: the useful payload comes back as
+#: ``web_search_tool_result`` content, not model prose, so a search call never
+#: needs a long completion. Kept far below the interpretive agents' output
+#: ceilings on purpose (cost control, requirement P9).
+SEARCH_MAX_TOKENS = 1024
 
 #: Models that support the dynamic-filtering variants.
 _DYNAMIC_FILTER_MODELS = (
@@ -131,7 +138,20 @@ class AnthropicWebResearchProvider:
                 system=SEARCH_SYSTEM,
                 messages=[{"role": "user", "content": query.query}],
                 tools=[tool],
-                max_tokens=8000,
+                max_tokens=SEARCH_MAX_TOKENS,
+            )
+        except BudgetExceeded as exc:
+            # A budget cutoff is "we did not look", not "we looked and found
+            # nothing" -- executed=False so the Search Completeness Gate marks
+            # this domain FAILED/UNSEARCHED rather than silently SEARCHED with
+            # zero documents (requirement P6 / CLAUDE.md rule 8).
+            log.warning("web search skipped for %r: %s", query.query, exc)
+            return ResearchResult(
+                query=query,
+                outcome=FetchOutcome.DISABLED,
+                path=self.path,
+                executed=False,
+                error=f"BudgetExceeded: {exc}",
             )
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             log.warning("web search failed for %r: %s", query.query, exc)
@@ -143,6 +163,9 @@ class AnthropicWebResearchProvider:
             )
 
         documents, error = self._documents_from_response(response, query)
+        # Evidence integrity is untouched by this cap: a truncated result is
+        # still METADATA_ONLY, still a pointer, never promoted to a fact.
+        documents = documents[: query.max_results]
         outcome = FetchOutcome.OK if not error else FetchOutcome.ERROR
         if not documents and not error:
             outcome = FetchOutcome.NOT_FOUND
@@ -194,6 +217,9 @@ class AnthropicWebResearchProvider:
                 tools=[tool],
                 max_tokens=self.max_content_tokens,
             )
+        except BudgetExceeded as exc:
+            log.warning("web fetch skipped for %s: %s", url, exc)
+            return None
         except Exception as exc:  # noqa: BLE001
             log.warning("web fetch failed for %s: %s", url, exc)
             return None
