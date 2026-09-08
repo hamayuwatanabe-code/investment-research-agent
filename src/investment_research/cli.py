@@ -93,7 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
             "the deterministic agents run and the report records that."
         ),
     )
-    parser.add_argument("--llm-model", default="claude-opus-5", help="model id for --llm")
+    parser.add_argument(
+        "--llm-model",
+        default="claude-sonnet-5",
+        help="model id for --llm (default claude-sonnet-5; pass claude-opus-5 for a "
+        "red-team/audit run)",
+    )
     parser.add_argument(
         "--llm-effort",
         default="high",

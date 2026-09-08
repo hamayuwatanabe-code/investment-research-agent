@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from investment_research.llm.client import (
+    DEFAULT_MODEL,
     LLMBudget,
     LLMCallRecord,
     LLMClient,
@@ -72,6 +73,33 @@ def test_strict_tool_shape():
     assert tool["strict"] is True
     assert tool["name"] == "submit"
     assert tool["input_schema"] is SCHEMA
+
+
+# --- default model -----------------------------------------------------------
+def test_sonnet_5_is_the_normal_default():
+    """Verified live: claude-sonnet-5 works. It is now the normal default."""
+    assert DEFAULT_MODEL == "claude-sonnet-5"
+    assert LLMClient(api_key="sk-ant-not-a-real-key").model == "claude-sonnet-5"
+
+
+def test_opus_5_remains_explicitly_selectable():
+    """Opus 5 is not removed -- it stays available for an explicit red-team run."""
+    client = LLMClient(api_key="sk-ant-not-a-real-key", model="claude-opus-5")
+    assert client.model == "claude-opus-5"
+
+
+def test_cli_llm_model_default_is_sonnet_5():
+    from investment_research.cli import build_parser
+
+    args = build_parser().parse_args(["ACME"])
+    assert args.llm_model == "claude-sonnet-5"
+
+
+def test_cli_llm_model_can_be_overridden_to_opus_5():
+    from investment_research.cli import build_parser
+
+    args = build_parser().parse_args(["ACME", "--llm-model", "claude-opus-5"])
+    assert args.llm_model == "claude-opus-5"
 
 
 # --- client contract --------------------------------------------------------

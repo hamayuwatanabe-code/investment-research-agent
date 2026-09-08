@@ -27,7 +27,11 @@ from .schema import SchemaValidationError, as_strict_tool, validate
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "claude-opus-5"
+#: Normal/default model for interpretive agents. Verified against the real
+#: Anthropic API (claude-sonnet-5, web_search_20260318, web_fetch_20260318).
+#: Opus 5 remains fully supported -- pass it explicitly (LLMClient(model=...)
+#: or --llm-model claude-opus-5) for a final red-team/audit run.
+DEFAULT_MODEL = "claude-sonnet-5"
 
 #: Models on which `budget_tokens` is rejected and adaptive thinking is the
 #: only supported configuration.

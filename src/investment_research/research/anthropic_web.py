@@ -1,7 +1,7 @@
 """Anthropic server-side web research (ADR 0005, the primary path).
 
-Uses the Messages API server tools ``web_search_20260209`` and
-``web_fetch_20260209``. Both execute on Anthropic's infrastructure, which is why
+Uses the Messages API server tools ``web_search_20260318`` and
+``web_fetch_20260318``. Both execute on Anthropic's infrastructure, which is why
 this is the right answer for a client environment with restricted egress: the
 program is not reaching those sites at all, so there is nothing to circumvent.
 
@@ -36,10 +36,19 @@ log = logging.getLogger(__name__)
 
 #: Server tool type strings. The dated variants with dynamic filtering require
 #: Opus 4.6+/Sonnet 4.6+; the basic variants are the fallback for older models.
-WEB_SEARCH_TOOL = "web_search_20260209"
-WEB_FETCH_TOOL = "web_fetch_20260209"
+#: 20260318 is the current variant, verified live against claude-sonnet-5 and
+#: claude-opus-5; it supersedes the older 20260209 dated tools. A compatibility
+#: fallback to the basic (non-dated-dynamic-filtering) variants is kept for
+#: models that don't support server-side dynamic filtering at all.
+WEB_SEARCH_TOOL = "web_search_20260318"
+WEB_FETCH_TOOL = "web_fetch_20260318"
 WEB_SEARCH_TOOL_BASIC = "web_search_20250305"
 WEB_FETCH_TOOL_BASIC = "web_fetch_20250910"
+
+#: Callers permitted to invoke the server-side web tools directly (as opposed
+#: to via server-side code execution / programmatic tool calling). This
+#: provider only ever issues them directly from the top-level agent turn.
+_DIRECT_CALLER = ["direct"]
 
 #: Models that support the dynamic-filtering variants.
 _DYNAMIC_FILTER_MODELS = (
@@ -112,6 +121,8 @@ class AnthropicWebResearchProvider:
             "name": "web_search",
             "max_uses": self.max_uses_per_query,
         }
+        if search_tool == WEB_SEARCH_TOOL:
+            tool["allowed_callers"] = _DIRECT_CALLER
         if query.allowed_domains:
             tool["allowed_domains"] = list(query.allowed_domains)
 
@@ -161,13 +172,15 @@ class AnthropicWebResearchProvider:
             return None
 
         _, fetch_tool = tool_types_for(self.llm.model)
-        tool = {
+        tool: dict[str, Any] = {
             "type": fetch_tool,
             "name": "web_fetch",
             "max_uses": 2,
             "max_content_tokens": self.max_content_tokens,
             "citations": {"enabled": True},
         }
+        if fetch_tool == WEB_FETCH_TOOL:
+            tool["allowed_callers"] = _DIRECT_CALLER
         prompt = (
             f"Fetch this URL and return its substantive text verbatim, without summarising, "
             f"interpreting or evaluating it: {url}\n"

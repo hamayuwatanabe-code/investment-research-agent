@@ -136,7 +136,7 @@ def test_request_uses_current_api_shape(client):
     LLMRegulatoryAgent(client, fallback=RegulatoryAgent()).run(data)
 
     request = REQUESTS[-1]
-    assert request["model"] == "claude-opus-5"
+    assert request["model"] == "claude-sonnet-5"
     assert request["thinking"] == {"type": "adaptive"}
     assert request["output_config"] == {"effort": "high"}
     assert request["tools"][0]["strict"] is True

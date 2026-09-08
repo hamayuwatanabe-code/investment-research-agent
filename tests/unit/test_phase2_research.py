@@ -13,7 +13,13 @@ from investment_research.collectors.documents import (
     split_sentences,
 )
 from investment_research.research.adversarial import BEAR_TEMPLATES, BULL_TEMPLATES, build_plan
-from investment_research.research.anthropic_web import parse_search_response, tool_types_for
+from investment_research.research.anthropic_web import (
+    WEB_FETCH_TOOL,
+    WEB_SEARCH_TOOL,
+    AnthropicWebResearchProvider,
+    parse_search_response,
+    tool_types_for,
+)
 from investment_research.research.corpus import CorpusResearchProvider
 from investment_research.research.escalation import escalate, needs_escalation
 from investment_research.research.provider import (
@@ -131,7 +137,8 @@ def test_token_estimate_is_monotonic():
 
 # --- anthropic web parsing --------------------------------------------------
 def test_tool_variants_by_model():
-    assert tool_types_for("claude-opus-5")[0] == "web_search_20260209"
+    assert tool_types_for("claude-opus-5")[0] == "web_search_20260318"
+    assert tool_types_for("claude-sonnet-5")[0] == "web_search_20260318"
     assert tool_types_for("claude-haiku-4-5")[0] == "web_search_20250305"
 
 
@@ -170,6 +177,96 @@ def test_a_failed_search_is_an_error_not_an_empty_result():
 def test_no_search_block_is_neither_documents_nor_error():
     documents, error = parse_search_response({"content": [{"type": "text", "text": "hello"}]})
     assert documents == [] and error == ""
+
+
+class _FakeLLM:
+    """Records the request `raw_message` was called with; returns a canned reply."""
+
+    def __init__(self, model: str, response: dict):
+        self.model = model
+        self.last_usage_tokens = 0
+        self._response = response
+        self.last_request: dict | None = None
+
+    def available(self):
+        return True, "ready"
+
+    def raw_message(self, *, system, messages, tools=None, max_tokens=16000, **_kw):
+        self.last_request = {"system": system, "messages": messages, "tools": tools}
+        return self._response
+
+
+def test_current_web_tools_selected_and_direct_caller_marked_for_sonnet_5():
+    """Sonnet 5 must get the current (20260318) dated tools, called directly."""
+    llm = _FakeLLM("claude-sonnet-5", {"content": []})
+    provider = AnthropicWebResearchProvider(llm)
+
+    provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+    search_tool = llm.last_request["tools"][0]
+    assert search_tool["type"] == WEB_SEARCH_TOOL
+    assert search_tool["allowed_callers"] == ["direct"]
+
+    provider.fetch("https://www.sec.gov/x", reason="verify")
+    fetch_tool = llm.last_request["tools"][0]
+    assert fetch_tool["type"] == WEB_FETCH_TOOL
+    assert fetch_tool["allowed_callers"] == ["direct"]
+
+
+def test_older_basic_tool_variant_is_not_given_allowed_callers():
+    """The compatibility fallback for older models doesn't carry the new param."""
+    llm = _FakeLLM("claude-haiku-4-5", {"content": []})
+    provider = AnthropicWebResearchProvider(llm)
+
+    provider.search(ResearchQuery(query="q", domain=ResearchDomain.REGULATORY))
+    search_tool = llm.last_request["tools"][0]
+    assert search_tool["type"] == "web_search_20250305"
+    assert "allowed_callers" not in search_tool
+
+
+def test_provider_keeps_search_hits_separate_from_fetched_document_bodies():
+    """Evidence integrity: a search hit is a pointer, a fetch is the document.
+
+    The Decision-Grade Evidence Gate depends on these never being conflated --
+    a SEARCH_SUMMARY-shaped result must stay METADATA_ONLY even after the
+    provider has also fetched a FULL_DOCUMENT for a different URL.
+    """
+    search_llm = _FakeLLM(
+        "claude-sonnet-5",
+        {
+            "content": [
+                {
+                    "type": "web_search_tool_result",
+                    "content": [{"url": "https://www.sec.gov/a", "title": "10-Q"}],
+                }
+            ]
+        },
+    )
+    search_provider = AnthropicWebResearchProvider(search_llm)
+    search_result = search_provider.search(
+        ResearchQuery(query="q", domain=ResearchDomain.REGULATORY)
+    )
+    assert len(search_result.documents) == 1
+    assert search_result.documents[0].content_kind is ContentKind.METADATA_ONLY
+
+    import types
+
+    fetch_block = types.SimpleNamespace(
+        type="web_fetch_tool_result",
+        content={
+            "content": {"source": {"data": "full filing text"}, "title": "10-Q"},
+            "retrieved_at": "2026-09-08T00:00:00+00:00",
+        },
+    )
+    fetch_llm = _FakeLLM("claude-sonnet-5", types.SimpleNamespace(content=[fetch_block]))
+    fetch_provider = AnthropicWebResearchProvider(fetch_llm)
+    fetched = fetch_provider.fetch("https://www.sec.gov/a", reason="verify")
+    assert fetched is not None
+    assert fetched.content_kind is ContentKind.FULL_DOCUMENT
+    assert fetched.text == "full filing text"
+
+    # The two are still distinct records -- fetching one URL never upgrades or
+    # mutates a search hit recorded separately.
+    assert search_result.documents[0].content_kind is ContentKind.METADATA_ONLY
 
 
 # --- providers --------------------------------------------------------------
