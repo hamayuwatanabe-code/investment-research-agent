@@ -49,7 +49,6 @@ from investment_research.schemas.enums import (
     SourceTier,
 )
 from investment_research.schemas.fact import Source, UnresolvedQuestion, make_source_id
-from investment_research.scoring.completeness import direct_collector_coverage
 
 pytestmark = pytest.mark.integration
 
@@ -89,25 +88,77 @@ def mock_server():
     httpd.shutdown()
 
 
-# --- 1. collector coverage reduces required-domain web-search calls ---------
-def test_acceptance_1_collector_coverage_avoids_six_independent_web_searches():
+# --- 1. collector direct coverage + targeted web search, without false
+#        completeness (corrected: a collector merely TOUCHING a domain must
+#        never drop that domain's entire adversarial query set) -----------
+def test_acceptance_1_collector_coverage_never_drops_a_whole_domains_web_queries():
+    """The exact regression this turn fixes: a successful-but-empty Drugs@FDA
+    search (or a successful ClinicalTrials.gov / SEC EDGAR run) used to mark
+    REGULATORY/SCIENCE_TECHNOLOGY/CAPITAL_STRUCTURE "DIRECTLY_RESEARCHED" and
+    silently drop every adversarial query for those domains. Now: a collector
+    that only TOUCHES a domain (real, auditable, but not sufficient) must
+    leave every one of that domain's mandatory queries in place."""
     collection_results = [
         CollectionResult(collector="sec_edgar", outcome=FetchOutcome.OK),
         CollectionResult(collector="clinicaltrials", outcome=FetchOutcome.OK),
         CollectionResult(collector="fda", outcome=FetchOutcome.OK),
     ]
-    strong, _weak = direct_collector_coverage(collection_results)
-    plan = build_plan("TESTCO", "Generic Biotech Holdings", already_covered_domains=strong)
+    plan = build_plan(
+        "TESTCO", "Generic Biotech Holdings", collection_results=collection_results
+    )
 
     core_domains_queried = {q.domain for q in plan.bear}
-    # REGULATORY, CAPITAL_STRUCTURE and SCIENCE_TECHNOLOGY are directly
-    # covered by the three collectors above -- they must not need their own
-    # web-search calls; only the domains no collector can ever cover remain.
-    assert core_domains_queried.isdisjoint(
-        {ResearchDomain.REGULATORY, ResearchDomain.CAPITAL_STRUCTURE, ResearchDomain.SCIENCE_TECHNOLOGY}
+    assert core_domains_queried == {
+        ResearchDomain.REGULATORY,
+        ResearchDomain.CAPITAL_STRUCTURE,
+        ResearchDomain.SCIENCE_TECHNOLOGY,
+        ResearchDomain.CATALYST,
+        ResearchDomain.CONTRADICTION,
+        ResearchDomain.COMPETITION,
+    }
+    assert plan.skipped_due_to_direct_coverage == []
+
+
+def test_acceptance_1b_genuine_sufficiency_still_lets_the_gate_pass_without_a_query():
+    """The positive side of the same fix: cost reduction is preserved where
+    it is actually earned -- CAPITAL_STRUCTURE reaches
+    SearchStatus.DIRECTLY_RESEARCHED (and so satisfies the completeness
+    gate) once the required-field checklist is genuinely extracted, without
+    needing an extra web query for that domain specifically."""
+    from investment_research.schemas.enums import SearchStatus
+    from investment_research.schemas.fact import RawFact
+    from investment_research.scoring.completeness import (
+        CAPITAL_STRUCTURE_REQUIRED_FIELDS,
+        assess_completeness,
     )
-    assert len(core_domains_queried) < 6
-    assert plan.skipped_due_to_direct_coverage
+
+    raw_facts = [
+        RawFact(
+            ticker="TESTCO",
+            category=FactCategory.CAPITAL_STRUCTURE,
+            claim=f"{unit} extracted from filing body",
+            source=Source(
+                source_id=make_source_id(f"https://www.sec.gov/x/{unit}", unit),
+                url=f"https://www.sec.gov/x/{unit}",
+                title=unit,
+                tier=SourceTier.TIER_1,
+            ),
+            value="1",
+            unit=unit,
+            collector="sec_edgar",
+        )
+        for unit in CAPITAL_STRUCTURE_REQUIRED_FIELDS
+    ]
+    collection_results = [
+        CollectionResult(collector="sec_edgar", outcome=FetchOutcome.OK, raw_facts=raw_facts)
+    ]
+    result = assess_completeness(
+        search_results=[], facts_by_domain={}, agents_run=set(),
+        collection_results=collection_results,
+    )
+    entry = result.coverage[ResearchDomain.CAPITAL_STRUCTURE]
+    assert entry.status is SearchStatus.DIRECTLY_RESEARCHED
+    assert entry.searched is True
 
 
 # --- 2. targeted candidate selection, <=2 initial fetches -------------------

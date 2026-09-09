@@ -415,17 +415,29 @@ def test_verdict_is_avoid_despite_every_positive_signal(result):
     )
 
 
-def test_no_actionable_label_leaks_anywhere_for_a_plain_incomplete_verdict(result):
+def test_no_actionable_label_leaks_anywhere_for_a_non_complete_verdict(result):
     """The report/JSON-wide scan required for the COMPLETE-only Action
-    invariant, exercised here against a plain INCOMPLETE run (not the
-    stricter BLOCKED_PENDING_VERIFICATION case) -- distinguishing it from
-    the equivalent BLOCKED regression elsewhere."""
+    invariant.
+
+    This fixture run uses no research provider at all (NullSearchProvider,
+    no ``research=``), so under the v4 completeness-gate fix (PARTIAL no
+    longer satisfies the Search Completeness Gate; a domain a collector
+    only touched, or an agent merely analysed from the collected corpus,
+    is not the same achievement as an actual query executing) it correctly
+    reads BLOCKED_PENDING_VERIFICATION rather than a plain INCOMPLETE --
+    there is no search execution or sufficient direct-collector evidence
+    behind any of the six required domains here. Either way, the action-
+    label leak-scan below is what this test actually guards.
+    """
     import json as json_module
 
     from investment_research.cli import result_to_json
     from investment_research.scoring.decision_gate_consistency import find_action_labels
 
-    assert result.verdict.research_status is ResearchStatus.INCOMPLETE
+    assert result.verdict.research_status in (
+        ResearchStatus.INCOMPLETE,
+        ResearchStatus.BLOCKED_PENDING_VERIFICATION,
+    )
 
     report = render_report(result)
     not_issued_sentence = (

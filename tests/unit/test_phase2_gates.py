@@ -82,7 +82,10 @@ def test_an_attempted_but_unexecuted_query_is_failed_not_searched():
 
 
 def test_agent_analysis_without_a_query_counts_as_partial():
-    """Analysing the collected corpus is real examination; it is not a full search."""
+    """Analysing the collected corpus is real examination; it is not a full
+    search, and (per the v4 completeness-gate fix) PARTIAL must NOT satisfy
+    the final required-domain gate -- it is visible in reports, but a
+    verdict may not be issued on PARTIAL coverage alone."""
     result = assess_completeness(
         search_results=[],
         facts_by_domain={ResearchDomain.REGULATORY: 4},
@@ -90,7 +93,7 @@ def test_agent_analysis_without_a_query_counts_as_partial():
     )
     entry = result.coverage[ResearchDomain.REGULATORY]
     assert entry.status is SearchStatus.PARTIAL
-    assert entry.searched
+    assert not entry.searched
 
 
 def test_an_agent_that_ran_but_found_nothing_is_unsearched():

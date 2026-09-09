@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..schemas.enums import QueryPurpose, ResearchDomain
+from ..schemas.fact import UnresolvedQuestion
 from .discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, make_query_id
 from .provider import ResearchProvider, ResearchQuery, ResearchResult
 
@@ -71,6 +72,116 @@ BULL_TEMPLATES: tuple[tuple[str, ResearchDomain], ...] = (
     ("{c} upcoming catalyst readout", ResearchDomain.CATALYST),
 )
 
+#: What each mandatory template's query is actually trying to establish
+#: (requirement E). This is the unit a "can a structured collector make
+#: this exact query redundant" decision operates on -- NEVER the whole
+#: ResearchDomain the query happens to fall under. Keyed by the raw
+#: (unformatted) template text so BEAR_TEMPLATES/BULL_TEMPLATES keep their
+#: existing (text, domain) shape.
+_TEMPLATE_INTENT: dict[str, str] = {
+    "{t} FDA concern": "regulatory.fda_concern",
+    "{c} regulatory risk": "regulatory.risk_general",
+    "{d} endpoint concern": "regulatory.endpoint_concern",
+    "{c} delayed catalyst": "catalyst.delayed_catalyst",
+    "{c} failed trial": "science.failed_trial",
+    "{c} dilution": "capital.dilution",
+    "{c} going concern": "capital.going_concern",
+    "{c} warrant": "capital.warrant",
+    "{c} reverse split": "capital.reverse_split",
+    "{c} delisting": "capital.delisting",
+    "{c} lawsuit": "contradiction.lawsuit",
+    "{c} auditor": "contradiction.auditor",
+    "{c} insider selling": "contradiction.insider_selling",
+    "{c} criticism": "contradiction.criticism",
+    "{c} short thesis": "competition.short_thesis",
+    "{d} competitor superiority": "competition.competitor_superiority",
+    "{d} safety concern": "science.safety_concern",
+    "{c} clinical data results": "science.clinical_data_results",
+    "{c} partnership agreement": "competition.partnership_agreement",
+    "{c} FDA designation": "regulatory.fda_designation",
+    "{c} cash runway financing": "capital.cash_runway",
+    "{d} mechanism efficacy": "science.mechanism_efficacy",
+    "{c} upcoming catalyst readout": "catalyst.upcoming_readout",
+}
+
+#: Which query INTENTS a structured collector's own successful execution
+#: makes genuinely redundant to re-ask via expensive web search (requirement
+#: E/G). Deliberately conservative and, for the real collectors in this
+#: system, EMPTY: every one of today's mandatory templates is an
+#: adversarial or interpretive question ("is there a regulatory concern",
+#: "did the trial fail", "is there dilution") that a collector's structured
+#: payload cannot settle merely by having executed -- openFDA cannot
+#: establish a regulatory concern, ClinicalTrials.gov cannot establish that
+#: a trial "failed" (only its registered status), and SEC EDGAR's
+#: submissions history cannot establish dilution or going-concern language.
+#: This is intentionally NOT a domain-level table (that was the false-
+#: completeness bug: a domain a collector merely TOUCHED had its entire
+#: adversarial query set silently dropped). A future, genuinely narrow
+#: registry/metadata-lookup template (e.g. "what is the registered trial
+#: phase/status") could be added here safely; nothing today qualifies.
+_COLLECTOR_REDUNDANT_INTENTS: dict[str, frozenset[str]] = {}
+
+
+def _collector_covered_intents(
+    collection_results: Sequence[Any],
+    redundant_intents: dict[str, frozenset[str]],
+) -> frozenset[str]:
+    """Intents made redundant by a collector that genuinely executed
+    (``result.ok``) this run, per ``redundant_intents``."""
+    covered: set[str] = set()
+    for result in collection_results:
+        if not getattr(result, "ok", False):
+            continue
+        collector = getattr(result, "collector", "")
+        covered |= redundant_intents.get(collector, frozenset())
+    return frozenset(covered)
+
+
+def _domain_has_blocking_unresolved_question(
+    domain: ResearchDomain, unresolved_questions: Sequence[UnresolvedQuestion]
+) -> bool:
+    """Whether a material/critical unresolved question already exists for
+    this domain (requirement E, condition 2) -- a material gap always wins
+    over collector-based redundancy, however narrow the matched intent."""
+    from ..scoring.completeness import research_domain_for_category
+
+    return any(
+        question.blocking and research_domain_for_category(question.category) is domain
+        for question in unresolved_questions
+    )
+
+
+def can_skip_query_intent(
+    *,
+    template: str,
+    domain: ResearchDomain,
+    collection_results: Sequence[Any] = (),
+    unresolved_questions: Sequence[UnresolvedQuestion] = (),
+    redundant_intents: dict[str, frozenset[str]] | None = None,
+) -> bool:
+    """Whether ONE specific mandatory query may be skipped (requirement E).
+
+    Never a domain-level decision -- exactly the bug this replaces (a
+    domain a collector merely touched had its ENTIRE adversarial query set
+    dropped, including questions no collector could ever answer). A query
+    may be skipped only when BOTH hold:
+
+    1. its exact intent (``_TEMPLATE_INTENT[template]``) is already made
+       redundant by a collector that genuinely executed this run, AND
+    2. no material/critical (``blocking``) unresolved question in that same
+       domain remains open -- a real gap always overrides collector-based
+       redundancy.
+    """
+    intent = _TEMPLATE_INTENT.get(template, "")
+    if not intent:
+        return False
+    active_map = _COLLECTOR_REDUNDANT_INTENTS if redundant_intents is None else redundant_intents
+    covered = _collector_covered_intents(collection_results, active_map)
+    if intent not in covered:
+        return False
+    return not _domain_has_blocking_unresolved_question(domain, unresolved_questions)
+
+
 FOLLOW_UP_SYSTEM = """\
 You generate additional web search queries for an investment research system whose purpose is to
 eliminate wrong investment hypotheses using primary sources.
@@ -113,10 +224,11 @@ FOLLOW_UP_SCHEMA: dict[str, Any] = {
 class SearchPlan:
     bear: list[ResearchQuery] = field(default_factory=list)
     bull: list[ResearchQuery] = field(default_factory=list)
-    #: Mandatory-template queries dropped BEFORE ever being built because a
-    #: structured collector already directly covers that domain (requirement
-    #: F) -- never counted as "unexecuted"/UNSEARCHED, since the domain is
-    #: covered a different, auditable way (SearchStatus.DIRECTLY_RESEARCHED).
+    #: Mandatory-template queries dropped BEFORE ever being built because
+    #: their EXACT query intent -- never the whole ResearchDomain they fall
+    #: under (requirement E) -- is already made redundant by a structured
+    #: collector that genuinely executed, with no blocking unresolved
+    #: question in that domain overriding it. Not counted as "unexecuted".
     skipped_due_to_direct_coverage: list[str] = field(default_factory=list)
 
     def all(self) -> list[ResearchQuery]:
@@ -151,12 +263,11 @@ class AdversarialOutcome:
     #: F: deduplicate semantically overlapping queries). Distinct from
     #: `unexecuted`: these were never even attempted, by design, not cut off.
     deduplicated: list[str] = field(default_factory=list)
-    #: Mandatory-template queries skipped because a structured collector
-    #: already directly covers that domain (requirement F). Distinct from
-    #: both `deduplicated` (redundant vs. another query) and `unexecuted`
-    #: (budget-cut) -- these were never needed at all, and the domain is
-    #: still auditably covered (SearchStatus.DIRECTLY_RESEARCHED), never
-    #: left UNSEARCHED.
+    #: Mandatory-template queries skipped because their EXACT query intent
+    #: (never the whole domain) was already made redundant by a genuinely-
+    #: executed structured collector (requirement E). Distinct from both
+    #: `deduplicated` (redundant vs. another query) and `unexecuted`
+    #: (budget-cut) -- these were never needed at all.
     skipped_due_to_direct_coverage: list[str] = field(default_factory=list)
     #: Auditable, purpose-separated query and hit log (requirement M3).
     discovery: DiscoveryLog = field(default_factory=DiscoveryLog)
@@ -188,23 +299,28 @@ def build_plan(
     company: str,
     programmes: Sequence[str] = (),
     *,
-    already_covered_domains: frozenset[ResearchDomain] = frozenset(),
+    collection_results: Sequence[Any] = (),
+    unresolved_questions: Sequence[UnresolvedQuestion] = (),
+    redundant_intents: dict[str, frozenset[str]] | None = None,
 ) -> SearchPlan:
     """Expand the mandatory templates for this candidate.
 
-    Requirement F: a live measurement showed ~22k actual tokens per Anthropic
-    web-search call even at low effort, so the six required-domain core
-    queries alone can exhaust a 60k discovery quota before COMPETITION/
-    CONTRADICTION/CATALYST -- the domains no structured collector can ever
-    cover -- get a turn. ``already_covered_domains`` (from
-    ``scoring.completeness.direct_collector_coverage``, strong coverage
-    only) lets a domain a structured collector already genuinely,
-    auditably covers skip its (expensive) web-search templates entirely --
-    it is not left UNSEARCHED, it is DIRECTLY_RESEARCHED a different way.
-    The Kill Agent's own mandatory falsification queries are untouched by
-    this: it always runs its full search set regardless of collector
-    coverage, since that is a distinct duty from domain-completeness
-    discovery.
+    Requirement F/G: a live measurement showed ~22k actual tokens per
+    Anthropic web-search call even at low effort, so six required-domain
+    core queries alone can exhaust a 60k discovery quota. Cost is reduced
+    ONLY by skipping a query whose EXACT intent (``can_skip_query_intent``)
+    is already made redundant by a structured collector that genuinely
+    executed -- never by skipping every query for a ResearchDomain a
+    collector merely touched. A zero-result Drugs@FDA search or a
+    ClinicalTrials.gov sponsor search does not, by itself, make a single
+    adversarial regulatory/science query unnecessary (requirements B/C);
+    with the real collectors in this system, ``redundant_intents`` (default
+    ``_COLLECTOR_REDUNDANT_INTENTS``) is empty, so nothing is skipped this
+    way today -- the hook exists for a genuinely narrow, structured
+    registry/metadata-lookup template added in the future. The Kill Agent's
+    own mandatory falsification queries are untouched by this: it always
+    runs its full search set, since that is a distinct duty from domain-
+    completeness discovery.
     """
     subject = company or ticker
     drug = programmes[0] if programmes else subject
@@ -220,7 +336,13 @@ def build_plan(
             if text.lower() in seen:
                 continue
             seen.add(text.lower())
-            if domain in already_covered_domains:
+            if can_skip_query_intent(
+                template=template,
+                domain=domain,
+                collection_results=collection_results,
+                unresolved_questions=unresolved_questions,
+                redundant_intents=redundant_intents,
+            ):
                 skipped.append(text)
                 continue
             queries.append(

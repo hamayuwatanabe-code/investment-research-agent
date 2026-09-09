@@ -80,11 +80,18 @@ class DomainCoverage:
 
     @property
     def searched(self) -> bool:
-        return self.status in (
-            SearchStatus.SEARCHED,
-            SearchStatus.DIRECTLY_RESEARCHED,
-            SearchStatus.PARTIAL,
-        )
+        """Whether this domain satisfies the final required-domain gate.
+
+        Requirement F: PARTIAL is real, auditable coverage (a collector
+        touched the domain, or the responsible agent found some evidence in
+        the collected corpus) but it is NOT the same achievement as a
+        dedicated query actually executing (SEARCHED) or a collector
+        passing that domain's own sufficiency checklist
+        (DIRECTLY_RESEARCHED) -- so it must never, by itself, let a final
+        verdict past the Search Completeness Gate. PARTIAL stays visible in
+        reports; it just does not count as "searched" here.
+        """
+        return self.status in (SearchStatus.SEARCHED, SearchStatus.DIRECTLY_RESEARCHED)
 
 
 class ResearchProvider(Protocol):

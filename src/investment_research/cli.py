@@ -44,7 +44,6 @@ from .research.provider import (
     ResearchProvider,
 )
 from .schemas.enums import Provenance, RunStatus
-from .scoring.completeness import direct_collector_coverage
 from .storage.db import open_db
 from .storage.repository import Repository
 
@@ -280,10 +279,19 @@ def run_one(
         # by build_research_stack() above, whether that is a corpus replay, the
         # live Anthropic provider, a composite of both, or NullResearchProvider
         # when neither --corpus nor --live is set.
-        strong_direct, _weak_direct = direct_collector_coverage(results)
+        #
+        # build_plan() decides per-QUERY-INTENT skipping from `results`
+        # (requirement E) -- never per-domain: a collector merely touching a
+        # domain (e.g. a zero-result Drugs@FDA search) must never silently
+        # drop that domain's entire adversarial query set. No unresolved
+        # questions exist yet at this point in the run (Stage 3 domain
+        # agents, which raise them, have not executed) -- passed as ()
+        # deliberately; with today's collectors this is moot regardless,
+        # since `_COLLECTOR_REDUNDANT_INTENTS` never marks a real collector's
+        # intent as redundant in the first place (requirements B/C).
         adversarial = run_adversarial_search(
             research,
-            build_plan(ticker, company_name, already_covered_domains=strong_direct),
+            build_plan(ticker, company_name, collection_results=results),
             llm=llm,
             run_id=ticker, ticker=ticker, research_effort=args.research_effort,
         )
