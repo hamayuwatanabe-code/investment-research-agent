@@ -278,6 +278,141 @@ def test_omitted_intent_is_incomplete_response_not_zero_results():
     assert set(diagnostics.completed_intent_ids) == {f"i{i}" for i in range(5)}
 
 
+# --- execute_research_batch(): pending/retry for split/allocate exclusions --
+class _RetryingBudgetProvider:
+    """Simulates a provider whose split/allocate decision can only afford a
+    LIMITED number of intents on any one call -- exactly the shape
+    AnthropicWebResearchProvider.search_batch() now returns: an intent
+    beyond that limit comes back with the certain, never-sent "excluded ...
+    by split/allocate" result, never silently absent. ``capacity_by_call``
+    gives the limit for call 1, 2, 3, ...; the last value repeats for any
+    further call.
+    """
+
+    name = "fake_retry"
+    path = ResearchPath.ANTHROPIC_WEB
+
+    def __init__(self, capacity_by_call: list[int], documents_by_intent=None):
+        self.capacity_by_call = capacity_by_call
+        self.documents_by_intent = documents_by_intent or {}
+        self.batch_calls: list[list[str]] = []
+
+    def available(self):
+        return True, "ready"
+
+    def search_batch(self, intents, *, agent_id="research"):
+        self.batch_calls.append([i.intent_id for i in intents])
+        call_index = len(self.batch_calls) - 1
+        capacity = self.capacity_by_call[min(call_index, len(self.capacity_by_call) - 1)]
+        included, excluded = intents[:capacity], intents[capacity:]
+        results = {}
+        for intent in included:
+            results[intent.intent_id] = ResearchResult(
+                query=None,
+                documents=self.documents_by_intent.get(intent.intent_id, []),
+                path=self.path,
+                executed=True,
+            )
+        for intent in excluded:
+            results[intent.intent_id] = ResearchResult(
+                query=None,
+                path=self.path,
+                executed=False,
+                error=(
+                    "BudgetExceeded: excluded from this call by split/allocate -- did not fit "
+                    "the remaining budget at dispatch time (0 global token(s) / 0 stage "
+                    "token(s) left)."
+                ),
+            )
+        return results, {
+            "server_tool_uses": len(included), "prompt_tokens": 100,
+            "output_tokens": 50, "actual_total_tokens": 150,
+        }
+
+
+def test_execute_batch_retries_split_allocate_exclusions_against_remaining_budget():
+    """同一intentで1回成功、残予算で再評価: intents excluded purely by the
+    provider's split/allocate decision are kept PENDING, not finalized --
+    once the round that DID send something records its actual usage, the
+    same still-pending intents are re-offered and this time succeed."""
+    intents = [_intent(ResearchDomain.REGULATORY, intent_id=f"i{i}") for i in range(4)]
+    batch = ResearchBatch(batch_id="b1", intents=intents)
+    provider = _RetryingBudgetProvider(
+        capacity_by_call=[2],  # round 1 affords only 2; every later call affords everything given
+        documents_by_intent={f"i{i}": [_doc(f"https://www.fda.gov/{i}")] for i in range(4)},
+    )
+    discovery = DiscoveryLog()
+    diagnostics = execute_research_batch(
+        batch, provider, agent_id="adversarial_search", discovery=discovery, run_id="r1", ticker="TESTCO",
+    )
+
+    assert provider.batch_calls == [["i0", "i1", "i2", "i3"], ["i2", "i3"]], (
+        "the second round must re-offer ONLY the still-pending intents, never resend i0/i1"
+    )
+    for intent in intents:
+        assert intent.status is IntentStatus.EXECUTED_WITH_EVIDENCE, (
+            f"{intent.intent_id} should have succeeded once re-offered with remaining budget"
+        )
+    assert diagnostics.retry_rounds == 1
+    assert set(diagnostics.completed_intent_ids) == {"i0", "i1", "i2", "i3"}
+    # No duplicate billing/audit record for any intent across the two rounds.
+    assert len(discovery.queries) == 4
+    assert len({q.query_id for q in discovery.queries}) == 4
+
+
+def test_execute_batch_stops_retrying_the_moment_a_round_makes_no_progress():
+    """予算が尽きた場合の停止条件: a round that excludes every intent it was
+    given AGAIN, completely unchanged, means no actual usage was recorded --
+    retrying would repeat the identical rejection forever, so this must stop
+    immediately rather than spending every remaining retry round."""
+    intents = [_intent(ResearchDomain.REGULATORY, intent_id=f"i{i}") for i in range(3)]
+    batch = ResearchBatch(batch_id="b1", intents=intents)
+    provider = _RetryingBudgetProvider(capacity_by_call=[0])  # never affords anything, ever
+    discovery = DiscoveryLog()
+    diagnostics = execute_research_batch(
+        batch, provider, agent_id="adversarial_search", discovery=discovery, run_id="r1", ticker="TESTCO",
+    )
+    assert len(provider.batch_calls) == 1, "must not keep retrying once a round makes zero progress"
+    for intent in intents:
+        assert intent.status is IntentStatus.SKIPPED_DUE_TO_BUDGET
+        # The specific reason and this intent's own priority both survive --
+        # never a silent drop.
+        assert "split/allocate" in intent.detail
+    assert diagnostics.retry_rounds == 0
+    assert set(diagnostics.incomplete_intent_ids) == {"i0", "i1", "i2"}
+
+
+def test_execute_batch_retry_rounds_are_bounded_and_remainder_is_finalized():
+    """試行回数の上限: with progress every round but never enough to finish,
+    retrying must still stop at max_retry_rounds -- whatever is left after
+    that is finalized as SKIPPED_DUE_TO_BUDGET (priority/reason preserved),
+    never retried forever."""
+    intents = [_intent(ResearchDomain.REGULATORY, intent_id=f"i{i}", priority=i) for i in range(10)]
+    batch = ResearchBatch(batch_id="b1", intents=intents)
+    # Call 1 affords 1 of what it's given, call 2 affords 2, call 3 affords 3
+    # -- always SOME progress, never enough to clear 10 intents in 3 rounds.
+    provider = _RetryingBudgetProvider(
+        capacity_by_call=[1, 2, 3],
+        documents_by_intent={f"i{i}": [_doc(f"https://www.fda.gov/{i}")] for i in range(10)},
+    )
+    discovery = DiscoveryLog()
+    diagnostics = execute_research_batch(
+        batch, provider, agent_id="adversarial_search", discovery=discovery, run_id="r1", ticker="TESTCO",
+        max_retry_rounds=3,
+    )
+    assert len(provider.batch_calls) == 3, "must stop at max_retry_rounds even though progress never stalled"
+    succeeded = [i for i in intents if i.status is IntentStatus.EXECUTED_WITH_EVIDENCE]
+    skipped = [i for i in intents if i.status is IntentStatus.SKIPPED_DUE_TO_BUDGET]
+    assert len(succeeded) == 6  # 1 + 2 + 3 sent across the three rounds
+    assert len(skipped) == 4
+    for intent in skipped:
+        assert "split/allocate" in intent.detail
+        assert intent.priority in {6, 7, 8, 9}  # the lowest-priority intents, never reordered
+    assert diagnostics.retry_rounds == 2
+    # Every intent still recorded exactly once, success or final skip alike.
+    assert len(discovery.queries) == 10
+
+
 # --- run_research_batches(): clean budget-exhaustion handling ---------------
 def test_run_batches_stops_after_a_fully_exhausted_batch():
     batch1 = ResearchBatch(batch_id="b1", intents=[_intent(ResearchDomain.REGULATORY, intent_id="r1")])

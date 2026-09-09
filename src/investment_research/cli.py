@@ -389,6 +389,7 @@ def _token_diagnostics(result: ResearchResult) -> dict:
                 "completed_intent_ids": diag.completed_intent_ids,
                 "incomplete_intent_ids": diag.incomplete_intent_ids,
                 "ambiguous_results": diag.ambiguous_results,
+                "retry_rounds": diag.retry_rounds,
             }
             for diag in (adversarial.batch_diagnostics if adversarial else [])
         ],

@@ -276,22 +276,29 @@ class AnthropicWebResearchProvider:
         blocks and attributing every ``web_search_tool_result`` to whichever
         marker most recently preceded it (``_parse_batch_response``).
 
-        Returns ``(results_by_intent_id, diagnostics)``. An intent whose id
-        never appears as a key in the returned mapping was never addressed
-        by the model at all -- the caller (``research.batching``) reads that
-        as ``IntentStatus.INCOMPLETE_RESPONSE``, never as zero results. This
-        includes an intent this method itself never sent because it did not
-        fit the budget (see ``_affordable_prefix``): only as many of
-        ``intents`` as a single call can honestly afford, given what
-        actually remains of the global AND current-stage budget, are ever
-        included in the request -- never all of them on the hope that the
-        real cost will happen to fit. Requirement B: when every intent in
-        the batch shares the exact same (non-empty) source restriction, it
-        is applied at the tool level; a batch mixing different restrictions
-        leaves the tool unrestricted and each intent's own restriction is
-        enforced afterward by filtering its attributed documents to
-        matching hosts -- never blended across intents with incompatible
-        requirements.
+        Returns ``(results_by_intent_id, diagnostics)``. Two DISTINCT reasons
+        an intent can end up not-executed, and this method never conflates
+        them: (1) it was excluded from this call entirely by the
+        split/allocate budget decision (``_affordable_prefix``) -- a fact
+        this method knows for CERTAIN, since it never sent it -- and comes
+        back as an explicit, ``executed=False`` result whose error starts
+        ``"BudgetExceeded: excluded ... by split/allocate"``, which the
+        caller (``research.batching``) reads as
+        ``IntentStatus.SKIPPED_DUE_TO_BUDGET``; (2) it WAS included in the
+        request but the model's response never actually addressed it (no
+        marker, no search, or the response was truncated) -- this is the
+        only case whose id is absent from the returned mapping entirely,
+        which the caller reads as ``IntentStatus.INCOMPLETE_RESPONSE``. Only
+        as many of ``intents`` as a single call can honestly afford, given
+        what actually remains of the global AND current-stage budget, are
+        ever included in the request -- never all of them on the hope that
+        the real cost will happen to fit. Requirement B: when every intent
+        in the batch shares the exact same (non-empty) source restriction,
+        it is applied at the tool level; a batch mixing different
+        restrictions leaves the tool unrestricted and each intent's own
+        restriction is enforced afterward by filtering its attributed
+        documents to matching hosts -- never blended across intents with
+        incompatible requirements.
         """
         empty_meta = {
             "server_tool_uses": 0,
@@ -321,33 +328,45 @@ class AnthropicWebResearchProvider:
         # Split/allocate (never a flat guess): only as many of `intents` as a
         # single call can honestly afford, given what actually remains of the
         # global AND the current stage's budget -- see _affordable_prefix.
-        # Intents beyond the returned prefix are simply never sent this call;
-        # never silently included in a request whose real cost this module
-        # cannot promise will fit.
+        # Intents beyond the returned prefix are NEVER sent this call. That
+        # exclusion is a structural fact this method already knows for
+        # certain -- it must come back as an explicit, per-intent
+        # SKIPPED_DUE_TO_BUDGET-shaped result, never silently absent from
+        # `results` (absence reads as INCOMPLETE_RESPONSE downstream, which
+        # is reserved for an intent that WAS sent but whose response never
+        # arrived -- a genuinely different, less certain situation).
         included = _affordable_prefix(
             intents, self.llm.budget, effort=self.research_effort, max_uses_per_batch=self.max_uses_per_batch
         )
+        included_ids = {intent.intent_id for intent in included}
+        deferred = [intent for intent in intents if intent.intent_id not in included_ids]
+
+        results: dict[str, ResearchResult] = {}
+        if deferred:
+            deferred_error = (
+                f"BudgetExceeded: excluded from this call by split/allocate -- did not fit the "
+                f"remaining budget at dispatch time ({self.llm.budget.remaining} global token(s) "
+                f"/ {self.llm.budget.stage_remaining(self.llm.budget.current_stage)} stage "
+                "token(s) left). Never sent -- distinct from a sent intent whose response never "
+                "arrived. The caller may re-evaluate it against whatever budget remains once "
+                "this call's actual usage is recorded."
+            )
+            log.info(
+                "batched web search: %d of %d intent(s) excluded by split/allocate: %s",
+                len(deferred), len(intents), [intent.intent_id for intent in deferred],
+            )
+            for intent in deferred:
+                results[intent.intent_id] = ResearchResult(
+                    query=_query_for_intent(intent),
+                    outcome=FetchOutcome.DISABLED,
+                    path=self.path,
+                    executed=False,
+                    error=deferred_error,
+                )
+
         if not included:
-            error = (
-                f"BudgetExceeded: not even a single-intent batch fits the remaining budget "
-                f"({self.llm.budget.remaining} global token(s) / "
-                f"{self.llm.budget.stage_remaining(self.llm.budget.current_stage)} stage token(s) left) -- "
-                "refusing to call the API for this batch"
-            )
-            log.warning("batched web search skipped: %s", error)
-            return (
-                {
-                    intent.intent_id: ResearchResult(
-                        query=_query_for_intent(intent),
-                        outcome=FetchOutcome.DISABLED,
-                        path=self.path,
-                        executed=False,
-                        error=error,
-                    )
-                    for intent in intents
-                },
-                empty_meta,
-            )
+            log.warning("batched web search skipped: no intent fits the remaining budget")
+            return results, empty_meta
 
         search_tool, _ = tool_types_for(self.llm.model)
         max_uses = min(len(included) + 1, self.max_uses_per_batch)
@@ -373,35 +392,26 @@ class AnthropicWebResearchProvider:
         except BudgetExceeded as exc:
             log.warning("batched web search skipped: %s", exc)
             error = f"BudgetExceeded: {exc}"
-            return (
-                {
-                    intent.intent_id: ResearchResult(
-                        query=_query_for_intent(intent),
-                        outcome=FetchOutcome.DISABLED,
-                        path=self.path,
-                        executed=False,
-                        error=error,
-                    )
-                    for intent in intents
-                },
-                empty_meta,
-            )
+            for intent in included:
+                results[intent.intent_id] = ResearchResult(
+                    query=_query_for_intent(intent),
+                    outcome=FetchOutcome.DISABLED,
+                    path=self.path,
+                    executed=False,
+                    error=error,
+                )
+            return results, empty_meta
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             log.warning("batched web search failed: %s", exc)
             error = f"{type(exc).__name__}: {exc}"
-            return (
-                {
-                    intent.intent_id: ResearchResult(
-                        query=_query_for_intent(intent), outcome=FetchOutcome.ERROR,
-                        path=self.path, error=error,
-                    )
-                    for intent in intents
-                },
-                empty_meta,
-            )
+            for intent in included:
+                results[intent.intent_id] = ResearchResult(
+                    query=_query_for_intent(intent), outcome=FetchOutcome.ERROR,
+                    path=self.path, error=error,
+                )
+            return results, empty_meta
 
         parsed = _parse_batch_response(response, included, path=self.path)
-        results: dict[str, ResearchResult] = {}
         for intent in included:
             issued = parsed.issued_tool_use_ids.get(intent.intent_id, set())
             unresolved = issued - parsed.resolved_tool_use_ids

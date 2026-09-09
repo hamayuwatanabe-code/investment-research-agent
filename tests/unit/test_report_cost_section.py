@@ -44,6 +44,7 @@ def test_cost_section_renders_batch_diagnostics_for_every_batch():
                 completed_intent_ids=["reg_1", "cap_1"],
                 incomplete_intent_ids=["comp_1"],
                 ambiguous_results=1,
+                retry_rounds=2,
             )
         ]
     )
@@ -57,6 +58,7 @@ def test_cost_section_renders_batch_diagnostics_for_every_batch():
     assert "completed intents : reg_1, cap_1" in section
     assert "incomplete intents: comp_1" in section
     assert "unattributed results: 1" in section
+    assert "retry rounds      : 2" in section
 
 
 def test_cost_section_explains_a_spent_but_discarded_agent_call():

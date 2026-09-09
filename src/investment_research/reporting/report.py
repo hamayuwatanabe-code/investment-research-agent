@@ -1058,6 +1058,11 @@ def _section_cost(self: ReportRenderer) -> str:
                         f"              unattributed results: {diag.ambiguous_results} "
                         "(dropped, never guessed at)"
                     )
+                if diag.retry_rounds:
+                    out.append(
+                        f"              retry rounds      : {diag.retry_rounds} (intents excluded "
+                        "by split/allocate, re-offered against remaining budget)"
+                    )
 
     escalation = self.result.escalation
     if escalation is not None:

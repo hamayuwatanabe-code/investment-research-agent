@@ -717,7 +717,9 @@ def test_production_scale_batch_under_a_tight_stage_budget_is_served_partially_n
     reservation genuinely fits -- never all six gambled into one
     call that then blows the stage's real budget, and never zero domains
     either. The domains left out must be cleanly absent from `results`
-    (INCOMPLETE_RESPONSE downstream), not silently marked as searched."""
+    -- excluded explicitly with a SKIPPED_DUE_TO_BUDGET-shaped result, never
+    silently marked as searched, and never absent the way a genuinely
+    sent-but-omitted intent would be."""
     REQUESTS.clear()
     budget = LLMBudget(max_total_tokens=100_000)
     budget.set_stage("discovery")
@@ -750,10 +752,18 @@ def test_production_scale_batch_under_a_tight_stage_budget_is_served_partially_n
         assert results[intent.intent_id].executed is True
         assert results[intent.intent_id].documents
 
-    # ...and the omitted domains are cleanly absent -- never inferred as a
-    # completed, zero-result search.
+    # ...and the excluded domains come back with an EXPLICIT, certain
+    # SKIPPED_DUE_TO_BUDGET-shaped result -- never absent (absence is
+    # reserved for a sent intent whose response never arrived, a genuinely
+    # less certain case) and never inferred as a completed, zero-result
+    # search.
     for intent in omitted:
-        assert intent.intent_id not in results
+        assert intent.intent_id in results
+        excluded_result = results[intent.intent_id]
+        assert excluded_result.executed is False
+        assert excluded_result.documents == []
+        assert "BudgetExceeded" in excluded_result.error
+        assert "split/allocate" in excluded_result.error
 
     # The call itself stayed within the stage's real quota -- no post-hoc
     # surprise overshoot of the kind that starved every later stage in the
@@ -791,3 +801,67 @@ def test_production_scale_batch_fits_in_one_call_when_the_stage_budget_is_ample(
             assert results[intent.intent_id].executed is True
     finally:
         httpd.shutdown()
+
+
+def test_never_sent_and_sent_but_unaddressed_are_distinct_within_the_same_call(base_url):
+    """The two ways an intent can end up not-executed must never collapse
+    into one signal, even when BOTH happen in the same call: an intent this
+    method structurally never sent (excluded by split/allocate --
+    SKIPPED_DUE_TO_BUDGET, a certain fact) versus an intent it DID send but
+    whose response never actually addressed it (INCOMPLETE_RESPONSE, a less
+    certain "the model didn't get to it")."""
+    global RESPONSE
+    REQUESTS.clear()
+    # Only reg_1 and sci_1 fit this tight budget (see the affordability
+    # assertion below); comp_1 is the one this test's mock response then
+    # ALSO fails to address, despite being included in the request --
+    # proving that case reads differently from "never sent" even though
+    # both are, in the end, not executed.
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "t"}],
+            },
+            # sci_1 was included in the request, but the model's response
+            # never even mentions it (no marker, no search) -- a genuine
+            # sent-but-unaddressed gap.
+        ]
+    )
+    budget = LLMBudget(max_total_tokens=100_000)
+    budget.set_stage("discovery")
+    llm = LLMClient(api_key="sk-ant-test", base_url=base_url, max_retries=0, timeout=10, budget=budget)
+    scoped_provider = AnthropicWebResearchProvider(llm)
+
+    intents = [
+        ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1"),
+        ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2"),
+        ResearchIntent(intent_id="comp_1", domain=ResearchDomain.COMPETITION, question="q3"),
+    ]
+    included = _affordable_prefix(intents, budget, effort="low", max_uses_per_batch=8)
+    assert [i.intent_id for i in included] == ["reg_1", "sci_1"], (
+        "this test's own budget must include exactly reg_1 and sci_1, excluding comp_1, for its "
+        "assertions to mean what they claim"
+    )
+
+    results, _meta = scoped_provider.search_batch(intents, agent_id="adversarial_bear")
+
+    # reg_1: sent, resolved -- ordinary success.
+    assert results["reg_1"].executed is True
+
+    # sci_1: SENT (included in the request) but the model's response never
+    # addressed it -- absent from `results` entirely; the caller reads that
+    # as INCOMPLETE_RESPONSE, never as a certain budget skip.
+    assert "sci_1" not in results
+
+    # comp_1: NEVER SENT -- excluded by split/allocate before the request
+    # was even built. Present in `results` with an explicit,
+    # SKIPPED_DUE_TO_BUDGET-shaped, executed=False result -- never
+    # collapsed into the same "absent" signal as sci_1 above.
+    assert "comp_1" in results
+    assert results["comp_1"].executed is False
+    assert "BudgetExceeded" in results["comp_1"].error
+    assert "split/allocate" in results["comp_1"].error

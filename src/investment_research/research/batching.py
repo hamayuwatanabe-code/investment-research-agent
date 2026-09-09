@@ -50,6 +50,22 @@ log = logging.getLogger(__name__)
 #: call's max_uses ceiling should ever be asked to carry (requirement F).
 MAX_INTENTS_PER_BATCH = 6
 
+#: How many EXTRA rounds execute_research_batch() may spend re-offering
+#: intents a provider's own split/allocate decision excluded (never sent)
+#: against whatever budget remains once an earlier round's ACTUAL usage is
+#: recorded -- a provider's conservative preflight reservation for what it
+#: DOES send is typically an upper bound on real cost, so slack between the
+#: reservation and the actual usage can free room for a previously-excluded
+#: intent without spending any more than a normal, unbatched run would have.
+#: Bounded so a batch that structurally cannot be afforded (the provider is
+#: unavailable, or nothing at all fits even after every round) terminates
+#: rather than looping: a round that excludes every intent it was just
+#: given AGAIN, unchanged, means no actual usage was recorded and nothing
+#: about the remaining budget could possibly have moved -- retrying would
+#: repeat the identical rejection forever, so that round's exclusions are
+#: finalized immediately instead of spending another of these rounds.
+MAX_BUDGET_RETRY_ROUNDS = 3
+
 #: Statuses that count as this intent having genuinely been examined --
 #: either with or without evidence -- as opposed to never having been
 #: reached at all this run.
@@ -168,6 +184,13 @@ class BatchDiagnostics:
     #: guessed at, only counted, so an unusually high count is visible in
     #: audit output even though nothing was silently misattributed.
     ambiguous_results: int = 0
+    #: How many EXTRA rounds (beyond the first) execute_research_batch()
+    #: needed to re-offer intents the provider excluded purely by its own
+    #: split/allocate budget decision (never a genuine send-then-fail)
+    #: against the budget remaining once an earlier round's actual usage
+    #: was recorded. 0 means every intent was resolved (sent, or finally
+    #: given up on) in the first round.
+    retry_rounds: int = 0
 
 
 def intents_from_unresolved_questions(
@@ -307,6 +330,24 @@ def _apply_result_to_intent(intent: ResearchIntent, result: ResearchResult | Non
         intent.status = IntentStatus.EXECUTED_ZERO_RESULTS
 
 
+def _is_split_allocate_exclusion(result: ResearchResult | None) -> bool:
+    """Whether ``result`` is the CERTAIN "never sent -- excluded by the
+    provider's own split/allocate budget decision before dispatch" signal
+    (``AnthropicWebResearchProvider.search_batch()``'s own wording), as
+    opposed to "provider unavailable", a genuine tool/API error, or an
+    unresolved sub-search. This is the ONLY case ``execute_research_batch``
+    re-offers against the budget remaining after an earlier round's actual
+    usage is recorded -- retrying any of the others would either repeat a
+    guaranteed-identical rejection (provider unavailable) or resend
+    something that already reached the network once (never safe to redo).
+    """
+    return (
+        result is not None
+        and not result.executed
+        and "excluded from this call by split/allocate" in str(result.error)
+    )
+
+
 def execute_research_batch(
     batch: ResearchBatch,
     provider: ResearchProvider,
@@ -317,6 +358,7 @@ def execute_research_batch(
     ticker: str,
     query_purpose: QueryPurpose = QueryPurpose.BEAR,
     llm_agent_id: str | None = None,
+    max_retry_rounds: int = MAX_BUDGET_RETRY_ROUNDS,
 ) -> BatchDiagnostics:
     """Execute one batch, updating every intent's status/documents in place.
 
@@ -327,9 +369,32 @@ def execute_research_batch(
     provider that cannot batch (corpus replay, no research configured, a
     test double) is served with one ``.search()`` call per intent instead
     -- correctness is identical either way; only the call count differs.
-    Every intent is recorded into ``discovery`` exactly as it would be for
-    a solitary query, so per-intent audit provenance never depends on
-    which path served it (requirement A).
+    Every intent is recorded into ``discovery`` exactly once, as it would be
+    for a solitary query, so per-intent audit provenance never depends on
+    which path served it and is never duplicated across retry rounds
+    (requirement A).
+
+    Pending/retry (this is what makes a batch a real EXECUTION PLAN, not a
+    one-shot guess): when the provider excludes some intents purely by its
+    own split/allocate budget decision (never sent at all -- see
+    ``_is_split_allocate_exclusion``), they are kept PENDING rather than
+    finalized immediately. Once the round that DID send something records
+    its actual usage (``LLMBudget.record``, inside the provider call
+    itself), the same, still-mutable budget object may have more slack than
+    its own conservative preflight reservation assumed -- so the pending
+    intents are re-offered to the provider, which re-runs its own
+    split/allocate decision against whatever now remains. This repeats up
+    to ``max_retry_rounds`` times, and stops immediately, without spending
+    another round, the moment a round excludes every intent it was just
+    given AGAIN unchanged -- that means no actual usage was recorded and
+    nothing about the remaining budget could possibly have moved, so
+    retrying would only repeat the identical rejection. Whatever is still
+    pending once the loop ends (round budget exhausted, or genuinely no
+    room left) is finalized as SKIPPED_DUE_TO_BUDGET with its own specific
+    reason and priority preserved on the intent itself -- never silently
+    dropped. An intent already resolved in an earlier round (sent, or
+    finally given up on) is never included in a later round's dispatch, so
+    it can never be billed twice.
 
     ``agent_id`` is the orchestrating caller's own identity (e.g.
     "adversarial_search") and is what every recorded ``SearchQueryRecord``
@@ -346,16 +411,18 @@ def execute_research_batch(
     )
     provider_agent_id = llm_agent_id or agent_id
     search_batch = getattr(provider, "search_batch", None)
-    if callable(search_batch):
-        results_by_intent, meta = search_batch(batch.intents, agent_id=provider_agent_id)
-        diagnostics.server_tool_uses = int(meta.get("server_tool_uses", 0))
-        diagnostics.prompt_tokens = int(meta.get("prompt_tokens", 0))
-        diagnostics.output_tokens = int(meta.get("output_tokens", 0))
-        diagnostics.actual_total_tokens = int(meta.get("actual_total_tokens", 0))
-        diagnostics.ambiguous_results = int(meta.get("ambiguous_results", 0))
-    else:
+
+    def _dispatch(pending: list[ResearchIntent]) -> dict[str, ResearchResult]:
+        if callable(search_batch):
+            results_by_intent, meta = search_batch(pending, agent_id=provider_agent_id)
+            diagnostics.server_tool_uses += int(meta.get("server_tool_uses", 0))
+            diagnostics.prompt_tokens += int(meta.get("prompt_tokens", 0))
+            diagnostics.output_tokens += int(meta.get("output_tokens", 0))
+            diagnostics.actual_total_tokens += int(meta.get("actual_total_tokens", 0))
+            diagnostics.ambiguous_results += int(meta.get("ambiguous_results", 0))
+            return results_by_intent
         results_by_intent = {}
-        for intent in batch.intents:
+        for intent in pending:
             query = ResearchQuery(
                 query=intent.question,
                 domain=intent.domain,
@@ -364,9 +431,10 @@ def execute_research_batch(
                 rationale=intent.rationale,
             )
             results_by_intent[intent.intent_id] = provider.search(query, agent_id=provider_agent_id)
+        return results_by_intent
 
-    for intent in batch.intents:
-        _apply_result_to_intent(intent, results_by_intent.get(intent.intent_id))
+    def _finalize(intent: ResearchIntent, result: ResearchResult | None) -> None:
+        _apply_result_to_intent(intent, result)
         record = SearchQueryRecord(
             query_id=make_query_id(agent_id, query_purpose, intent.question, run_id),
             run_id=run_id,
@@ -392,6 +460,27 @@ def execute_research_batch(
             diagnostics.completed_intent_ids.append(intent.intent_id)
         else:
             diagnostics.incomplete_intent_ids.append(intent.intent_id)
+
+    pending = list(batch.intents)
+    round_number = 0
+    while pending:
+        round_number += 1
+        results_by_intent = _dispatch(pending)
+        still_excluded = [
+            intent for intent in pending
+            if _is_split_allocate_exclusion(results_by_intent.get(intent.intent_id))
+        ]
+        made_progress = len(still_excluded) < len(pending)
+        retry = bool(still_excluded) and made_progress and round_number < max_retry_rounds
+        for intent in pending:
+            if retry and intent in still_excluded:
+                continue  # kept pending -- re-offered next round
+            _finalize(intent, results_by_intent.get(intent.intent_id))
+        if retry:
+            diagnostics.retry_rounds = round_number
+            pending = still_excluded
+        else:
+            pending = []
     return diagnostics
 
 
