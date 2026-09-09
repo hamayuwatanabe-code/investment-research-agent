@@ -943,6 +943,12 @@ class Pipeline:
             completeness=completeness,
             gate=gate,
             unresolved_material_claims=material_claims,
+            # Per-domain sufficiency (requirement: a domain must never read
+            # SUFFICIENT while it still has its own unresolved BLOCKING
+            # question) needs the full, categorized unresolved-question set --
+            # `material_claims` above is a flat, domain-agnostic tuple that
+            # only ever blocks the matrix's OVERALL `sufficient` property.
+            unresolved_questions=bus.unresolved,
         )
         result.evidence_sufficiency = sufficiency
         self.repo.save_evidence_sufficiency(ctx.run_id, ctx.ticker, sufficiency)

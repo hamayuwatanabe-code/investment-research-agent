@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from investment_research.collectors.documents import Document
 from investment_research.research.escalation import (
+    EscalationReport,
     FetchAttempt,
+    _attempt_fetch_for_question,
     _rank_candidates_for_question,
     _score_candidates,
     escalate_unresolved_questions,
@@ -286,3 +288,98 @@ def test_fetch_log_records_full_audit_fields_for_every_attempt():
     assert entry.body_obtained is True
     assert entry.body_answered is False
     assert entry.subject_id
+
+
+# --- pre-send budget rejection vs. a genuinely sent-then-failed fetch -------
+class _NotSentFetchProvider:
+    """A fetch that never reached the network -- a preflight budget/
+    availability rejection, exactly what AnthropicWebResearchProvider.fetch()
+    now signals via its own last_fetch_sent/last_fetch_error attributes."""
+
+    name = "fake"
+    path = ResearchPath.ANTHROPIC_WEB
+    last_fetch_sent = False
+    last_fetch_error = "BudgetExceeded: stage 'escalation' budget exhausted"
+
+    def available(self):
+        return True, "ready"
+
+    def fetch(self, url, *, reason="", agent_id="research", known=None):
+        return None
+
+
+class _SentThenFailedFetchProvider:
+    """A fetch that WAS sent and then genuinely failed (an actual API/SDK
+    exception, or a sent request whose response carried no usable text)."""
+
+    name = "fake"
+    path = ResearchPath.ANTHROPIC_WEB
+    last_fetch_sent = True
+    last_fetch_error = "APIStatusError: 500 internal server error"
+
+    def available(self):
+        return True, "ready"
+
+    def fetch(self, url, *, reason="", agent_id="research", known=None):
+        return None
+
+
+class _LegacyFetchProvider:
+    """A provider that exposes no last_fetch_sent/last_fetch_error signal at
+    all (e.g. a corpus/null provider) -- must read exactly as before this
+    distinction existed: sent=True, outcome="fetch_failed", never silently
+    misclassified as a budget rejection just because the signal is absent."""
+
+    name = "fake"
+    path = ResearchPath.ANTHROPIC_WEB
+
+    def available(self):
+        return True, "ready"
+
+    def fetch(self, url, *, reason="", agent_id="research", known=None):
+        return None
+
+
+def test_fetch_audit_distinguishes_pre_send_budget_rejection_from_a_sent_then_failed_fetch():
+    """送信前の予算拒否を「取得APIが失敗」と一括表示しない: a fetch the
+    provider never even attempted to send must be reported distinctly
+    (outcome="not_sent", sent=False, fetches_not_sent incremented) from a
+    fetch that WAS sent and then genuinely failed (outcome="fetch_failed",
+    sent=True) -- both currently land in fetches_failed for backward
+    compatibility, but only the genuinely-sent case is "the fetch API
+    failed"."""
+    candidate = _source("https://www.sec.gov/Archives/x/8-K.htm", "Form 8-K")
+
+    not_sent_report = EscalationReport()
+    _attempt_fetch_for_question(
+        _NotSentFetchProvider(), candidate, 1, _REGULATORY_QUESTION, "q1", not_sent_report
+    )
+    assert not_sent_report.fetches_attempted == 1
+    assert not_sent_report.fetches_failed == 1
+    assert not_sent_report.fetches_not_sent == 1
+    entry = not_sent_report.fetch_log[0]
+    assert entry.outcome == "not_sent"
+    assert entry.sent is False
+    assert "BudgetExceeded" in entry.failure_reason
+
+    sent_report = EscalationReport()
+    _attempt_fetch_for_question(
+        _SentThenFailedFetchProvider(), candidate, 1, _REGULATORY_QUESTION, "q1", sent_report
+    )
+    assert sent_report.fetches_attempted == 1
+    assert sent_report.fetches_failed == 1
+    assert sent_report.fetches_not_sent == 0, "a genuinely sent-then-failed fetch must never count as not-sent"
+    entry2 = sent_report.fetch_log[0]
+    assert entry2.outcome == "fetch_failed"
+    assert entry2.sent is True
+    assert "APIStatusError" in entry2.failure_reason
+
+
+def test_fetch_audit_defaults_to_sent_true_when_the_provider_exposes_no_signal():
+    candidate = _source("https://www.sec.gov/Archives/x/8-K.htm", "Form 8-K")
+    report = EscalationReport()
+    _attempt_fetch_for_question(_LegacyFetchProvider(), candidate, 1, _REGULATORY_QUESTION, "q1", report)
+    entry = report.fetch_log[0]
+    assert entry.sent is True
+    assert entry.outcome == "fetch_failed"
+    assert report.fetches_not_sent == 0

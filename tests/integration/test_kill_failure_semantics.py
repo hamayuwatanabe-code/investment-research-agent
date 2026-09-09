@@ -123,3 +123,58 @@ def test_kill_search_failure_semantics_survive_escalation_exhaustion(
         assert "no search provider configured" not in " ".join(record.errors)
 
     assert kill_payload["queries_not_executed"] == []
+
+
+def test_kill_unexecuted_summary_preserves_the_original_exhaustion_cause(
+    repo, fixture_dir, mock_server
+):
+    """PROVIDER_UNAVAILABLE currently covers both "no credentials configured"
+    and "the run's GLOBAL token budget was already exhausted by an earlier
+    stage/agent" -- the same enum value either way (LLMClient.available()
+    only ever checks the one global flag). The reason CODE alone loses that
+    distinction, but the actual cause text (LLMBudget.exhausted_reason,
+    which names the offending agent and the used/remaining counts) must
+    still survive into Kill's own unexecuted-queries summary, not collapse
+    to a bare "23 PROVIDER_UNAVAILABLE" count."""
+    collector = FixtureCollector(fixture_dir)
+    metadata = collector.metadata("DEMOBIO")
+
+    budget = LLMBudget(max_total_tokens=1_000_000)
+    # Simulate what a live run's post-hoc actual-usage overshoot leaves
+    # behind: the budget is GLOBALLY exhausted (not merely one stage), with
+    # a descriptive reason naming which agent's call put it over.
+    budget.exhausted = True
+    budget.exhausted_reason = (
+        "actual usage after agent 'science' put the LLM budget over its ceiling "
+        "(999999/1000000 tokens used)."
+    )
+
+    llm = LLMClient(
+        api_key="sk-ant-test", base_url=mock_server, max_retries=0, timeout=10, budget=budget
+    )
+    research = AnthropicWebResearchProvider(llm)
+    assert research.available()[0] is False
+
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY, research=research, llm=llm)
+    result = pipeline.run(
+        "DEMOBIO",
+        metadata["company_name"],
+        [collector.collect("DEMOBIO", metadata["company_name"])],
+        price=metadata["price"],
+        aliases=metadata.get("aliases", ()),
+    )
+
+    kill_payload = result.bus.channels[Channel.KILL].payload
+    outcomes = kill_payload["query_outcomes"]
+    reasons = {o["reason"] for o in outcomes}
+    assert reasons == {KillSearchFailureReason.PROVIDER_UNAVAILABLE.value}
+
+    kill_records = [r for r in result.agent_records if r.agent_id == "kill_agent"]
+    assert kill_records
+    summary = kill_records[0].errors
+    assert "PROVIDER_UNAVAILABLE" in summary
+    # The original cause -- WHICH agent's call exhausted the budget, and the
+    # actual token counts -- must be readable from the summary, not just a
+    # bare reason-code count.
+    assert "science" in summary
+    assert "999999" in summary

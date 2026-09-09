@@ -37,7 +37,7 @@ def test_token_diagnostics_reports_search_and_fetch_counts():
         unexecuted_due_to_budget=["q1"],
         deduplicated=["q3"],
     )
-    escalation = EscalationReport(fetches_attempted=4, fetches_failed=1)
+    escalation = EscalationReport(fetches_attempted=4, fetches_failed=1, fetches_not_sent=1)
 
     diagnostics = _token_diagnostics(_fake_result(adversarial=adversarial, escalation=escalation))
 
@@ -48,7 +48,7 @@ def test_token_diagnostics_reports_search_and_fetch_counts():
         "deduplicated": 1,
         "skipped_due_to_direct_coverage": 0,
     }
-    assert diagnostics["fetch"] == {"attempted": 4, "failed": 1, "audit_entries": 0}
+    assert diagnostics["fetch"] == {"attempted": 4, "failed": 1, "not_sent": 1, "audit_entries": 0}
 
 
 def test_token_diagnostics_handles_a_run_with_no_llm_activity_at_all():

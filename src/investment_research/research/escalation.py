@@ -187,12 +187,21 @@ class FetchAttempt:
     #: the already-ranked candidate list; -2 when it was an exhibit followed
     #: from another fetch in the same attempt (filing -> exhibit chain).
     candidate_rank: int
-    outcome: str  # "answered" | "confirmed" | "no_answer" | "fetch_failed"
+    outcome: str  # "answered" | "confirmed" | "no_answer" | "fetch_failed" | "not_sent"
     failure_reason: str = ""
     tokens_used: int = 0
     body_obtained: bool = False
     body_answered: bool = False
     supporting_sentence: str = ""
+    #: Whether the fetch request actually reached the provider's network
+    #: call. False means a PRE-SEND rejection (the provider reported itself
+    #: unavailable, or a preflight LLMBudget.check() BudgetExceeded refused
+    #: to call the API at all) -- "we did not try", never conflated with
+    #: "we tried and it broke" (outcome="fetch_failed", sent=True), the same
+    #: UNSEARCHED-vs-K0 distinction this system requires for searches.
+    #: Defaults True so a provider that does not expose this signal (e.g. a
+    #: corpus/null provider) is read exactly as before this field existed.
+    sent: bool = True
 
 
 @dataclass
@@ -203,8 +212,14 @@ class EscalationReport:
     #: raised, or budget-cut) versus produced a body.
     fetches_attempted: int = 0
     fetches_failed: int = 0
+    #: Subset of `fetches_failed` that never actually reached the network --
+    #: a pre-send rejection (provider unavailable / preflight budget
+    #: refusal), not a genuine send-then-fail. Additive, never double-counted
+    #: against `fetches_failed`: every not-sent fetch is still one of the
+    #: `fetches_failed`, this just says which ones "we did not even try".
+    fetches_not_sent: int = 0
     #: Per-fetch audit trail (requirement E) -- the appendix-ready detail
-    #: behind the two counters above.
+    #: behind the counters above.
     fetch_log: list[FetchAttempt] = field(default_factory=list)
 
     @property
@@ -544,15 +559,26 @@ def escalate(
                     report.fetches_failed += 1
                     # Fetch failure (including a BudgetExceeded abort caught by
                     # the provider) leaves the claim unverified, never silently
-                    # confirmed and never treated as a contradiction.
+                    # confirmed and never treated as a contradiction. A
+                    # PRE-SEND rejection (never reached the network) is never
+                    # reported as "the fetch API failed" -- read from the
+                    # provider's own last-fetch signal when it exposes one
+                    # (defaults to "sent" for a provider that does not).
+                    sent = getattr(provider, "last_fetch_sent", True)
+                    reason = getattr(provider, "last_fetch_error", "") or (
+                        "fetch returned no document (network/parse/budget)"
+                    )
+                    if not sent:
+                        report.fetches_not_sent += 1
                     report.fetch_log.append(
                         FetchAttempt(
                             subject_id=fact.fact_id,
                             url=url,
                             authority=str(candidate.tier),
                             candidate_rank=-1,
-                            outcome="fetch_failed",
-                            failure_reason="fetch returned no document (network/parse/budget)",
+                            outcome="fetch_failed" if sent else "not_sent",
+                            failure_reason=reason,
+                            sent=sent,
                         )
                     )
                     continue
@@ -843,14 +869,23 @@ def _attempt_fetch_for_question(
         fetched = None
     if fetched is None:
         report.fetches_failed += 1
+        # Same pre-send/sent-then-failed distinction as the fact-escalation
+        # fetch site above -- never a single undifferentiated "fetch_failed".
+        sent = getattr(provider, "last_fetch_sent", True)
+        reason = getattr(provider, "last_fetch_error", "") or (
+            "fetch returned no document (network/parse/budget)"
+        )
+        if not sent:
+            report.fetches_not_sent += 1
         report.fetch_log.append(
             FetchAttempt(
                 subject_id=subject_id,
                 url=candidate.url,
                 authority=str(DocumentAuthority.UNKNOWN),
                 candidate_rank=rank,
-                outcome="fetch_failed",
-                failure_reason="fetch returned no document (network/parse/budget)",
+                outcome="fetch_failed" if sent else "not_sent",
+                failure_reason=reason,
+                sent=sent,
             )
         )
         return None, None

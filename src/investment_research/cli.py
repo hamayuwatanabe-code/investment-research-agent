@@ -388,12 +388,17 @@ def _token_diagnostics(result: ResearchResult) -> dict:
                 "search_result_count": diag.search_result_count,
                 "completed_intent_ids": diag.completed_intent_ids,
                 "incomplete_intent_ids": diag.incomplete_intent_ids,
+                "ambiguous_results": diag.ambiguous_results,
             }
             for diag in (adversarial.batch_diagnostics if adversarial else [])
         ],
         "fetch": {
             "attempted": escalation.fetches_attempted if escalation else 0,
             "failed": escalation.fetches_failed if escalation else 0,
+            # Requirement 2: a pre-send budget/availability rejection is
+            # never lumped into "the fetch API failed" -- this is the subset
+            # of `failed` above that never reached the network.
+            "not_sent": escalation.fetches_not_sent if escalation else 0,
             # Requirement E: per-fetch audit trail entry count -- the report's
             # escalation appendix carries the full detail (subject, url,
             # authority, candidate rank, outcome, failure reason, tokens,

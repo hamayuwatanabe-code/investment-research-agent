@@ -15,8 +15,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from investment_research.llm.client import LLMClient
-from investment_research.research.anthropic_web import AnthropicWebResearchProvider
+from investment_research.llm.client import LLMBudget, LLMClient
+from investment_research.research.anthropic_web import (
+    AnthropicWebResearchProvider,
+    _affordable_prefix,
+)
 from investment_research.research.batching import ResearchIntent
 from investment_research.schemas.enums import ResearchDomain
 
@@ -613,3 +616,178 @@ def test_same_intent_all_searches_resolve_is_ordinary_complete_success(provider)
     assert {d.url for d in result.documents} == {"https://www.fda.gov/a", "https://www.fda.gov/b"}
     assert result.executed is True
     assert result.error == ""
+
+
+# =========================================================================
+# Regressions for the v5 discovery-budget-blowout review (this turn):
+# a production run showed a single 6-intent batched call spend ~102k actual
+# tokens against a 60k discovery-stage quota (the flat, single-search
+# preflight reserve never scaled with how many searches the call's own
+# max_uses ceiling allowed), starving every other required domain's search
+# for the rest of the stage. These prove the split/allocate fix end to end,
+# through the real mock HTTP transport, at production-batch scale (six
+# required-domain intents) and under a tight, production-shaped budget --
+# never by increasing the budget or dropping a required domain.
+# =========================================================================
+
+
+class _EchoIntentsHandler(BaseHTTPRequestHandler):
+    """Responds with a real, ATTRIBUTED marker+search+result triple for
+    every INTENT id it finds in the request prompt -- whatever subset of
+    the original six ends up in the prompt after the split/allocate
+    decision, this always answers exactly (and only) that subset, exactly
+    as a compliant live model would."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        import re as _re
+
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            request = json.loads(body)
+        except json.JSONDecodeError:
+            request = {}
+        REQUESTS.append(request)
+        prompt_text = ""
+        for message in request.get("messages", []):
+            content = message.get("content", "")
+            prompt_text += content if isinstance(content, str) else json.dumps(content)
+        intent_ids = _re.findall(r"INTENT (\S+) \(domain:", prompt_text)
+
+        content_blocks = []
+        for intent_id in intent_ids:
+            tool_use_id = f"toolu_{intent_id}"
+            content_blocks.append({"type": "text", "text": f"-- INTENT {intent_id} --"})
+            content_blocks.append(
+                {"type": "server_tool_use", "name": "web_search", "id": tool_use_id, "input": {"query": intent_id}}
+            )
+            content_blocks.append(
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": [{"url": f"https://www.fda.gov/{intent_id}", "title": intent_id}],
+                }
+            )
+
+        payload = json.dumps(
+            {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5",
+                "content": content_blocks,
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 900, "output_tokens": 150},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+@pytest.fixture
+def echo_base_url():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _EchoIntentsHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_port}"
+    httpd.shutdown()
+
+
+def _six_domain_intents() -> list[ResearchIntent]:
+    return [
+        ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="regulatory question"),
+        ResearchIntent(intent_id="cap_1", domain=ResearchDomain.CAPITAL_STRUCTURE, question="capital structure question"),
+        ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="science question"),
+        ResearchIntent(intent_id="comp_1", domain=ResearchDomain.COMPETITION, question="competition question"),
+        ResearchIntent(intent_id="cat_1", domain=ResearchDomain.CATALYST, question="catalyst question"),
+        ResearchIntent(intent_id="con_1", domain=ResearchDomain.CONTRADICTION, question="contradiction question"),
+    ]
+
+
+def test_production_scale_batch_under_a_tight_stage_budget_is_served_partially_not_blown(echo_base_url):
+    """The exact production shape: six required-domain intents in one wave-1
+    batch, under a discovery-stage quota too small to afford all six in one
+    call. The batch must be served PARTIALLY -- as many domains as the
+    stage can actually afford, sent in a request whose own preflight
+    reservation genuinely fits -- never all six gambled into one
+    call that then blows the stage's real budget, and never zero domains
+    either. The domains left out must be cleanly absent from `results`
+    (INCOMPLETE_RESPONSE downstream), not silently marked as searched."""
+    REQUESTS.clear()
+    budget = LLMBudget(max_total_tokens=100_000)
+    budget.set_stage("discovery")
+    llm = LLMClient(api_key="sk-ant-test", base_url=echo_base_url, max_retries=0, timeout=10, budget=budget)
+    provider = AnthropicWebResearchProvider(llm)
+
+    intents = _six_domain_intents()
+    expected_included = _affordable_prefix(intents, budget, effort="low", max_uses_per_batch=8)
+    assert 0 < len(expected_included) < len(intents), (
+        "the test's own budget must actually force a split for this assertion to mean anything"
+    )
+
+    results, meta = provider.search_batch(intents, agent_id="adversarial_bear")
+
+    # Exactly one real HTTP call was made -- still cost-safe, never one call
+    # per domain -- but it only asked for the affordable subset.
+    assert len(REQUESTS) == 1
+    prompt = REQUESTS[0]["messages"][0]["content"]
+    for intent in expected_included:
+        assert f"INTENT {intent.intent_id}" in prompt
+    omitted = [i for i in intents if i not in expected_included]
+    for intent in omitted:
+        assert f"INTENT {intent.intent_id}" not in prompt, (
+            "an intent the split/allocate decision excluded must never be sent anyway"
+        )
+
+    # The included domains got real, attributed evidence back...
+    for intent in expected_included:
+        assert intent.intent_id in results
+        assert results[intent.intent_id].executed is True
+        assert results[intent.intent_id].documents
+
+    # ...and the omitted domains are cleanly absent -- never inferred as a
+    # completed, zero-result search.
+    for intent in omitted:
+        assert intent.intent_id not in results
+
+    # The call itself stayed within the stage's real quota -- no post-hoc
+    # surprise overshoot of the kind that starved every later stage in the
+    # reported production run.
+    assert budget.stage_used.get("discovery", 0) <= budget.stage_cap_tokens("discovery")
+    assert meta["ambiguous_results"] == 0
+
+
+def test_production_scale_batch_fits_in_one_call_when_the_stage_budget_is_ample():
+    """Positive control: the same six-domain batch, under a normal
+    (ample) stage budget, still goes out as ONE call covering all six --
+    the split/allocate fix must never fragment a batch that didn't need
+    fragmenting."""
+    REQUESTS.clear()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _EchoIntentsHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        budget = LLMBudget(max_total_tokens=2_000_000)
+        budget.set_stage("discovery")
+        llm = LLMClient(
+            api_key="sk-ant-test",
+            base_url=f"http://127.0.0.1:{httpd.server_port}",
+            max_retries=0,
+            timeout=10,
+            budget=budget,
+        )
+        provider = AnthropicWebResearchProvider(llm)
+        intents = _six_domain_intents()
+
+        results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+
+        assert len(REQUESTS) == 1
+        assert set(results) == {i.intent_id for i in intents}
+        for intent in intents:
+            assert results[intent.intent_id].executed is True
+    finally:
+        httpd.shutdown()

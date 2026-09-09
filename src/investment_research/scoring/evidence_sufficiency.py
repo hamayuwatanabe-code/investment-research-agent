@@ -29,8 +29,8 @@ from ..schemas.enums import (
     SearchStatus,
 )
 from ..schemas.evaluation import KillGateResult
-from ..schemas.fact import Fact
-from .completeness import CompletenessResult
+from ..schemas.fact import Fact, UnresolvedQuestion
+from .completeness import CompletenessResult, research_domain_for_category
 
 #: Domains whose sufficiency can be judged from Fact evidence directly. The
 #: remaining required domains (CATALYST, CONTRADICTION) are not fact-category
@@ -164,17 +164,65 @@ class EvidenceSufficiencyMatrix:
         return rows
 
 
+def _apply_blocking_override(
+    domain: ResearchDomain,
+    status: EvidenceSufficiencyStatus,
+    reason: str,
+    blocking_by_domain: dict[ResearchDomain, list[UnresolvedQuestion]],
+) -> tuple[EvidenceSufficiencyStatus, str]:
+    """Never let a domain read SUFFICIENT while it still has its own
+    unresolved BLOCKING question, whatever decision-grade evidence or
+    confirmed kill finding it otherwise has. Only ever downgrades SUFFICIENT
+    to INSUFFICIENT -- a domain that is already UNSEARCHED or INSUFFICIENT
+    for some other reason is untouched.
+    """
+    blocking_here = blocking_by_domain.get(domain, [])
+    if status is not EvidenceSufficiencyStatus.SUFFICIENT or not blocking_here:
+        return status, reason
+    names = "; ".join(uq.question[:150] for uq in blocking_here[:3])
+    more = f" (+{len(blocking_here) - 3} more)" if len(blocking_here) > 3 else ""
+    new_reason = (
+        f"{len(blocking_here)} blocking unresolved question(s) remain in this domain -- "
+        f"{names}{more} -- evidence already collected here is never enough on its own while a "
+        f"material question about it is still open (previously: {reason})"
+    )
+    return EvidenceSufficiencyStatus.INSUFFICIENT, new_reason
+
+
 def assess_evidence_sufficiency(
     *,
     facts: Iterable[Fact],
     completeness: CompletenessResult,
     gate: KillGateResult,
     unresolved_material_claims: tuple[str, ...] = (),
+    unresolved_questions: Iterable[UnresolvedQuestion] = (),
 ) -> EvidenceSufficiencyMatrix:
-    """Build the Evidence Sufficiency Matrix from evidence already collected."""
+    """Build the Evidence Sufficiency Matrix from evidence already collected.
+
+    ``unresolved_questions`` (requirement: a domain must never read
+    SUFFICIENT while it still has an unresolved BLOCKING question) is
+    distinct from ``unresolved_material_claims``: the latter is a flat,
+    domain-agnostic tuple that only ever blocks the matrix's OVERALL
+    ``sufficient`` property, never any individual domain's own status --
+    so a REGULATORY-blocking unresolved question could previously leave
+    ``matrix.domains[REGULATORY].evidence_sufficiency_status == SUFFICIENT``
+    (because that domain already had a decision-grade fact or a confirmed
+    kill finding) even while the run itself was separately blocked. Never
+    filling that gap (CLAUDE.md rule 7) means the domain's OWN row must say
+    so too, not just the run-wide gate.
+    """
     facts = list(facts)
     matrix = EvidenceSufficiencyMatrix()
     matrix.decision_grade_fact_total = sum(1 for f in facts if f.is_decision_grade)
+
+    blocking_by_domain: dict[ResearchDomain, list[UnresolvedQuestion]] = {}
+    for uq in unresolved_questions:
+        if not uq.blocking:
+            continue
+        domain = research_domain_for_category(uq.category)
+        if domain is None:
+            continue
+        blocking_by_domain.setdefault(domain, []).append(uq)
 
     for domain in REQUIRED_RESEARCH_DOMAINS:
         coverage = completeness.coverage.get(domain)
@@ -197,13 +245,19 @@ def assess_evidence_sufficiency(
             # been searched is the only test this module can meaningfully
             # apply; the Kill Gate's provisional-finding check still catches
             # a contradiction that was raised but never resolved.
+            status, reason = _apply_blocking_override(
+                domain,
+                EvidenceSufficiencyStatus.SUFFICIENT,
+                "searched; not a fact-category domain",
+                blocking_by_domain,
+            )
             matrix.domains[domain] = DomainSufficiency(
                 domain=domain,
                 search_status=search_status,
-                evidence_sufficiency_status=EvidenceSufficiencyStatus.SUFFICIENT,
+                evidence_sufficiency_status=status,
                 decision_grade_fact_count=0,
                 total_fact_count=0,
-                reason="searched; not a fact-category domain",
+                reason=reason,
             )
             continue
 
@@ -246,6 +300,7 @@ def assess_evidence_sufficiency(
                 if domain_facts
                 else "searched; no material claim surfaced in this domain"
             )
+        status, reason = _apply_blocking_override(domain, status, reason, blocking_by_domain)
         matrix.domains[domain] = DomainSufficiency(
             domain=domain,
             search_status=search_status,

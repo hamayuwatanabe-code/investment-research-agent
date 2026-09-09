@@ -40,7 +40,7 @@ from investment_research.schemas.enums import (
     VerifiedStatus,
 )
 from investment_research.schemas.evaluation import KillGateResult
-from investment_research.schemas.fact import RawFact, Source, make_source_id
+from investment_research.schemas.fact import RawFact, Source, UnresolvedQuestion, make_source_id
 from investment_research.scoring.completeness import CompletenessResult
 from investment_research.scoring.evidence_sufficiency import assess_evidence_sufficiency
 from investment_research.scoring.kill_gate import evaluate_kill_gate
@@ -267,6 +267,88 @@ def test_unresolved_critical_contradiction_blocks_final_action():
     )
     assert matrix.sufficient is False
     assert any("contradictory enrollment" in r for r in matrix.blocking_reasons())
+
+
+# =========================== 8b (this turn's review) =========================
+def test_a_domains_own_unresolved_blocking_question_makes_that_domain_insufficient():
+    """The exact gap #8 above does not cover: unresolved_material_claims is a
+    flat, domain-agnostic tuple that only ever blocks matrix.sufficient
+    OVERALL -- it never touches any individual domain's own
+    evidence_sufficiency_status. REGULATORY here already has a
+    decision-grade VERIFIED_FACT (same fixture as #8), which would read
+    SUFFICIENT on its own -- but a REGULATORY-category BLOCKING unresolved
+    question about it must still make REGULATORY's own row INSUFFICIENT,
+    not merely the run-wide gate."""
+    facts = [
+        make_fact(
+            ENDPOINT_REJECTED,
+            category=FactCategory.REGULATORY,
+            content_kind=ContentKind.FULL_DOCUMENT,
+            verified=VerifiedStatus.VERIFIED,
+            evidence_class=EvidenceClass.VERIFIED_FACT,
+            tier=SourceTier.TIER_1,
+        )
+    ]
+    gate = evaluate_kill_gate(facts, [])
+    blocking_question = UnresolvedQuestion(
+        question="Does a second, more recent regulator communication reverse the earlier "
+        "endpoint rejection?",
+        why_it_matters="Would materially change whether the registrational path is dead.",
+        blocking=True,
+        category=FactCategory.REGULATORY,
+    )
+
+    # Positive control: without the unresolved question, REGULATORY reads
+    # SUFFICIENT from the decision-grade fact alone (matches #8's premise).
+    baseline = assess_evidence_sufficiency(facts=facts, completeness=_empty_completeness(), gate=gate)
+    assert baseline.domains[ResearchDomain.REGULATORY].evidence_sufficiency_status is (
+        EvidenceSufficiencyStatus.SUFFICIENT
+    )
+
+    matrix = assess_evidence_sufficiency(
+        facts=facts,
+        completeness=_empty_completeness(),
+        gate=gate,
+        unresolved_questions=[blocking_question],
+    )
+    regulatory = matrix.domains[ResearchDomain.REGULATORY]
+    assert regulatory.evidence_sufficiency_status is EvidenceSufficiencyStatus.INSUFFICIENT
+    assert "blocking unresolved question" in regulatory.reason
+    assert "second, more recent regulator communication" in regulatory.reason
+    assert matrix.sufficient is False
+
+    # A domain the question does NOT belong to must be untouched.
+    competition = matrix.domains[ResearchDomain.COMPETITION]
+    assert competition.evidence_sufficiency_status is EvidenceSufficiencyStatus.SUFFICIENT
+
+
+def test_a_non_blocking_unresolved_question_never_downgrades_a_domain():
+    facts = [
+        make_fact(
+            ENDPOINT_REJECTED,
+            category=FactCategory.REGULATORY,
+            content_kind=ContentKind.FULL_DOCUMENT,
+            verified=VerifiedStatus.VERIFIED,
+            evidence_class=EvidenceClass.VERIFIED_FACT,
+            tier=SourceTier.TIER_1,
+        )
+    ]
+    gate = evaluate_kill_gate(facts, [])
+    non_blocking_question = UnresolvedQuestion(
+        question="What is the exact wording of a minor administrative footnote?",
+        why_it_matters="Immaterial.",
+        blocking=False,
+        category=FactCategory.REGULATORY,
+    )
+    matrix = assess_evidence_sufficiency(
+        facts=facts,
+        completeness=_empty_completeness(),
+        gate=gate,
+        unresolved_questions=[non_blocking_question],
+    )
+    assert matrix.domains[ResearchDomain.REGULATORY].evidence_sufficiency_status is (
+        EvidenceSufficiencyStatus.SUFFICIENT
+    )
 
 
 # =========================== 9 ==============================================

@@ -26,7 +26,12 @@ from typing import Any
 
 from ..collectors.documents import Document
 from ..collectors.tiering import classify_authority, classify_tier
-from ..llm.client import BudgetExceeded
+from ..llm.client import (
+    SERVER_TOOL_TOKEN_RESERVE,
+    SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT,
+    BudgetExceeded,
+    LLMBudget,
+)
 from ..schemas.enums import (
     UNKNOWN,
     ContentKind,
@@ -167,6 +172,17 @@ class AnthropicWebResearchProvider:
         # many intents are in the batch -- a batch is never allowed to
         # consume the whole discovery quota by itself.
         self.max_uses_per_batch = max_uses_per_batch
+        # Set on every `fetch()` call, right before it returns None -- the
+        # only way a caller (research/escalation.py's fetch audit) can tell
+        # a PRE-SEND rejection (provider unavailable, preflight
+        # BudgetExceeded: `last_fetch_sent=False`, never reached the network)
+        # apart from a genuine SEND-then-fail (an actual API/SDK exception,
+        # or a sent request whose response carried no usable text/an error
+        # block: `last_fetch_sent=True`). A successful fetch resets both to
+        # their "nothing to report" defaults. Mirrors the existing
+        # `last_usage_tokens` convention on `LLMClient`.
+        self.last_fetch_error: str = ""
+        self.last_fetch_sent: bool = True
 
     def available(self) -> tuple[bool, str]:
         return self.llm.available()
@@ -263,13 +279,19 @@ class AnthropicWebResearchProvider:
         Returns ``(results_by_intent_id, diagnostics)``. An intent whose id
         never appears as a key in the returned mapping was never addressed
         by the model at all -- the caller (``research.batching``) reads that
-        as ``IntentStatus.INCOMPLETE_RESPONSE``, never as zero results.
-        Requirement B: when every intent in the batch shares the exact same
-        (non-empty) source restriction, it is applied at the tool level; a
-        batch mixing different restrictions leaves the tool unrestricted and
-        each intent's own restriction is enforced afterward by filtering its
-        attributed documents to matching hosts -- never blended across
-        intents with incompatible requirements.
+        as ``IntentStatus.INCOMPLETE_RESPONSE``, never as zero results. This
+        includes an intent this method itself never sent because it did not
+        fit the budget (see ``_affordable_prefix``): only as many of
+        ``intents`` as a single call can honestly afford, given what
+        actually remains of the global AND current-stage budget, are ever
+        included in the request -- never all of them on the hope that the
+        real cost will happen to fit. Requirement B: when every intent in
+        the batch shares the exact same (non-empty) source restriction, it
+        is applied at the tool level; a batch mixing different restrictions
+        leaves the tool unrestricted and each intent's own restriction is
+        enforced afterward by filtering its attributed documents to
+        matching hosts -- never blended across intents with incompatible
+        requirements.
         """
         empty_meta = {
             "server_tool_uses": 0,
@@ -296,16 +318,48 @@ class AnthropicWebResearchProvider:
                 empty_meta,
             )
 
+        # Split/allocate (never a flat guess): only as many of `intents` as a
+        # single call can honestly afford, given what actually remains of the
+        # global AND the current stage's budget -- see _affordable_prefix.
+        # Intents beyond the returned prefix are simply never sent this call;
+        # never silently included in a request whose real cost this module
+        # cannot promise will fit.
+        included = _affordable_prefix(
+            intents, self.llm.budget, effort=self.research_effort, max_uses_per_batch=self.max_uses_per_batch
+        )
+        if not included:
+            error = (
+                f"BudgetExceeded: not even a single-intent batch fits the remaining budget "
+                f"({self.llm.budget.remaining} global token(s) / "
+                f"{self.llm.budget.stage_remaining(self.llm.budget.current_stage)} stage token(s) left) -- "
+                "refusing to call the API for this batch"
+            )
+            log.warning("batched web search skipped: %s", error)
+            return (
+                {
+                    intent.intent_id: ResearchResult(
+                        query=_query_for_intent(intent),
+                        outcome=FetchOutcome.DISABLED,
+                        path=self.path,
+                        executed=False,
+                        error=error,
+                    )
+                    for intent in intents
+                },
+                empty_meta,
+            )
+
         search_tool, _ = tool_types_for(self.llm.model)
-        max_uses = min(len(intents) + 1, self.max_uses_per_batch)
+        max_uses = min(len(included) + 1, self.max_uses_per_batch)
         tool: dict[str, Any] = {"type": search_tool, "name": "web_search", "max_uses": max_uses}
         if search_tool == WEB_SEARCH_TOOL:
             tool["allowed_callers"] = _DIRECT_CALLER
-        shared_restrictions = _shared_source_restrictions(intents)
+        shared_restrictions = _shared_source_restrictions(included)
         if shared_restrictions:
             tool["allowed_domains"] = list(shared_restrictions)
 
-        prompt = _build_batch_prompt(intents)
+        prompt = _build_batch_prompt(included)
+        reserved_tokens = _batch_reservation(included, max_uses=max_uses, effort=self.research_effort)
         try:
             response = self.llm.raw_message(
                 system=BATCH_SEARCH_SYSTEM,
@@ -314,6 +368,7 @@ class AnthropicWebResearchProvider:
                 max_tokens=BATCH_SEARCH_MAX_TOKENS,
                 agent_id=agent_id,
                 effort=self.research_effort,
+                reserved_tokens=reserved_tokens,
             )
         except BudgetExceeded as exc:
             log.warning("batched web search skipped: %s", exc)
@@ -345,9 +400,9 @@ class AnthropicWebResearchProvider:
                 empty_meta,
             )
 
-        parsed = _parse_batch_response(response, intents, path=self.path)
+        parsed = _parse_batch_response(response, included, path=self.path)
         results: dict[str, ResearchResult] = {}
-        for intent in intents:
+        for intent in included:
             issued = parsed.issued_tool_use_ids.get(intent.intent_id, set())
             unresolved = issued - parsed.resolved_tool_use_ids
             if intent.intent_id not in parsed.search_completed and not unresolved:
@@ -422,8 +477,10 @@ class AnthropicWebResearchProvider:
         any of those dates (requirement B1) -- a historical filing fetched
         today stays dated when it was filed, not when it was fetched.
         """
-        usable, _ = self.available()
+        usable, reason = self.available()
         if not usable:
+            self.last_fetch_sent = False
+            self.last_fetch_error = f"provider unavailable: {reason}"
             return None
 
         _, fetch_tool = tool_types_for(self.llm.model)
@@ -453,9 +510,13 @@ class AnthropicWebResearchProvider:
             )
         except BudgetExceeded as exc:
             log.warning("web fetch skipped for %s: %s", url, exc)
+            self.last_fetch_sent = False
+            self.last_fetch_error = f"BudgetExceeded: {exc}"
             return None
         except Exception as exc:  # noqa: BLE001
             log.warning("web fetch failed for %s: %s", url, exc)
+            self.last_fetch_sent = True
+            self.last_fetch_error = f"{type(exc).__name__}: {exc}"
             return None
 
         # `retrieved` here is when Anthropic's server retrieved the page --
@@ -463,8 +524,14 @@ class AnthropicWebResearchProvider:
         # deliberately NEVER used as published_date/event_date/etc.
         text, fetched_title, retrieved = _extract_fetch_result(response)
         if not text:
+            # The request WAS sent and answered -- an empty/error result is
+            # a genuine send-then-fail, never a pre-send rejection.
+            self.last_fetch_sent = True
+            self.last_fetch_error = "web_fetch returned no usable text (tool error or empty result)"
             return None
 
+        self.last_fetch_sent = True
+        self.last_fetch_error = ""
         seed = _seed_from(known)
         is_company_ir = bool(getattr(known, "is_company_ir", False))
         authority = classify_authority(url, is_company_ir=is_company_ir)
@@ -715,6 +782,81 @@ def _build_batch_prompt(intents: Sequence[ResearchIntent]) -> str:
         "first emit its `-- INTENT <id> --` marker line, then call web_search for it.\n\n"
         + "\n\n".join(sections)
     )
+
+
+#: Same conservative chars/token heuristic ``LLMClient._default_reservation``
+#: uses, kept local so this module's own reservation math doesn't reach into
+#: a client-private constant.
+_CHARS_PER_TOKEN = 4
+
+
+def _batch_reservation(intents: Sequence[ResearchIntent], *, max_uses: int, effort: str) -> int:
+    """Conservative preflight token estimate for a batched call over exactly
+    ``intents``, honest about how many searches ``max_uses`` actually allows.
+
+    A live production run showed a single 6-intent batched call (``max_uses``
+    up to 7) spend ~102,000 actual tokens against a 60,000-token discovery
+    stage quota -- because the preflight reservation this module used to pass
+    to ``raw_message`` was a FLAT one-search reserve
+    (``SERVER_TOOL_TOKEN_RESERVE[_LOW_EFFORT]``), regardless of how many
+    searches the request's own ``max_uses`` ceiling permitted. That flat
+    reserve was calibrated (see its own docstring) against a single search,
+    before batching existed; batching several searches into one call to cut
+    the CALL count does not cut the TOKEN count, since real cost tracks the
+    number of searches actually issued, not the number of API calls that
+    contain them. Scaling the reserve by ``max_uses`` here makes the
+    preflight check (``LLMBudget.check``) honestly reject a batch whose
+    worst-case real cost would not fit, BEFORE anything is sent, instead of
+    discovering the overshoot only after the fact via ``LLMBudget.record``'s
+    post-hoc stage-exhaustion latch (by which point the tokens are already
+    spent and every other required domain this stage still owes a search to
+    is starved).
+    """
+    per_search = SERVER_TOOL_TOKEN_RESERVE_LOW_EFFORT if effort == "low" else SERVER_TOOL_TOKEN_RESERVE
+    prompt = _build_batch_prompt(intents)
+    prompt_chars = len(BATCH_SEARCH_SYSTEM) + len(prompt)
+    return prompt_chars // _CHARS_PER_TOKEN + BATCH_SEARCH_MAX_TOKENS + max_uses * per_search
+
+
+def _affordable_prefix(
+    intents: Sequence[ResearchIntent],
+    budget: LLMBudget,
+    *,
+    effort: str,
+    max_uses_per_batch: int,
+) -> list[ResearchIntent]:
+    """The longest PREFIX of ``intents`` (priority order preserved) whose
+    scaled reservation (see ``_batch_reservation``) fits what actually
+    remains of both the global budget and the current stage's own quota.
+
+    This is the split/allocate half of the same fix: rather than gambling
+    the whole batch on one oversized call (silently starving every OTHER
+    required domain's search once that one call blows the stage's real
+    quota), a batch that does not fit is served PARTIALLY -- as many of its
+    intents as a single call can honestly afford -- so the stage's budget
+    gets spent across several smaller, successful calls instead of one call
+    that either wildly overshoots or (once ``_batch_reservation`` is honest
+    about its cost) gets rejected outright. Intents beyond the returned
+    prefix are simply never included in this call; the caller
+    (``research.batching``) reads their absence from the response as
+    ``IntentStatus.INCOMPLETE_RESPONSE``, exactly as it already does for an
+    intent the model omitted from its reply -- never inferred as a
+    completed, zero-result search. An empty list means not even a
+    single-intent call fits right now.
+
+    Deliberately NOT a claim that this eliminates overshoot risk entirely --
+    a server-side tool's real cost is still not knowable before the response
+    comes back (see ``BudgetExceeded``'s own docstring); this only makes the
+    preflight estimate track batch size instead of ignoring it.
+    """
+    stage_remaining = budget.stage_remaining(budget.current_stage)
+    limit = budget.remaining if stage_remaining is None else min(budget.remaining, stage_remaining)
+    for count in range(len(intents), 0, -1):
+        prefix = list(intents[:count])
+        max_uses = min(count + 1, max_uses_per_batch)
+        if _batch_reservation(prefix, max_uses=max_uses, effort=effort) <= limit:
+            return prefix
+    return []
 
 
 @dataclass

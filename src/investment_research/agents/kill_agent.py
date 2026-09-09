@@ -296,15 +296,34 @@ class KillAgent(Agent):
         that is genuinely why -- a per-reason breakdown, built from the
         actual :class:`KillQueryOutcome` recorded for each query, replaces
         the old single hardcoded message.
+
+        A reason CODE alone ("23 PROVIDER_UNAVAILABLE") does not distinguish
+        "no client/credentials configured" from "the run's global token
+        budget was already exhausted by an earlier stage/agent" -- both
+        collapse to the same :class:`KillSearchFailureReason` today (see
+        ``LLMClient.available()``), but the underlying cause text (the
+        provider's own ``unavailable_reason`` -- e.g. the specific
+        ``LLMBudget.exhausted_reason``, which names the offending agent and
+        the used/remaining token counts) is preserved per query on
+        ``KillQueryOutcome.detail``. The first non-empty detail seen for
+        each reason is carried into the summary, so this line still says
+        WHY -- auth, connection, budget, or global stop -- not just how
+        many.
         """
         unexecuted_set = set(unexecuted)
-        reasons = Counter(
-            outcome.reason for outcome in self.query_outcomes if outcome.query in unexecuted_set
-        )
-        parts = [
-            f"{count} {reason.value}"
-            for reason, count in sorted(reasons.items(), key=lambda kv: kv[0].value)
-        ]
+        matching = [outcome for outcome in self.query_outcomes if outcome.query in unexecuted_set]
+        reasons = Counter(outcome.reason for outcome in matching)
+        detail_by_reason: dict[KillSearchFailureReason, str] = {}
+        for outcome in matching:
+            if outcome.detail and outcome.reason not in detail_by_reason:
+                detail_by_reason[outcome.reason] = outcome.detail
+        parts = []
+        for reason, count in sorted(reasons.items(), key=lambda kv: kv[0].value):
+            detail = detail_by_reason.get(reason, "")
+            part = f"{count} {reason.value}"
+            if detail:
+                part += f" ({detail[:200]})"
+            parts.append(part)
         return f"{len(unexecuted)} mandatory kill queries were not executed ({'; '.join(parts)})"
 
     def _search_via_research(

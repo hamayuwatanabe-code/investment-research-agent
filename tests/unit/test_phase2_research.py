@@ -27,9 +27,12 @@ from investment_research.research.anthropic_web import (
     WEB_FETCH_TOOL,
     WEB_SEARCH_TOOL,
     AnthropicWebResearchProvider,
+    _affordable_prefix,
+    _batch_reservation,
     parse_search_response,
     tool_types_for,
 )
+from investment_research.research.batching import ResearchIntent
 from investment_research.research.corpus import CorpusResearchProvider
 from investment_research.research.escalation import (
     domains_for_category,
@@ -230,6 +233,60 @@ def test_genuine_empty_list_content_is_a_normal_zero_result():
     )
     assert documents == []
     assert error == ""
+
+
+def _batch_intent(index: int, *, domain: ResearchDomain = ResearchDomain.REGULATORY) -> ResearchIntent:
+    return ResearchIntent(
+        intent_id=f"gap_{index}",
+        domain=domain,
+        question=f"generic research question number {index} about the subject company",
+    )
+
+
+def test_batch_reservation_scales_with_max_uses_not_flat_per_call():
+    """The v4 live-run defect: a single 6-intent batched call (max_uses up to
+    7) spent ~102k actual tokens against a 60k discovery-stage quota, because
+    the old flat one-search reserve never grew with how many searches the
+    call's own max_uses ceiling actually allowed. The reservation for a
+    6-intent batch must be materially larger than for a 1-intent batch."""
+    one = _batch_reservation([_batch_intent(0)], max_uses=2, effort="low")
+    six = _batch_reservation([_batch_intent(i) for i in range(6)], max_uses=7, effort="low")
+    assert six > one
+    # Six searches' worth of reserve, not one search's worth padded once.
+    assert six - one >= 5 * 8_000
+
+
+def test_affordable_prefix_returns_everything_when_budget_is_ample():
+    budget = LLMBudget(max_total_tokens=2_000_000)
+    intents = [_batch_intent(i) for i in range(6)]
+    included = _affordable_prefix(intents, budget, effort="low", max_uses_per_batch=8)
+    assert included == intents
+
+
+def test_affordable_prefix_shrinks_to_what_the_stage_quota_can_actually_afford():
+    """Split/allocate, not a flat guess: under a tight stage quota, only a
+    PREFIX of the batch is included -- never the full batch on the hope its
+    real cost happens to fit, and never zero when at least one intent's
+    scaled reservation genuinely does fit."""
+    budget = LLMBudget(max_total_tokens=100_000)
+    budget.set_stage("discovery")  # 30% of 100_000 = 30_000
+    intents = [_batch_intent(i) for i in range(6)]
+    included = _affordable_prefix(intents, budget, effort="low", max_uses_per_batch=8)
+    assert 0 < len(included) < len(intents), (
+        "a batch that cannot fit must be served PARTIALLY, not all-or-nothing"
+    )
+    assert included == intents[: len(included)], "priority order is preserved"
+    # The returned prefix's own reservation must genuinely fit what remains.
+    max_uses = min(len(included) + 1, 8)
+    assert _batch_reservation(included, max_uses=max_uses, effort="low") <= budget.stage_remaining("discovery")
+
+
+def test_affordable_prefix_returns_nothing_when_not_even_one_intent_fits():
+    budget = LLMBudget(max_total_tokens=1_000)
+    budget.set_stage("discovery")  # 30% of 1_000 = 300 -- far too small for one search
+    intents = [_batch_intent(0)]
+    included = _affordable_prefix(intents, budget, effort="low", max_uses_per_batch=8)
+    assert included == []
 
 
 class _FakeLLM:
@@ -508,6 +565,39 @@ def test_fetch_returns_none_on_budget_exceeded():
     )
     provider = AnthropicWebResearchProvider(llm)
     assert provider.fetch("https://www.sec.gov/x", reason="verify") is None
+    # A preflight BudgetExceeded rejection never reaches the network -- the
+    # fetch audit trail (research/escalation.py) reads this signal to avoid
+    # reporting "we tried and the fetch API failed" for a call never sent.
+    assert provider.last_fetch_sent is False
+    assert "BudgetExceeded" in provider.last_fetch_error
+
+
+def test_fetch_marks_sent_true_on_a_genuine_send_then_fail():
+    """A real API/SDK exception (the request WAS transmitted) must be
+    distinguishable from the preflight-rejection case above."""
+    llm = _FakeLLM("claude-sonnet-5", {"content": []}, raises=RuntimeError("connection reset"))
+    provider = AnthropicWebResearchProvider(llm)
+    assert provider.fetch("https://www.sec.gov/x", reason="verify") is None
+    assert provider.last_fetch_sent is True
+    assert "connection reset" in provider.last_fetch_error
+
+
+def test_fetch_resets_last_fetch_signal_on_success():
+    import types
+
+    fetch_block = types.SimpleNamespace(
+        type="web_fetch_tool_result",
+        content={
+            "content": {"source": {"data": "the fetched body text"}, "title": "Form 8-K"},
+            "retrieved_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    llm = _FakeLLM("claude-sonnet-5", types.SimpleNamespace(content=[fetch_block]))
+    provider = AnthropicWebResearchProvider(llm)
+    document = provider.fetch("https://www.sec.gov/x", reason="verify")
+    assert document is not None
+    assert provider.last_fetch_sent is True
+    assert provider.last_fetch_error == ""
 
 
 # --- providers --------------------------------------------------------------

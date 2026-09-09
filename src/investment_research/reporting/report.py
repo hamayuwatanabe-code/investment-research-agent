@@ -749,6 +749,29 @@ def render_report(result: ResearchResult) -> str:
     return ReportRenderer(result).render()
 
 
+def _fallback_reason_for(agent_records: Any, agent_id: str) -> str:
+    """The most recent recorded reason ``agent_id`` fell back to its
+    deterministic agent, or "" when nothing was recorded.
+
+    ``AgentRunRecord.errors`` is a ``" | ".join(output.errors)`` snapshot
+    (``orchestrator/pipeline.py``'s ``_record``); ``agents/llm_base.py``'s
+    ``_fallback`` always appends exactly one ``"LLM not used: <reason>"``
+    entry, so the substring after that marker is the reason tokens were
+    spent but the LLM output was discarded (schema validation failed, a
+    repair attempt was exhausted, the call itself raised, a stage/global
+    budget rejection) -- distinct from "the LLM was never called at all",
+    which leaves no such entry.
+    """
+    marker = "LLM not used: "
+    for record in reversed(list(agent_records)):
+        if record.agent_id != agent_id:
+            continue
+        for part in record.errors.split(" | "):
+            if part.startswith(marker):
+                return part[len(marker):]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Phase 2 appendices, bound onto ReportRenderer.
 # ---------------------------------------------------------------------------
@@ -896,14 +919,16 @@ def _section_escalation(self: ReportRenderer) -> str:
         out.append("")
         out.append(
             f"  fetch audit ({len(escalation.fetch_log)} attempt(s); "
-            f"{escalation.fetches_attempted} attempted, {escalation.fetches_failed} failed):"
+            f"{escalation.fetches_attempted} attempted, {escalation.fetches_failed} failed, "
+            f"of which {escalation.fetches_not_sent} never reached the network -- a preflight "
+            "budget/availability rejection, not a send-then-fail):"
         )
         for entry in escalation.fetch_log:
             out.append("")
             out.append(f"      subject   : {self._safe(entry.subject_id)[:150]}")
             out.append(f"      url       : {self._safe(entry.url)}")
             out.append(f"      authority : {entry.authority}   candidate_rank: {entry.candidate_rank}")
-            out.append(f"      outcome   : {entry.outcome}")
+            out.append(f"      outcome   : {entry.outcome}   sent: {entry.sent}")
             if entry.failure_reason:
                 out.append(f"      failure   : {self._safe(entry.failure_reason)}")
             out.append(
@@ -978,8 +1003,22 @@ def _section_cost(self: ReportRenderer) -> str:
             )
         out.append("")
         out.append("  tokens by agent/call:")
+        used_set = set(used)
         for agent_id, tokens in sorted(budget.by_agent().items()):
             out.append(f"      {agent_id:<22} {tokens:>9,}")
+            if agent_id not in used_set:
+                # Tokens were spent for this agent_id, but it is not in
+                # llm_agents_used -- it fell back to the deterministic
+                # agent. Never leave that as an unexplained discrepancy:
+                # the actual reason (schema validation failed, a repair
+                # attempt exhausted, the call itself raised, a stage/global
+                # budget rejection) was computed at the point of failure
+                # (agents/llm_base.py's _fallback()) and survives on this
+                # agent's own AgentRunRecord -- print it here rather than
+                # only distinguishing "not model-backed" from nothing.
+                reason = _fallback_reason_for(self.result.agent_records, agent_id)
+                if reason:
+                    out.append(f"          -> fell back to deterministic: {self._safe(reason)[:300]}")
 
     adversarial = self.result.adversarial
     if adversarial is not None:
@@ -991,6 +1030,34 @@ def _section_cost(self: ReportRenderer) -> str:
             f"      unexecuted (budget): {len(adversarial.unexecuted_due_to_budget)}"
         )
         out.append(f"      deduplicated      : {len(adversarial.deduplicated)}")
+        if adversarial.batch_diagnostics:
+            # Requirement 6: the batch-level diagnostics a smoke test already
+            # gets (batch id, intents, tool uses, actual consumption,
+            # completion status, unattributed count) must survive into the
+            # PRODUCTION report, not only an intermediate Python object or
+            # the --json export path.
+            out.append("")
+            out.append("      research batches (one entry per underlying discovery call):")
+            for diag in adversarial.batch_diagnostics:
+                out.append(f"          batch {diag.batch_id}  domains: {', '.join(diag.domains)}")
+                out.append(
+                    f"              intents           : {', '.join(diag.intent_ids)}"
+                )
+                out.append(
+                    f"              tool uses         : {diag.server_tool_uses}   "
+                    f"actual tokens: {diag.actual_total_tokens:,}"
+                )
+                out.append(
+                    f"              completed intents : {', '.join(diag.completed_intent_ids) or '(none)'}"
+                )
+                out.append(
+                    f"              incomplete intents: {', '.join(diag.incomplete_intent_ids) or '(none)'}"
+                )
+                if diag.ambiguous_results:
+                    out.append(
+                        f"              unattributed results: {diag.ambiguous_results} "
+                        "(dropped, never guessed at)"
+                    )
 
     escalation = self.result.escalation
     if escalation is not None:
@@ -998,6 +1065,7 @@ def _section_cost(self: ReportRenderer) -> str:
         out.append("  primary-source escalation (fetch):")
         out.append(f"      fetches attempted : {escalation.fetches_attempted}")
         out.append(f"      fetches failed    : {escalation.fetches_failed}")
+        out.append(f"      fetches not sent  : {escalation.fetches_not_sent} (pre-send budget/availability rejection, of the failed count above)")
         out.append(f"      confirmed         : {len(escalation.confirmed)}")
         out.append(f"      unconfirmed       : {len(escalation.unconfirmed)}")
 
