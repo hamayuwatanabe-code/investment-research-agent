@@ -163,6 +163,11 @@ class BatchDiagnostics:
     search_result_count: int = 0
     completed_intent_ids: list[str] = field(default_factory=list)
     incomplete_intent_ids: list[str] = field(default_factory=list)
+    #: Result blocks the provider could not attribute to any intent at all
+    #: (no resolvable id, or an id resolving to no known intent) -- never
+    #: guessed at, only counted, so an unusually high count is visible in
+    #: audit output even though nothing was silently misattributed.
+    ambiguous_results: int = 0
 
 
 def intents_from_unresolved_questions(
@@ -277,14 +282,22 @@ def _apply_result_to_intent(intent: ResearchIntent, result: ResearchResult | Non
         intent.detail = "omitted from the batch response"
         return
     intent.path = result.path
+    # Evidence already obtained must survive regardless of ``executed`` --
+    # a not-executed result (budget skip, tool error, or an intent with an
+    # unresolved sub-search) may still carry documents from a DIFFERENT,
+    # successful search for the same intent, and those must never be
+    # silently dropped just because the overall intent isn't fully resolved.
+    intent.documents = list(result.documents)
     if not result.executed:
         error = str(result.error)
-        intent.status = (
-            IntentStatus.SKIPPED_DUE_TO_BUDGET if error.startswith("BudgetExceeded") else IntentStatus.ERROR
-        )
+        if error.startswith("BudgetExceeded"):
+            intent.status = IntentStatus.SKIPPED_DUE_TO_BUDGET
+        elif error.startswith("IncompleteIntent"):
+            intent.status = IntentStatus.INCOMPLETE_RESPONSE
+        else:
+            intent.status = IntentStatus.ERROR
         intent.detail = error
         return
-    intent.documents = list(result.documents)
     if result.error:
         intent.status = IntentStatus.ERROR
         intent.detail = result.error
@@ -339,6 +352,7 @@ def execute_research_batch(
         diagnostics.prompt_tokens = int(meta.get("prompt_tokens", 0))
         diagnostics.output_tokens = int(meta.get("output_tokens", 0))
         diagnostics.actual_total_tokens = int(meta.get("actual_total_tokens", 0))
+        diagnostics.ambiguous_results = int(meta.get("ambiguous_results", 0))
     else:
         results_by_intent = {}
         for intent in batch.intents:

@@ -271,7 +271,13 @@ class AnthropicWebResearchProvider:
         attributed documents to matching hosts -- never blended across
         intents with incompatible requirements.
         """
-        empty_meta = {"server_tool_uses": 0, "prompt_tokens": 0, "output_tokens": 0, "actual_total_tokens": 0}
+        empty_meta = {
+            "server_tool_uses": 0,
+            "prompt_tokens": 0,
+            "output_tokens": 0,
+            "actual_total_tokens": 0,
+            "ambiguous_results": 0,
+        }
         usable, reason = self.available()
         if not intents:
             return {}, empty_meta
@@ -342,15 +348,36 @@ class AnthropicWebResearchProvider:
         parsed = _parse_batch_response(response, intents, path=self.path)
         results: dict[str, ResearchResult] = {}
         for intent in intents:
-            if intent.intent_id not in parsed.search_completed:
+            issued = parsed.issued_tool_use_ids.get(intent.intent_id, set())
+            unresolved = issued - parsed.resolved_tool_use_ids
+            if intent.intent_id not in parsed.search_completed and not unresolved:
                 # No REAL web_search_tool_result block was ever attributed
-                # to this intent -- a marker, or a tool_use with no result,
-                # or truncation, is never enough on its own (requirement 1).
+                # to this intent, and there is no outstanding issued call
+                # either -- the model never actually addressed it at all
+                # (requirement 1).
                 continue
             documents = parsed.documents_by_intent.get(intent.intent_id, [])
             if intent.source_restrictions:
                 documents = [d for d in documents if _host_matches(d.url, intent.source_restrictions)]
             error = parsed.error_by_intent.get(intent.intent_id, "")
+            if unresolved:
+                # At least one web_search call ISSUED for this intent never
+                # got a result block back before the response ended -- even
+                # though a different search for the SAME intent may have
+                # resolved and produced the documents below. Never read as
+                # complete success; any evidence already obtained survives.
+                incomplete_note = f"IncompleteIntent: {len(unresolved)} unresolved web_search call(s)"
+                error = f"{incomplete_note}; {error}" if error else incomplete_note
+                results[intent.intent_id] = ResearchResult(
+                    query=_query_for_intent(intent),
+                    documents=documents[:6],
+                    outcome=FetchOutcome.ERROR,
+                    path=self.path,
+                    executed=False,
+                    error=error,
+                    tokens_used=self.llm.last_usage_tokens,
+                )
+                continue
             results[intent.intent_id] = ResearchResult(
                 query=_query_for_intent(intent),
                 documents=documents[:6],
@@ -367,6 +394,7 @@ class AnthropicWebResearchProvider:
             "prompt_tokens": last_call.input_tokens if last_call else 0,
             "output_tokens": last_call.output_tokens if last_call else 0,
             "actual_total_tokens": last_call.total_tokens if last_call else 0,
+            "ambiguous_results": parsed.ambiguous_results,
         }
         return results, meta
 
@@ -556,10 +584,19 @@ def _documents_from_result_content(
     batched-call parser (``_parse_batch_response``) so both apply the exact
     same error/tiering/authority rules to a result block, wherever in a
     response it appears.
+
+    Missing/``None`` content and a malformed (non-list, non-error-dict)
+    shape are never read as a genuine zero-result search -- only an actual
+    ``content == []`` (a well-formed, empty list) is. Conflating the two
+    would let a broken or truncated response silently pass as "searched,
+    nothing found".
     """
     if content is None:
-        return [], ""
+        log.warning("web search result block has no content (missing/None)")
+        return [], "web_search error: missing result content"
     if isinstance(content, dict) or not isinstance(content, (list, tuple)):
+        # Either a plain error dict, or the real SDK's typed error object
+        # (e.g. ``WebSearchToolResultError``) -- both expose ``error_code``.
         code = _get(content, "error_code") or "unknown_error"
         log.warning("web search returned an error block: %s", code)
         return [], f"web_search error: {code}"
@@ -691,7 +728,9 @@ class _BatchParseResult:
     #: block, is never enough on its own (requirement 1). The caller reads
     #: absence from this set as ``IntentStatus.INCOMPLETE_RESPONSE``,
     #: regardless of whether ``documents_by_intent`` happens to have a key
-    #: for it.
+    #: for it. Membership here does NOT by itself mean every search issued
+    #: for the intent was resolved -- see ``issued_tool_use_ids`` /
+    #: ``resolved_tool_use_ids`` for that.
     search_completed: set[str] = field(default_factory=set)
     #: Tool-error text attributed to each intent (requirement 2) -- kept
     #: alongside any documents that same intent DID get from a different,
@@ -699,6 +738,22 @@ class _BatchParseResult:
     #: read as complete, uncomplicated success.
     error_by_intent: dict[str, str] = field(default_factory=dict)
     server_tool_uses: int = 0
+    #: Every ``server_tool_use`` (web_search call) id issued while a KNOWN
+    #: intent was the active marker, keyed by that intent. Used together
+    #: with ``resolved_tool_use_ids`` to detect a search that was ISSUED for
+    #: an intent but never got a result block back before the response
+    #: ended -- an unresolved call that must never be silently read as that
+    #: intent having completed successfully, even when a DIFFERENT search
+    #: for the same intent did resolve.
+    issued_tool_use_ids: dict[str, set[str]] = field(default_factory=dict)
+    #: Every ``tool_use_id`` that a ``web_search_tool_result`` block was
+    #: actually seen and successfully attributed for.
+    resolved_tool_use_ids: set[str] = field(default_factory=set)
+    #: Result blocks that could not be attributed to any intent at all --
+    #: no resolvable ``tool_use_id``, or a ``tool_use_id`` that does not
+    #: resolve to a known intent. Never guessed at via marker order; only
+    #: counted, for diagnostics (requirement 1).
+    ambiguous_results: int = 0
 
 
 def _parse_batch_response(
@@ -707,22 +762,29 @@ def _parse_batch_response(
     """Attribute every search result in a batched response to the intent
     that actually requested it (requirements 1/2/4).
 
-    Attribution prefers ID-based correlation: a ``server_tool_use`` block
-    carries its own ``id``; the ``web_search_tool_result`` block that
-    answers it carries a matching ``tool_use_id``. Recording
-    ``tool_use_id -> intent`` as each search is issued (only while a KNOWN
-    intent marker is active) and looking a result's ``tool_use_id`` up in
-    that map is correct even when result blocks arrive in a different order
-    than their searches were issued. A result block with no ``tool_use_id``
-    at all (a simplified/older response shape) falls back to whichever
-    marker most recently preceded it; a result whose ``tool_use_id`` fails
-    to resolve to a known intent is never guessed at by falling back to
-    order -- it is dropped, logged, and left unattributed.
+    Attribution is ID-based ONLY: a ``server_tool_use`` block carries its own
+    ``id``; the ``web_search_tool_result`` block that answers it carries a
+    matching ``tool_use_id``. Recording ``tool_use_id -> intent`` as each
+    search is issued (only while a KNOWN intent marker is active) and
+    looking a result's ``tool_use_id`` up in that map is correct even when
+    result blocks arrive in a different order than their searches were
+    issued. A result block with no ``tool_use_id`` at all, or whose
+    ``tool_use_id`` fails to resolve to a known intent, is NEVER guessed at
+    by falling back to marker order -- genuine ambiguity (e.g. "search A ->
+    search B -> an id-less result") is recorded as such (``ambiguous_results``)
+    and the result is dropped, not assigned to whichever intent happened to
+    be current.
 
     An UNKNOWN marker (an id the batch never asked for) invalidates the
-    current attribution context entirely: a result seen after it, with no
-    resolvable ``tool_use_id`` of its own, is never quietly re-attached to
-    whichever KNOWN intent came before the unknown marker (requirement 4).
+    current attribution context entirely: a ``server_tool_use`` seen after
+    it is never recorded as issued for whichever KNOWN intent came before
+    the unknown marker (requirement 4).
+
+    Every issued ``server_tool_use`` id is tracked per intent
+    (``issued_tool_use_ids``) alongside every id a result block actually
+    resolved (``resolved_tool_use_ids``), so the caller can tell a search
+    that never got a result back -- even when a DIFFERENT search for the
+    SAME intent did succeed -- from a genuinely fully-resolved intent.
     """
     known_ids = {intent.intent_id for intent in intents}
     out = _BatchParseResult()
@@ -749,29 +811,31 @@ def _parse_batch_response(
             tool_use_id = _get(block, "id")
             if tool_use_id and current_id is not None:
                 tool_use_id_to_intent[str(tool_use_id)] = current_id
+                out.issued_tool_use_ids.setdefault(current_id, set()).add(str(tool_use_id))
         elif block_type == "web_search_tool_result":
             result_tool_use_id = _get(block, "tool_use_id")
-            if result_tool_use_id:
-                target_id = tool_use_id_to_intent.get(str(result_tool_use_id))
-                if target_id is None:
-                    log.warning(
-                        "batched web search result tool_use_id %r does not resolve to a known "
-                        "intent; dropped rather than guessed",
-                        result_tool_use_id,
-                    )
-                    continue
-            else:
-                # No id on the result at all -- fall back to marker order.
-                # Never falls back through an invalidated (unknown-marker)
-                # context: current_id is None there, so this is skipped too.
-                if current_id is None:
-                    log.warning(
-                        "batched web search result has no tool_use_id and no known current "
-                        "INTENT marker; dropped rather than guessed"
-                    )
-                    continue
-                target_id = current_id
+            if not result_tool_use_id:
+                # No id on the result at all -- attribution genuinely cannot
+                # be determined (e.g. search A -> search B -> an id-less
+                # result). Never guessed via marker order; recorded as
+                # ambiguous and dropped.
+                log.warning(
+                    "batched web search result has no tool_use_id; attribution is ambiguous, "
+                    "dropped rather than guessed"
+                )
+                out.ambiguous_results += 1
+                continue
+            target_id = tool_use_id_to_intent.get(str(result_tool_use_id))
+            if target_id is None:
+                log.warning(
+                    "batched web search result tool_use_id %r does not resolve to a known "
+                    "intent; dropped rather than guessed",
+                    result_tool_use_id,
+                )
+                out.ambiguous_results += 1
+                continue
 
+            out.resolved_tool_use_ids.add(str(result_tool_use_id))
             out.search_completed.add(target_id)
             block_documents, block_error = _documents_from_result_content(_get(block, "content"), path=path)
             out.documents_by_intent.setdefault(target_id, [])

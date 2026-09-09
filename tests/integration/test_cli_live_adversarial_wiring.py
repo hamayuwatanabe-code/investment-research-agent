@@ -75,10 +75,19 @@ class _EmptySearchHandler(BaseHTTPRequestHandler):
         if intent_ids:
             content_blocks = []
             for intent_id in intent_ids:
+                tool_use_id = f"toolu_{intent_id}"
                 content_blocks.append({"type": "text", "text": f"-- INTENT {intent_id} --"})
-                content_blocks.append({"type": "web_search_tool_result", "content": []})
+                content_blocks.append(
+                    {"type": "server_tool_use", "name": "web_search", "id": tool_use_id, "input": {"query": intent_id}}
+                )
+                content_blocks.append(
+                    {"type": "web_search_tool_result", "tool_use_id": tool_use_id, "content": []}
+                )
         else:
-            content_blocks = [{"type": "web_search_tool_result", "content": []}]
+            content_blocks = [
+                {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q"}},
+                {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+            ]
 
         payload = json.dumps(
             {

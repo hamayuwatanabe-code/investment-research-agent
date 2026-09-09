@@ -77,14 +77,15 @@ def test_search_batch_attributes_each_result_to_its_marked_intent(provider):
     RESPONSE = _message(
         [
             {"type": "text", "text": "-- INTENT reg_1 --"},
-            {"type": "server_tool_use", "name": "web_search", "input": {"query": "q1"}},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
             {
                 "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
                 "content": [{"url": "https://www.fda.gov/a", "title": "FDA letter"}],
             },
             {"type": "text", "text": "-- INTENT sci_1 --"},
-            {"type": "server_tool_use", "name": "web_search", "input": {"query": "q2"}},
-            {"type": "web_search_tool_result", "content": []},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q2"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_2", "content": []},
         ]
     )
     intents = [
@@ -114,12 +115,20 @@ def test_search_batch_result_before_any_marker_is_never_attributed(provider):
     global RESPONSE
     RESPONSE = _message(
         [
+            # A search issued before any INTENT marker: current_id is None
+            # at this point, so its id is never recorded against any
+            # intent -- the matching result below cannot resolve and is
+            # dropped as ambiguous, never borrowed by whichever intent
+            # happens to be current later.
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_stray", "input": {"query": "stray"}},
             {
                 "type": "web_search_tool_result",
+                "tool_use_id": "toolu_stray",
                 "content": [{"url": "https://www.fda.gov/unlabelled", "title": "t"}],
             },
             {"type": "text", "text": "-- INTENT reg_1 --"},
-            {"type": "web_search_tool_result", "content": []},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
         ]
     )
     intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
@@ -140,7 +149,13 @@ def test_search_batch_omitted_intent_is_absent_from_results(provider):
     all in the response is absent from the returned mapping, never
     silently treated as a zero-result search."""
     global RESPONSE
-    RESPONSE = _message([{"type": "text", "text": "-- INTENT reg_1 --"}, {"type": "web_search_tool_result", "content": []}])
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+        ]
+    )
     intents = [
         ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1"),
         ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2"),
@@ -152,7 +167,13 @@ def test_search_batch_omitted_intent_is_absent_from_results(provider):
 
 def test_search_batch_shared_source_restriction_applied_at_tool_level(provider):
     global RESPONSE
-    RESPONSE = _message([{"type": "text", "text": "-- INTENT a --"}, {"type": "web_search_tool_result", "content": []}])
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT a --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+        ]
+    )
     intents = [
         ResearchIntent(intent_id="a", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q", source_restrictions=("sec.gov",)),
         ResearchIntent(intent_id="b", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q2", source_restrictions=("sec.gov",)),
@@ -167,8 +188,10 @@ def test_search_batch_incompatible_restrictions_are_never_blended_at_tool_level(
     RESPONSE = _message(
         [
             {"type": "text", "text": "-- INTENT a --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q"}},
             {
                 "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
                 "content": [
                     {"url": "https://www.sec.gov/x", "title": "on-domain for a"},
                     {"url": "https://pubmed.ncbi.nlm.nih.gov/1", "title": "off-domain for a"},
@@ -213,7 +236,9 @@ def test_marker_only_with_no_tool_use_or_result_is_incomplete_not_executed(provi
 
 def test_tool_use_with_no_result_block_is_incomplete_not_executed(provider):
     """tool_useのみで結果なし: a search was issued but no result block ever
-    arrived (e.g. the response ended first) -- still INCOMPLETE_RESPONSE."""
+    arrived (e.g. the response ended first). The intent is reported as
+    unresolved (executed=False, an "IncompleteIntent" error) rather than
+    silently read as complete success -- never EXECUTED_ZERO_RESULTS."""
     global RESPONSE
     RESPONSE = _message(
         [
@@ -223,7 +248,10 @@ def test_tool_use_with_no_result_block_is_incomplete_not_executed(provider):
     )
     intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
     results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
-    assert "reg_1" not in results
+    assert "reg_1" in results
+    assert results["reg_1"].executed is False
+    assert "IncompleteIntent" in results["reg_1"].error
+    assert results["reg_1"].documents == []
 
 
 def test_a_completed_search_with_zero_results_is_executed_zero_results(provider):
@@ -390,7 +418,13 @@ def test_all_intents_sharing_one_restriction_apply_it_at_tool_level(provider):
     the fix -- every intent wanting the exact same non-empty restriction
     still gets it applied once, at the tool level."""
     global RESPONSE
-    RESPONSE = _message([{"type": "text", "text": "-- INTENT a --"}, {"type": "web_search_tool_result", "content": []}])
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT a --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+        ]
+    )
     intents = [
         ResearchIntent(intent_id="a", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q", source_restrictions=("sec.gov",)),
         ResearchIntent(intent_id="b", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q2", source_restrictions=("sec.gov",)),
@@ -474,3 +508,108 @@ def test_out_of_order_tool_results_are_still_correctly_attributed_by_id(provider
     results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
     assert [d.url for d in results["reg_1"].documents] == ["https://www.fda.gov/a"]
     assert [d.url for d in results["sci_1"].documents] == ["https://pubmed.ncbi.nlm.nih.gov/1"]
+
+
+# =========================================================================
+# Regressions for the 4fd3c9e follow-up review (this turn):
+# 1. an id-less result after two DISTINCT known searches must never be
+#    guessed at by falling back to whichever marker was current -- it is
+#    genuinely ambiguous and must be dropped, not assigned to either.
+# 2. an intent with one resolved search and one issued-but-never-answered
+#    search must never read as complete success; its already-obtained
+#    documents must still survive.
+# 3. an intent whose every issued search actually resolves must still read
+#    as ordinary complete success (positive control for #2).
+# =========================================================================
+
+
+def test_search_a_then_search_b_then_id_less_result_is_never_guessed(provider):
+    """A検索→B検索→IDなし結果: once two distinct intents have each issued
+    their own search, a THIRD result block with no tool_use_id at all
+    cannot be attributed to either -- it must be dropped as ambiguous, not
+    assigned to whichever intent happens to be "current"."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "text", "text": "-- INTENT sci_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q2"}},
+            # An id-less result arrives after BOTH searches were issued --
+            # genuinely ambiguous, must not be guessed for either.
+            {
+                "type": "web_search_tool_result",
+                "content": [{"url": "https://www.fda.gov/ambiguous", "title": "t"}],
+            },
+        ]
+    )
+    intents = [
+        ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1"),
+        ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2"),
+    ]
+    results, meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    # Neither intent ever got a resolved result -- both stay unresolved
+    # (an issued search with nothing attributed to it), never a guessed
+    # success and never a silently completed zero-result search.
+    assert "https://www.fda.gov/ambiguous" not in [
+        d.url for r in results.values() for d in r.documents
+    ]
+    assert meta["ambiguous_results"] == 1
+
+
+def test_same_intent_second_result_never_arrives_keeps_evidence_and_is_incomplete(provider):
+    """同一intentで1回成功、2回目の結果が未着: the first search for an
+    intent resolves with a real document; a second search is issued for
+    the SAME intent but its result block never arrives before the response
+    ends. The intent must never read as complete success -- but the
+    document already obtained must survive."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "t"}],
+            },
+            # Second search for the SAME intent, issued but never answered.
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q1b"}},
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    result = results["reg_1"]
+    assert [d.url for d in result.documents] == ["https://www.fda.gov/a"], "the resolved document must survive"
+    assert result.executed is False
+    assert "IncompleteIntent" in result.error
+
+
+def test_same_intent_all_searches_resolve_is_ordinary_complete_success(provider):
+    """同一intentで全検索が正常終了: two searches for the SAME intent, both
+    resolved -- ordinary complete success, positive control for the
+    unresolved-second-search case above."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "t"}],
+            },
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q1b"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_2",
+                "content": [{"url": "https://www.fda.gov/b", "title": "t2"}],
+            },
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    result = results["reg_1"]
+    assert {d.url for d in result.documents} == {"https://www.fda.gov/a", "https://www.fda.gov/b"}
+    assert result.executed is True
+    assert result.error == ""

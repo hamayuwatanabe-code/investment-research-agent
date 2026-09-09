@@ -211,6 +211,55 @@ def test_execute_batch_error_result_keeps_documents_but_marks_error():
     assert intents[0].documents[0].url == "https://www.fda.gov/a"
 
 
+def test_execute_batch_incomplete_intent_keeps_documents_but_is_never_success():
+    """同一intentで1回成功、2回目の結果が未着 (end-to-end through
+    execute_research_batch): a provider reporting an intent as
+    ``executed=False`` with an "IncompleteIntent" error -- exactly what
+    AnthropicWebResearchProvider.search_batch() now returns for an intent
+    with an unresolved sub-search -- must land as INCOMPLETE_RESPONSE, not
+    EXECUTED_WITH_EVIDENCE, while the document already obtained from the
+    resolved search still survives on the intent."""
+    intents = [_intent(ResearchDomain.REGULATORY, intent_id="reg_1")]
+    batch = ResearchBatch(batch_id="b1", intents=intents)
+
+    class _IncompleteIntentProvider:
+        name = "fake"
+        path = ResearchPath.ANTHROPIC_WEB
+
+        def available(self):
+            return True, "ready"
+
+        def search_batch(self, batch_intents, *, agent_id="research"):
+            return (
+                {
+                    "reg_1": ResearchResult(
+                        query=None, documents=[_doc("https://www.fda.gov/a")],
+                        path=self.path, executed=False,
+                        error="IncompleteIntent: 1 unresolved web_search call(s)",
+                    )
+                },
+                {"server_tool_uses": 2, "prompt_tokens": 0, "output_tokens": 0, "actual_total_tokens": 0},
+            )
+
+    discovery = DiscoveryLog()
+    diagnostics = execute_research_batch(
+        batch, _IncompleteIntentProvider(), agent_id="adversarial_search", discovery=discovery,
+        run_id="r1", ticker="TESTCO",
+    )
+    assert intents[0].status is IntentStatus.INCOMPLETE_RESPONSE
+    assert "IncompleteIntent" in intents[0].detail
+    assert len(intents[0].documents) == 1
+    assert intents[0].documents[0].url == "https://www.fda.gov/a"
+    assert intents[0].executed is False
+    assert "reg_1" in diagnostics.incomplete_intent_ids
+    assert "reg_1" not in diagnostics.completed_intent_ids
+    # The intent's own ResearchResult-shaped view keeps the evidence too --
+    # never silently dropped by the completion-determination projection.
+    view = intents[0].to_research_result()
+    assert view.executed is False
+    assert [d.url for d in view.documents] == ["https://www.fda.gov/a"]
+
+
 def test_omitted_intent_is_incomplete_response_not_zero_results():
     """H3: the model addressing five of six intents must not silently read
     as the sixth having been searched and found empty."""

@@ -197,6 +197,41 @@ def test_no_search_block_is_neither_documents_nor_error():
     assert documents == [] and error == ""
 
 
+def test_missing_result_content_is_never_a_normal_zero_result():
+    """content欠落/None: a result block with no ``content`` key at all (or an
+    explicit ``None``) is a malformed/truncated response, never a genuine
+    "searched, found nothing" outcome."""
+    documents, error = parse_search_response(
+        {"content": [{"type": "web_search_tool_result", "content": None}]}
+    )
+    assert documents == []
+    assert error != ""
+    assert "missing" in error
+
+
+def test_malformed_result_content_is_never_a_normal_zero_result():
+    """不正構造: a ``content`` shape that is neither a list of hits nor a
+    recognizable error object must still be reported as an error, not as
+    zero results."""
+    documents, error = parse_search_response(
+        {"content": [{"type": "web_search_tool_result", "content": 12345}]}
+    )
+    assert documents == []
+    assert error != ""
+
+
+def test_genuine_empty_list_content_is_a_normal_zero_result():
+    """content=[]: a well-formed, empty list IS a genuine zero-result
+    search -- must stay indistinguishable in outcome from any other clean
+    search that simply found nothing, and distinct from the missing/
+    malformed cases above."""
+    documents, error = parse_search_response(
+        {"content": [{"type": "web_search_tool_result", "content": []}]}
+    )
+    assert documents == []
+    assert error == ""
+
+
 class _FakeLLM:
     """Records the request `raw_message` was called with; returns a canned reply."""
 
