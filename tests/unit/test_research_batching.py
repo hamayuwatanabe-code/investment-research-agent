@@ -174,6 +174,43 @@ def test_execute_batch_falls_back_to_per_intent_search_without_search_batch():
     assert intents[0].status is IntentStatus.EXECUTED_WITH_EVIDENCE
 
 
+def test_execute_batch_error_result_keeps_documents_but_marks_error():
+    """A ResearchResult carrying BOTH documents and an error (a same-intent
+    partial success/failure, as AnthropicWebResearchProvider.search_batch()
+    now reports it) must land as ERROR while still keeping the evidence
+    that was found -- never silently promoted to full success."""
+    intents = [_intent(ResearchDomain.REGULATORY, intent_id="reg_1")]
+    batch = ResearchBatch(batch_id="b1", intents=intents)
+
+    class _MixedResultProvider:
+        name = "fake"
+        path = ResearchPath.ANTHROPIC_WEB
+
+        def available(self):
+            return True, "ready"
+
+        def search_batch(self, batch_intents, *, agent_id="research"):
+            return (
+                {
+                    "reg_1": ResearchResult(
+                        query=None, documents=[_doc("https://www.fda.gov/a")],
+                        path=self.path, executed=True, error="timeout on a second search",
+                    )
+                },
+                {"server_tool_uses": 2, "prompt_tokens": 0, "output_tokens": 0, "actual_total_tokens": 0},
+            )
+
+    discovery = DiscoveryLog()
+    execute_research_batch(
+        batch, _MixedResultProvider(), agent_id="adversarial_search", discovery=discovery,
+        run_id="r1", ticker="TESTCO",
+    )
+    assert intents[0].status is IntentStatus.ERROR
+    assert intents[0].detail == "timeout on a second search"
+    assert len(intents[0].documents) == 1
+    assert intents[0].documents[0].url == "https://www.fda.gov/a"
+
+
 def test_omitted_intent_is_incomplete_response_not_zero_results():
     """H3: the model addressing five of six intents must not silently read
     as the sixth having been searched and found empty."""

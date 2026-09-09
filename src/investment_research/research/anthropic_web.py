@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -338,20 +339,27 @@ class AnthropicWebResearchProvider:
                 empty_meta,
             )
 
-        documents_by_intent, server_tool_uses = _parse_batch_response(response, intents, path=self.path)
+        parsed = _parse_batch_response(response, intents, path=self.path)
         results: dict[str, ResearchResult] = {}
         for intent in intents:
-            if intent.intent_id not in documents_by_intent:
-                continue  # never attributed -- see docstring; not guessed at
-            documents = documents_by_intent[intent.intent_id]
+            if intent.intent_id not in parsed.search_completed:
+                # No REAL web_search_tool_result block was ever attributed
+                # to this intent -- a marker, or a tool_use with no result,
+                # or truncation, is never enough on its own (requirement 1).
+                continue
+            documents = parsed.documents_by_intent.get(intent.intent_id, [])
             if intent.source_restrictions:
                 documents = [d for d in documents if _host_matches(d.url, intent.source_restrictions)]
+            error = parsed.error_by_intent.get(intent.intent_id, "")
             results[intent.intent_id] = ResearchResult(
                 query=_query_for_intent(intent),
                 documents=documents[:6],
+                outcome=FetchOutcome.ERROR if error else FetchOutcome.OK,
                 path=self.path,
+                error=error,
                 tokens_used=self.llm.last_usage_tokens,
             )
+        server_tool_uses = parsed.server_tool_uses
 
         last_call = self.llm.budget.calls[-1] if self.llm.budget.calls else None
         meta = {
@@ -620,15 +628,24 @@ def _query_for_intent(intent: ResearchIntent) -> ResearchQuery:
 
 def _shared_source_restrictions(intents: Sequence[ResearchIntent]) -> tuple[str, ...]:
     """The single source restriction to apply at the TOOL level for this
-    batch, or ``()`` when intents disagree (requirement B/9): incompatible
-    restrictions are never blended into one shared filter -- each intent's
-    own restriction is instead enforced afterward, per-document, by
-    ``_host_matches``.
+    batch, or ``()`` when intents disagree (requirement 3/9).
+
+    A tool-level restriction applies to EVERY search in the call, including
+    one issued for an intent that itself has no restriction at all -- so it
+    may only be set when EVERY intent in the batch shares the exact same
+    NON-EMPTY restriction. An unrestricted intent mixed in with restricted
+    ones (``[("sec.gov",), ()]``) must never have its own search narrowed
+    just because a sibling intent happens to want ``sec.gov`` -- that
+    silently over-restricts the unrestricted intent's search. Whenever
+    intents disagree (any two distinct values, empty included), this
+    returns ``()`` and each intent's own restriction is instead enforced
+    afterward, per-document, by ``_host_matches``.
     """
-    restrictions = {intent.source_restrictions for intent in intents if intent.source_restrictions}
-    if len(restrictions) == 1:
-        return next(iter(restrictions))
-    return ()
+    distinct = {intent.source_restrictions for intent in intents}
+    if len(distinct) != 1:
+        return ()
+    (only,) = distinct
+    return only
 
 
 def _host_matches(url: str, allowed_domains: Sequence[str]) -> bool:
@@ -663,26 +680,55 @@ def _build_batch_prompt(intents: Sequence[ResearchIntent]) -> str:
     )
 
 
+@dataclass
+class _BatchParseResult:
+    #: Documents actually attributed to each intent (may be empty for an
+    #: intent whose search genuinely completed with zero results).
+    documents_by_intent: dict[str, list[Document]] = field(default_factory=dict)
+    #: An intent_id is a member of this set if and only if at least one
+    #: REAL ``web_search_tool_result`` block was attributed to it -- a
+    #: marker, or a ``server_tool_use`` request with no matching result
+    #: block, is never enough on its own (requirement 1). The caller reads
+    #: absence from this set as ``IntentStatus.INCOMPLETE_RESPONSE``,
+    #: regardless of whether ``documents_by_intent`` happens to have a key
+    #: for it.
+    search_completed: set[str] = field(default_factory=set)
+    #: Tool-error text attributed to each intent (requirement 2) -- kept
+    #: alongside any documents that same intent DID get from a different,
+    #: successful search, never silently discarded and never allowed to
+    #: read as complete, uncomplicated success.
+    error_by_intent: dict[str, str] = field(default_factory=dict)
+    server_tool_uses: int = 0
+
+
 def _parse_batch_response(
     response: Any, intents: Sequence[ResearchIntent], *, path: ResearchPath
-) -> tuple[dict[str, list[Document]], int]:
+) -> _BatchParseResult:
     """Attribute every search result in a batched response to the intent
-    whose marker most recently preceded it (requirement A/C).
+    that actually requested it (requirements 1/2/4).
 
-    Returns ``(documents_by_intent_id, server_tool_uses)``. An intent_id is
-    a key in the returned mapping if and only if the model emitted its
-    marker at least once -- even with an empty document list, that still
-    means "addressed, zero results" (``IntentStatus.EXECUTED_ZERO_RESULTS``),
-    distinct from an intent whose id never appears at all (``INCOMPLETE_
-    RESPONSE`` -- the caller in ``research.batching`` reads that from a
-    plain absent key). A ``web_search_tool_result`` seen before any marker
-    is line is never attributed anywhere -- guessing an owner for it would
-    defeat the entire point of per-intent auditability.
+    Attribution prefers ID-based correlation: a ``server_tool_use`` block
+    carries its own ``id``; the ``web_search_tool_result`` block that
+    answers it carries a matching ``tool_use_id``. Recording
+    ``tool_use_id -> intent`` as each search is issued (only while a KNOWN
+    intent marker is active) and looking a result's ``tool_use_id`` up in
+    that map is correct even when result blocks arrive in a different order
+    than their searches were issued. A result block with no ``tool_use_id``
+    at all (a simplified/older response shape) falls back to whichever
+    marker most recently preceded it; a result whose ``tool_use_id`` fails
+    to resolve to a known intent is never guessed at by falling back to
+    order -- it is dropped, logged, and left unattributed.
+
+    An UNKNOWN marker (an id the batch never asked for) invalidates the
+    current attribution context entirely: a result seen after it, with no
+    resolvable ``tool_use_id`` of its own, is never quietly re-attached to
+    whichever KNOWN intent came before the unknown marker (requirement 4).
     """
     known_ids = {intent.intent_id for intent in intents}
-    documents_by_intent: dict[str, list[Document]] = {}
+    out = _BatchParseResult()
     current_id: str | None = None
-    server_tool_uses = 0
+    tool_use_id_to_intent: dict[str, str] = {}
+
     for block in _iter_content_blocks(response):
         block_type = _get(block, "type")
         if block_type == "text":
@@ -691,13 +737,46 @@ def _parse_batch_response(
                 marker_id = match.group(1)
                 if marker_id in known_ids:
                     current_id = marker_id
-                    documents_by_intent.setdefault(current_id, [])
+                else:
+                    log.warning(
+                        "batched web search: unknown INTENT marker %r; results are not "
+                        "attributed to the prior intent until the next known marker",
+                        marker_id,
+                    )
+                    current_id = None
         elif block_type == "server_tool_use" and _get(block, "name") == "web_search":
-            server_tool_uses += 1
+            out.server_tool_uses += 1
+            tool_use_id = _get(block, "id")
+            if tool_use_id and current_id is not None:
+                tool_use_id_to_intent[str(tool_use_id)] = current_id
         elif block_type == "web_search_tool_result":
-            if current_id is None:
-                log.warning("batched web search result seen before any INTENT marker; dropped")
-                continue
-            block_documents, _error = _documents_from_result_content(_get(block, "content"), path=path)
-            documents_by_intent[current_id].extend(block_documents)
-    return documents_by_intent, server_tool_uses
+            result_tool_use_id = _get(block, "tool_use_id")
+            if result_tool_use_id:
+                target_id = tool_use_id_to_intent.get(str(result_tool_use_id))
+                if target_id is None:
+                    log.warning(
+                        "batched web search result tool_use_id %r does not resolve to a known "
+                        "intent; dropped rather than guessed",
+                        result_tool_use_id,
+                    )
+                    continue
+            else:
+                # No id on the result at all -- fall back to marker order.
+                # Never falls back through an invalidated (unknown-marker)
+                # context: current_id is None there, so this is skipped too.
+                if current_id is None:
+                    log.warning(
+                        "batched web search result has no tool_use_id and no known current "
+                        "INTENT marker; dropped rather than guessed"
+                    )
+                    continue
+                target_id = current_id
+
+            out.search_completed.add(target_id)
+            block_documents, block_error = _documents_from_result_content(_get(block, "content"), path=path)
+            out.documents_by_intent.setdefault(target_id, [])
+            out.documents_by_intent[target_id].extend(block_documents)
+            if block_error:
+                existing = out.error_by_intent.get(target_id, "")
+                out.error_by_intent[target_id] = f"{existing}; {block_error}" if existing else block_error
+    return out

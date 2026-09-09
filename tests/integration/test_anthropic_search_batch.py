@@ -189,3 +189,288 @@ def test_search_batch_incompatible_restrictions_are_never_blended_at_tool_level(
     # Intent "a" only keeps documents matching ITS OWN restriction, even
     # though the (unrestricted) tool call surfaced an off-domain document.
     assert [d.url for d in results["a"].documents] == ["https://www.sec.gov/x"]
+
+
+# =========================================================================
+# Regressions for the c73e51b follow-up fixes:
+# 1. a marker alone (no completed search) must never read as executed
+# 2. a tool error must propagate per-intent, never be silently discarded
+# 3. an unrestricted intent must never be narrowed by a sibling's restriction
+# 4. attribution must not fall back to a stale current_id after an unknown
+#    marker, and must prefer tool_use_id/id correlation over block order
+# =========================================================================
+
+
+def test_marker_only_with_no_tool_use_or_result_is_incomplete_not_executed(provider):
+    """マーカーのみ: a bare marker with no search at all must never become
+    EXECUTED_ZERO_RESULTS."""
+    global RESPONSE
+    RESPONSE = _message([{"type": "text", "text": "-- INTENT reg_1 --"}])
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert "reg_1" not in results
+
+
+def test_tool_use_with_no_result_block_is_incomplete_not_executed(provider):
+    """tool_useのみで結果なし: a search was issued but no result block ever
+    arrived (e.g. the response ended first) -- still INCOMPLETE_RESPONSE."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert "reg_1" not in results
+
+
+def test_a_completed_search_with_zero_results_is_executed_zero_results(provider):
+    """正常な0件: a genuinely completed search (a real result block) that
+    found nothing IS EXECUTED_ZERO_RESULTS -- the one case that must
+    actually read as executed with no documents."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert "reg_1" in results
+    assert results["reg_1"].documents == []
+    assert results["reg_1"].error == ""
+    assert results["reg_1"].executed is True
+
+
+def test_search_tool_error_is_propagated_on_the_intents_result(provider):
+    """検索ツールエラー: a tool error block must never be silently
+    discarded -- it must appear on the intent's own ResearchResult.error."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": {"error_code": "max_uses_exceeded"},
+            },
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert "reg_1" in results
+    assert "max_uses_exceeded" in results["reg_1"].error
+    assert results["reg_1"].documents == []
+
+
+def test_same_intent_partial_success_and_failure_keeps_evidence_and_reports_error(provider):
+    """同一intentの成功・失敗混在: one intent, two searches -- one succeeds,
+    one errors. The successful document must be kept; the failure must
+    never be hidden as complete success."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "t"}],
+            },
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q2"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_2",
+                "content": {"error_code": "timeout"},
+            },
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    result = results["reg_1"]
+    assert [d.url for d in result.documents] == ["https://www.fda.gov/a"], "the successful document must survive"
+    assert "timeout" in result.error, "the failure must not be hidden behind the successful document"
+
+
+def test_response_truncation_leaves_the_unreached_intent_incomplete(provider):
+    """応答打ち切りと未完了intent: the response ends after the first intent
+    is fully served; the second (only marked, never searched) stays
+    INCOMPLETE_RESPONSE."""
+    global RESPONSE
+    RESPONSE = {
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5",
+        "content": [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "web_search_tool_result", "tool_use_id": "toolu_1", "content": []},
+            {"type": "text", "text": "-- INTENT sci_1 --"},
+        ],
+        "stop_reason": "max_tokens",
+        "usage": {"input_tokens": 900, "output_tokens": 150},
+    }
+    intents = [
+        ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1"),
+        ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2"),
+    ]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert "reg_1" in results
+    assert "sci_1" not in results
+
+
+def test_unknown_marker_after_a_known_one_stops_falling_back_to_the_known_intent(provider):
+    """既知マーカーの後に未知マーカー: once an unknown marker appears, a
+    result with no tool_use_id of its own must never be re-attached to the
+    PRIOR known intent."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "t"}],
+            },
+            {"type": "text", "text": "-- INTENT unknown_ghost --"},
+            # No tool_use_id here -- under the OLD (buggy) order-based-only
+            # logic this would have been silently re-attached to reg_1.
+            {
+                "type": "web_search_tool_result",
+                "content": [{"url": "https://www.fda.gov/b", "title": "t2"}],
+            },
+        ]
+    )
+    intents = [ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1")]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert [d.url for d in results["reg_1"].documents] == ["https://www.fda.gov/a"], (
+        "a result following an unknown marker must never be borrowed by the prior known intent"
+    )
+
+
+def test_shared_restrictions_never_apply_when_one_intent_is_unrestricted(provider):
+    """制限あり＋制限なし: the exact reported bug -- [('sec.gov',), ()] must
+    NOT collapse to a shared ('sec.gov',) tool-level restriction."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT a --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.reuters.com/x", "title": "off-sec.gov, but unrestricted intent"}],
+            },
+        ]
+    )
+    intents = [
+        ResearchIntent(intent_id="a", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q1", source_restrictions=()),
+        ResearchIntent(
+            intent_id="b", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q2", source_restrictions=("sec.gov",)
+        ),
+    ]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    tool = REQUESTS[0]["tools"][0]
+    assert "allowed_domains" not in tool, (
+        "an unrestricted intent must never be narrowed just because a sibling wants sec.gov only"
+    )
+    # The unrestricted intent's own (post-hoc) filtering keeps the off-domain document.
+    assert [d.url for d in results["a"].documents] == ["https://www.reuters.com/x"]
+
+
+def test_all_intents_sharing_one_restriction_apply_it_at_tool_level(provider):
+    """全intentが同一制限: reconfirms the positive case still works after
+    the fix -- every intent wanting the exact same non-empty restriction
+    still gets it applied once, at the tool level."""
+    global RESPONSE
+    RESPONSE = _message([{"type": "text", "text": "-- INTENT a --"}, {"type": "web_search_tool_result", "content": []}])
+    intents = [
+        ResearchIntent(intent_id="a", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q", source_restrictions=("sec.gov",)),
+        ResearchIntent(intent_id="b", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q2", source_restrictions=("sec.gov",)),
+        ResearchIntent(intent_id="c", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q3", source_restrictions=("sec.gov",)),
+    ]
+    provider.search_batch(intents, agent_id="adversarial_bear")
+    tool = REQUESTS[0]["tools"][0]
+    assert tool.get("allowed_domains") == ["sec.gov"]
+
+
+def test_different_restrictions_per_intent_are_enforced_independently(provider):
+    """intentごとに異なる制限: each intent's OWN restriction is enforced
+    post-hoc, independent of what any other intent in the batch wants."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT a --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [
+                    {"url": "https://www.sec.gov/x", "title": "on-domain for a"},
+                    {"url": "https://pubmed.ncbi.nlm.nih.gov/1", "title": "on-domain for b, not a"},
+                ],
+            },
+            {"type": "text", "text": "-- INTENT b --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q2"}},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_2",
+                "content": [
+                    {"url": "https://www.sec.gov/y", "title": "on-domain for a, not b"},
+                    {"url": "https://pubmed.ncbi.nlm.nih.gov/2", "title": "on-domain for b"},
+                ],
+            },
+        ]
+    )
+    intents = [
+        ResearchIntent(intent_id="a", domain=ResearchDomain.CAPITAL_STRUCTURE, question="q1", source_restrictions=("sec.gov",)),
+        ResearchIntent(
+            intent_id="b", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2",
+            source_restrictions=("pubmed.ncbi.nlm.nih.gov",),
+        ),
+    ]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert [d.url for d in results["a"].documents] == ["https://www.sec.gov/x"]
+    assert [d.url for d in results["b"].documents] == ["https://pubmed.ncbi.nlm.nih.gov/2"]
+
+
+def test_out_of_order_tool_results_are_still_correctly_attributed_by_id(provider):
+    """複数tool_useの結果順序が入れ替わるケース: both searches are issued
+    before either result arrives, so by the time the results come back
+    ``current_id`` (order-based tracking) already points at the SECOND
+    intent for both -- only id-based correlation attributes them
+    correctly."""
+    global RESPONSE
+    RESPONSE = _message(
+        [
+            {"type": "text", "text": "-- INTENT reg_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_1", "input": {"query": "q1"}},
+            {"type": "text", "text": "-- INTENT sci_1 --"},
+            {"type": "server_tool_use", "name": "web_search", "id": "toolu_2", "input": {"query": "q2"}},
+            # Results arrive in the OPPOSITE order from their searches.
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_2",
+                "content": [{"url": "https://pubmed.ncbi.nlm.nih.gov/1", "title": "sci"}],
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{"url": "https://www.fda.gov/a", "title": "reg"}],
+            },
+        ]
+    )
+    intents = [
+        ResearchIntent(intent_id="reg_1", domain=ResearchDomain.REGULATORY, question="q1"),
+        ResearchIntent(intent_id="sci_1", domain=ResearchDomain.SCIENCE_TECHNOLOGY, question="q2"),
+    ]
+    results, _meta = provider.search_batch(intents, agent_id="adversarial_bear")
+    assert [d.url for d in results["reg_1"].documents] == ["https://www.fda.gov/a"]
+    assert [d.url for d in results["sci_1"].documents] == ["https://pubmed.ncbi.nlm.nih.gov/1"]
