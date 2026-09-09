@@ -454,6 +454,26 @@ class SearchStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class IntentStatus(StrEnum):
+    """Per-research-intent outcome inside a batched discovery call.
+
+    A single Anthropic server-tool call may carry evidence for several
+    ResearchIntents at once (cost control), but that must never mean every
+    included intent is silently marked "done" -- each one's own outcome is
+    tracked exactly as if it had been issued as its own, separate call. An
+    intent the model's response never addressed reads INCOMPLETE_RESPONSE,
+    never merged into a neighboring intent's evidence and never quietly
+    treated as searched.
+    """
+
+    PENDING = "PENDING"
+    EXECUTED_WITH_EVIDENCE = "EXECUTED_WITH_EVIDENCE"
+    EXECUTED_ZERO_RESULTS = "EXECUTED_ZERO_RESULTS"
+    INCOMPLETE_RESPONSE = "INCOMPLETE_RESPONSE"
+    SKIPPED_DUE_TO_BUDGET = "SKIPPED_DUE_TO_BUDGET"
+    ERROR = "ERROR"
+
+
 class ResearchStatus(StrEnum):
     """Whether the research behind a run is complete enough to bear an Action.
 

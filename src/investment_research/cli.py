@@ -373,6 +373,24 @@ def _token_diagnostics(result: ResearchResult) -> dict:
                 len(adversarial.skipped_due_to_direct_coverage) if adversarial else 0
             ),
         },
+        # Requirement F: per-batch cost/outcome diagnostics for the batched
+        # required-domain research pass -- how many underlying calls the
+        # mandatory bear/bull work actually needed, and what each cost.
+        "batches": [
+            {
+                "batch_id": diag.batch_id,
+                "intent_ids": diag.intent_ids,
+                "domains": diag.domains,
+                "server_tool_uses": diag.server_tool_uses,
+                "prompt_tokens": diag.prompt_tokens,
+                "output_tokens": diag.output_tokens,
+                "actual_total_tokens": diag.actual_total_tokens,
+                "search_result_count": diag.search_result_count,
+                "completed_intent_ids": diag.completed_intent_ids,
+                "incomplete_intent_ids": diag.incomplete_intent_ids,
+            }
+            for diag in (adversarial.batch_diagnostics if adversarial else [])
+        ],
         "fetch": {
             "attempted": escalation.fetches_attempted if escalation else 0,
             "failed": escalation.fetches_failed if escalation else 0,

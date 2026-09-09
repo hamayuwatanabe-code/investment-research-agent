@@ -23,8 +23,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..schemas.enums import QueryPurpose, ResearchDomain
+from ..schemas.enums import IntentStatus, QueryPurpose, ResearchDomain
 from ..schemas.fact import UnresolvedQuestion
+from .batching import (
+    BatchDiagnostics,
+    ResearchIntent,
+    build_research_batches,
+    run_research_batches,
+)
 from .discovery import DiscoveryLog, SearchQueryRecord, hits_from_documents, make_query_id
 from .provider import ResearchProvider, ResearchQuery, ResearchResult
 
@@ -271,6 +277,10 @@ class AdversarialOutcome:
     skipped_due_to_direct_coverage: list[str] = field(default_factory=list)
     #: Auditable, purpose-separated query and hit log (requirement M3).
     discovery: DiscoveryLog = field(default_factory=DiscoveryLog)
+    #: Per-batch cost/outcome diagnostics (requirement F) -- how many
+    #: underlying API calls the mandatory bear/bull passes actually needed,
+    #: and what each one cost and completed.
+    batch_diagnostics: list[BatchDiagnostics] = field(default_factory=list)
 
     def bear_documents(self) -> list:
         return [d for r in self.bear_results for d in r.documents]
@@ -445,15 +455,18 @@ def run_adversarial_search(
     purposes an agent is allowed to read (``purposes_for_agent``), not by hoping
     nothing gets mixed up downstream.
 
-    Adaptive, not 30 blind calls (requirement F): within each stance, every
-    required domain's first query runs before any domain's second
-    (``_prioritize_domain_coverage``), near-duplicate queries are dropped
-    before ever being issued (``_dedupe_semantically``), follow-ups are
-    generated only from the mandatory bear pass's own results, and every
-    query the discovery budget quota could not afford is recorded as such
-    (``unexecuted_due_to_budget``) rather than looking searched or clean. If
-    ``llm`` is given, this sets its budget's current stage to ``"discovery"``
-    for the duration of this call (see ``LLMBudget.set_stage``).
+    Cost-safe, not one API call per query (the v4 fix): each stance's
+    mandatory templates are converted into ``ResearchIntent``s, deduplicated
+    (``_dedupe_semantically``), and scheduled into a small number of
+    priority-ordered batches (``build_research_batches``) -- normally two --
+    executed via ``run_research_batches``, which serves each batch in as few
+    underlying calls as the provider can manage (see
+    ``research.batching``/``AnthropicWebResearchProvider.search_batch``)
+    while keeping every intent's own completion status fully independent
+    (requirement C). Follow-ups (LLM-proposed, adaptive, already few in
+    number) remain individual calls. If ``llm`` is given, this sets its
+    budget's current stage to ``"discovery"`` for the duration of this call
+    (see ``LLMBudget.stage``).
     """
     outcome = AdversarialOutcome(
         skipped_due_to_direct_coverage=list(plan.skipped_due_to_direct_coverage)
@@ -498,21 +511,60 @@ def run_adversarial_search(
         if str(result.error).startswith(_BUDGET_ERROR_PREFIX):
             outcome.unexecuted_due_to_budget.append(query.query)
 
+    def _run_stance_batched(
+        queries: list[ResearchQuery], *, purpose: QueryPurpose, prefix: str
+    ) -> list[ResearchIntent]:
+        intents = [
+            ResearchIntent(
+                intent_id=f"{prefix}_{index}",
+                domain=query.domain,
+                question=query.query,
+                source_restrictions=query.allowed_domains,
+                priority=index,
+                rationale=query.rationale,
+            )
+            for index, query in enumerate(queries)
+        ]
+        batches = build_research_batches(intents)
+        outcome.batch_diagnostics.extend(
+            run_research_batches(
+                batches,
+                provider,
+                agent_id=agent_id,
+                llm_agent_id=f"adversarial_{prefix}",
+                discovery=outcome.discovery,
+                run_id=run_id,
+                ticker=ticker,
+                query_purpose=purpose,
+            )
+        )
+        for intent in intents:
+            result = intent.to_research_result()
+            if purpose is QueryPurpose.BEAR:
+                outcome.bear_results.append(result)
+            else:
+                outcome.bull_results.append(result)
+            if intent.status is IntentStatus.EXECUTED_WITH_EVIDENCE or intent.status is IntentStatus.EXECUTED_ZERO_RESULTS:
+                outcome.executed += 1
+            else:
+                outcome.unexecuted.append(intent.question)
+                if intent.status is IntentStatus.SKIPPED_DUE_TO_BUDGET:
+                    outcome.unexecuted_due_to_budget.append(intent.question)
+        return intents
+
     # Requirement A: a scoped stage context (never ambient) so this pass can
     # never leave the budget's `current_stage` pointing at "discovery" once
     # it returns -- restored to whatever it was before, on any exit path.
     stage_cm = llm.budget.stage("discovery") if llm is not None else contextlib.nullcontext()
     with stage_cm:
-        # --- bear: required-domain coverage first, then near-duplicates dropped
+        # --- bear: required-domain coverage first (tiebreak for any batch
+        #     overflow), near-duplicates dropped, then batched (requirement B)
         bear_queries = _prioritize_domain_coverage(plan.bear)
         bear_queries, bear_dropped = _dedupe_semantically(bear_queries)
         outcome.deduplicated.extend(bear_dropped)
         bear_query_tokens = [_query_tokens(q.query) for q in bear_queries]
 
-        for query in bear_queries:
-            result = _execute(query, QueryPurpose.BEAR, llm_agent_id="adversarial_bear")
-            outcome.bear_results.append(result)
-            _record(result, query)
+        _run_stance_batched(bear_queries, purpose=QueryPurpose.BEAR, prefix="bear")
 
         # Follow-ups are optional, discovery-budget-scoped work: skip generating
         # them at all once the discovery stage quota is already spent, rather
@@ -537,10 +589,7 @@ def run_adversarial_search(
         bull_queries, bull_dropped = _dedupe_semantically(bull_queries)
         outcome.deduplicated.extend(bull_dropped)
 
-        for query in bull_queries:
-            result = _execute(query, QueryPurpose.BULL, llm_agent_id="adversarial_bull")
-            outcome.bull_results.append(result)
-            _record(result, query)
+        _run_stance_batched(bull_queries, purpose=QueryPurpose.BULL, prefix="bull")
 
     return outcome
 

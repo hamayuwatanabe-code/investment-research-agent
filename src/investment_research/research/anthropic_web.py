@@ -18,6 +18,8 @@ Two API facts shape the code:
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,6 +35,7 @@ from ..schemas.enums import (
     ResearchPath,
 )
 from ..schemas.fact import Source
+from .batching import ResearchIntent
 from .provider import ResearchQuery, ResearchResult
 
 #: doc_type label to attach for each DocumentAuthority, matching the
@@ -92,6 +95,37 @@ SEARCH_SYSTEM = (
     "Never invent a URL, a date, or a quotation. If you found nothing, say NOTHING FOUND."
 )
 
+#: The label convention a batched call relies on to attribute each search to
+#: the intent it served (requirement A/B). Kept deliberately mechanical --
+#: an exact marker line, not prose the parser would have to interpret --
+#: because attribution here is a correctness boundary, not a formatting
+#: nicety: an unattributed result must never be guessed into an intent's
+#: evidence.
+BATCH_INTENT_MARKER_RE = re.compile(r"--\s*INTENT\s+(\S+?)\s*--")
+
+#: A batched call still runs at cost-controlled effort (requirement F); it
+#: answers several intents, so it is allowed a larger completion ceiling
+#: than a single-intent search, but still far below an interpretive agent's.
+BATCH_SEARCH_MAX_TOKENS = 4096
+
+BATCH_SEARCH_SYSTEM = (
+    "You are a research retrieval assistant for an investment research system whose purpose "
+    "is to eliminate wrong investment hypotheses using primary sources.\n"
+    "You will be given several separately labelled research INTENTS. For EACH intent, in the "
+    "order given:\n"
+    "1. Emit a line containing exactly `-- INTENT <intent_id> --` (the exact id given, nothing "
+    "else on that line).\n"
+    "2. Immediately call the web_search tool to research that intent's question, honoring any "
+    "source restriction stated for it.\n"
+    "3. Do this even if you already have relevant knowledge -- only tool results count as "
+    "evidence here.\n"
+    "Do not combine, skip, reorder or merge intents; do not search for anything not asked. "
+    "Prefer regulator, exchange and statutory filing sources over commentary. Do not "
+    "summarise, interpret, rank or evaluate what you find, and do not offer any view about "
+    "the security. Never invent a URL, a date, or a quotation. If an intent's search finds "
+    "nothing, still emit its marker and still call the tool, then move on."
+)
+
 
 def tool_types_for(model: str) -> tuple[str, str]:
     """Pick the server-tool variants this model supports."""
@@ -117,6 +151,7 @@ class AnthropicWebResearchProvider:
         max_uses_per_query: int = 5,
         max_content_tokens: int = 20000,
         research_effort: str = "low",
+        max_uses_per_batch: int = 8,
     ) -> None:
         self.llm = llm
         self.max_uses_per_query = max_uses_per_query
@@ -126,6 +161,11 @@ class AnthropicWebResearchProvider:
         # which governs the eight INTERPRETIVE agents only: a single high-effort
         # discovery pass burned 76,891 tokens on two searches in a live run.
         self.research_effort = research_effort
+        # Requirement F: a conservative, explicit ceiling on how many
+        # server-tool uses ONE batched call may spend, independent of how
+        # many intents are in the batch -- a batch is never allowed to
+        # consume the whole discovery quota by itself.
+        self.max_uses_per_batch = max_uses_per_batch
 
     def available(self) -> tuple[bool, str]:
         return self.llm.available()
@@ -204,6 +244,123 @@ class AnthropicWebResearchProvider:
         self, response: Any, query: ResearchQuery
     ) -> tuple[list[Document], str]:
         return parse_search_response(response, path=self.path)
+
+    # -- batched search ------------------------------------------------------
+    def search_batch(
+        self, intents: Sequence[ResearchIntent], *, agent_id: str = "anthropic_web_batch"
+    ) -> tuple[dict[str, ResearchResult], dict[str, int]]:
+        """Serve several ``ResearchIntent``s from as few underlying calls as
+        possible (requirement A/B).
+
+        One message is sent with the web_search tool available for several
+        uses. The model is instructed (``BATCH_SEARCH_SYSTEM``) to emit a
+        ``-- INTENT <id> --`` marker immediately before searching for each
+        intent, in order; the response is then parsed by walking its content
+        blocks and attributing every ``web_search_tool_result`` to whichever
+        marker most recently preceded it (``_parse_batch_response``).
+
+        Returns ``(results_by_intent_id, diagnostics)``. An intent whose id
+        never appears as a key in the returned mapping was never addressed
+        by the model at all -- the caller (``research.batching``) reads that
+        as ``IntentStatus.INCOMPLETE_RESPONSE``, never as zero results.
+        Requirement B: when every intent in the batch shares the exact same
+        (non-empty) source restriction, it is applied at the tool level; a
+        batch mixing different restrictions leaves the tool unrestricted and
+        each intent's own restriction is enforced afterward by filtering its
+        attributed documents to matching hosts -- never blended across
+        intents with incompatible requirements.
+        """
+        empty_meta = {"server_tool_uses": 0, "prompt_tokens": 0, "output_tokens": 0, "actual_total_tokens": 0}
+        usable, reason = self.available()
+        if not intents:
+            return {}, empty_meta
+        if not usable:
+            return (
+                {
+                    intent.intent_id: ResearchResult(
+                        query=_query_for_intent(intent),
+                        outcome=FetchOutcome.DISABLED,
+                        path=self.path,
+                        executed=False,
+                        error=reason,
+                    )
+                    for intent in intents
+                },
+                empty_meta,
+            )
+
+        search_tool, _ = tool_types_for(self.llm.model)
+        max_uses = min(len(intents) + 1, self.max_uses_per_batch)
+        tool: dict[str, Any] = {"type": search_tool, "name": "web_search", "max_uses": max_uses}
+        if search_tool == WEB_SEARCH_TOOL:
+            tool["allowed_callers"] = _DIRECT_CALLER
+        shared_restrictions = _shared_source_restrictions(intents)
+        if shared_restrictions:
+            tool["allowed_domains"] = list(shared_restrictions)
+
+        prompt = _build_batch_prompt(intents)
+        try:
+            response = self.llm.raw_message(
+                system=BATCH_SEARCH_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[tool],
+                max_tokens=BATCH_SEARCH_MAX_TOKENS,
+                agent_id=agent_id,
+                effort=self.research_effort,
+            )
+        except BudgetExceeded as exc:
+            log.warning("batched web search skipped: %s", exc)
+            error = f"BudgetExceeded: {exc}"
+            return (
+                {
+                    intent.intent_id: ResearchResult(
+                        query=_query_for_intent(intent),
+                        outcome=FetchOutcome.DISABLED,
+                        path=self.path,
+                        executed=False,
+                        error=error,
+                    )
+                    for intent in intents
+                },
+                empty_meta,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+            log.warning("batched web search failed: %s", exc)
+            error = f"{type(exc).__name__}: {exc}"
+            return (
+                {
+                    intent.intent_id: ResearchResult(
+                        query=_query_for_intent(intent), outcome=FetchOutcome.ERROR,
+                        path=self.path, error=error,
+                    )
+                    for intent in intents
+                },
+                empty_meta,
+            )
+
+        documents_by_intent, server_tool_uses = _parse_batch_response(response, intents, path=self.path)
+        results: dict[str, ResearchResult] = {}
+        for intent in intents:
+            if intent.intent_id not in documents_by_intent:
+                continue  # never attributed -- see docstring; not guessed at
+            documents = documents_by_intent[intent.intent_id]
+            if intent.source_restrictions:
+                documents = [d for d in documents if _host_matches(d.url, intent.source_restrictions)]
+            results[intent.intent_id] = ResearchResult(
+                query=_query_for_intent(intent),
+                documents=documents[:6],
+                path=self.path,
+                tokens_used=self.llm.last_usage_tokens,
+            )
+
+        last_call = self.llm.budget.calls[-1] if self.llm.budget.calls else None
+        meta = {
+            "server_tool_uses": server_tool_uses,
+            "prompt_tokens": last_call.input_tokens if last_call else 0,
+            "output_tokens": last_call.output_tokens if last_call else 0,
+            "actual_total_tokens": last_call.total_tokens if last_call else 0,
+        }
+        return results, meta
 
     # -- fetch -------------------------------------------------------------
     def fetch(
@@ -376,6 +533,60 @@ def _publisher(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def _iter_content_blocks(response: Any) -> Sequence[Any]:
+    return getattr(response, "content", None) or (
+        response.get("content", []) if isinstance(response, dict) else []
+    )
+
+
+def _documents_from_result_content(
+    content: Any, *, path: ResearchPath
+) -> tuple[list[Document], str]:
+    """Turn ONE ``web_search_tool_result`` block's ``content`` into documents.
+
+    Shared by ``parse_search_response`` (one query, one call) and the
+    batched-call parser (``_parse_batch_response``) so both apply the exact
+    same error/tiering/authority rules to a result block, wherever in a
+    response it appears.
+    """
+    if content is None:
+        return [], ""
+    if isinstance(content, dict) or not isinstance(content, (list, tuple)):
+        code = _get(content, "error_code") or "unknown_error"
+        log.warning("web search returned an error block: %s", code)
+        return [], f"web_search error: {code}"
+    documents: list[Document] = []
+    for item in content:
+        url = _get(item, "url")
+        if not url:
+            continue
+        authority = classify_authority(url)
+        documents.append(
+            Document(
+                doc_id=_doc_id(url),
+                url=url,
+                title=_get(item, "title") or url,
+                publisher=_publisher(url),
+                # Only what the search engine actually reports about the
+                # page; never invented, and never retrieval time (see
+                # retrieved_at below, which IS retrieval time).
+                published_date=_get(item, "page_age") or UNKNOWN,
+                doc_type=_DOC_TYPE_FOR_AUTHORITY[authority],
+                is_company_ir=authority is DocumentAuthority.COMPANY_IR,
+                text=_get(item, "text") or "",
+                # A search result is a pointer, not the document. Fetch is
+                # what upgrades it to FULL_DOCUMENT.
+                content_kind=ContentKind.METADATA_ONLY,
+                provenance=Provenance.LIVE,
+                research_path=path,
+                retrieved_at=_now(),
+                tier=classify_tier(url, is_company_ir=authority is DocumentAuthority.COMPANY_IR),
+                authority=authority,
+            )
+        )
+    return documents, ""
+
+
 def parse_search_response(
     response: Any, *, path: ResearchPath = ResearchPath.ANTHROPIC_WEB
 ) -> tuple[list[Document], str]:
@@ -387,46 +598,106 @@ def parse_search_response(
     """
     documents: list[Document] = []
     error = ""
-    for block in getattr(response, "content", None) or (
-        response.get("content", []) if isinstance(response, dict) else []
-    ):
-        block_type = _get(block, "type")
-        if block_type != "web_search_tool_result":
+    for block in _iter_content_blocks(response):
+        if _get(block, "type") != "web_search_tool_result":
             continue
-        content = _get(block, "content")
-        if content is None:
-            continue
-        if isinstance(content, dict) or not isinstance(content, (list, tuple)):
-            code = _get(content, "error_code") or "unknown_error"
-            error = f"web_search error: {code}"
-            log.warning("web search returned an error block: %s", code)
-            continue
-        for item in content:
-            url = _get(item, "url")
-            if not url:
-                continue
-            authority = classify_authority(url)
-            documents.append(
-                Document(
-                    doc_id=_doc_id(url),
-                    url=url,
-                    title=_get(item, "title") or url,
-                    publisher=_publisher(url),
-                    # Only what the search engine actually reports about the
-                    # page; never invented, and never retrieval time (see
-                    # retrieved_at below, which IS retrieval time).
-                    published_date=_get(item, "page_age") or UNKNOWN,
-                    doc_type=_DOC_TYPE_FOR_AUTHORITY[authority],
-                    is_company_ir=authority is DocumentAuthority.COMPANY_IR,
-                    text=_get(item, "text") or "",
-                    # A search result is a pointer, not the document. Fetch is
-                    # what upgrades it to FULL_DOCUMENT.
-                    content_kind=ContentKind.METADATA_ONLY,
-                    provenance=Provenance.LIVE,
-                    research_path=path,
-                    retrieved_at=_now(),
-                    tier=classify_tier(url, is_company_ir=authority is DocumentAuthority.COMPANY_IR),
-                    authority=authority,
-                )
-            )
+        block_documents, block_error = _documents_from_result_content(_get(block, "content"), path=path)
+        documents.extend(block_documents)
+        if block_error:
+            error = block_error
     return documents, error
+
+
+def _query_for_intent(intent: ResearchIntent) -> ResearchQuery:
+    return ResearchQuery(
+        query=intent.question,
+        domain=intent.domain,
+        stance="bear",
+        allowed_domains=intent.source_restrictions,
+        rationale=intent.rationale,
+    )
+
+
+def _shared_source_restrictions(intents: Sequence[ResearchIntent]) -> tuple[str, ...]:
+    """The single source restriction to apply at the TOOL level for this
+    batch, or ``()`` when intents disagree (requirement B/9): incompatible
+    restrictions are never blended into one shared filter -- each intent's
+    own restriction is instead enforced afterward, per-document, by
+    ``_host_matches``.
+    """
+    restrictions = {intent.source_restrictions for intent in intents if intent.source_restrictions}
+    if len(restrictions) == 1:
+        return next(iter(restrictions))
+    return ()
+
+
+def _host_matches(url: str, allowed_domains: Sequence[str]) -> bool:
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == domain.lower() or host.endswith("." + domain.lower()) for domain in allowed_domains)
+
+
+def _build_batch_prompt(intents: Sequence[ResearchIntent]) -> str:
+    """One user turn listing every intent in this batch, labelled so the
+    response can be parsed back into per-intent evidence (requirement A)."""
+    sections = []
+    for intent in intents:
+        restriction = (
+            f"Restrict this search to: {', '.join(intent.source_restrictions)}."
+            if intent.source_restrictions
+            else "No source restriction for this intent."
+        )
+        sections.append(
+            f"INTENT {intent.intent_id} (domain: {intent.domain}):\n"
+            f"{intent.question}\n"
+            f"{restriction}"
+        )
+    return (
+        "Research the following intents, one at a time, in the exact order given. For each, "
+        "first emit its `-- INTENT <id> --` marker line, then call web_search for it.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def _parse_batch_response(
+    response: Any, intents: Sequence[ResearchIntent], *, path: ResearchPath
+) -> tuple[dict[str, list[Document]], int]:
+    """Attribute every search result in a batched response to the intent
+    whose marker most recently preceded it (requirement A/C).
+
+    Returns ``(documents_by_intent_id, server_tool_uses)``. An intent_id is
+    a key in the returned mapping if and only if the model emitted its
+    marker at least once -- even with an empty document list, that still
+    means "addressed, zero results" (``IntentStatus.EXECUTED_ZERO_RESULTS``),
+    distinct from an intent whose id never appears at all (``INCOMPLETE_
+    RESPONSE`` -- the caller in ``research.batching`` reads that from a
+    plain absent key). A ``web_search_tool_result`` seen before any marker
+    is line is never attributed anywhere -- guessing an owner for it would
+    defeat the entire point of per-intent auditability.
+    """
+    known_ids = {intent.intent_id for intent in intents}
+    documents_by_intent: dict[str, list[Document]] = {}
+    current_id: str | None = None
+    server_tool_uses = 0
+    for block in _iter_content_blocks(response):
+        block_type = _get(block, "type")
+        if block_type == "text":
+            text = str(_get(block, "text") or "")
+            for match in BATCH_INTENT_MARKER_RE.finditer(text):
+                marker_id = match.group(1)
+                if marker_id in known_ids:
+                    current_id = marker_id
+                    documents_by_intent.setdefault(current_id, [])
+        elif block_type == "server_tool_use" and _get(block, "name") == "web_search":
+            server_tool_uses += 1
+        elif block_type == "web_search_tool_result":
+            if current_id is None:
+                log.warning("batched web search result seen before any INTENT marker; dropped")
+                continue
+            block_documents, _error = _documents_from_result_content(_get(block, "content"), path=path)
+            documents_by_intent[current_id].extend(block_documents)
+    return documents_by_intent, server_tool_uses

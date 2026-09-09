@@ -44,21 +44,49 @@ class _EmptySearchHandler(BaseHTTPRequestHandler):
     the model again if it already has evidence to reason about) short-circuits
     without needing a second canned response shape -- this test only needs to
     prove the bear/bull passes themselves execute against the live provider.
+
+    A batched request (see research/batching.py + anthropic_web.py's
+    ``search_batch``) lists each intent as ``INTENT <id> (domain: ...)`` in
+    the prompt; a real model replies with a ``-- INTENT <id> --`` marker
+    before searching for it. This mock plays that same part -- one marker
+    text block plus an empty result block per intent id found in the
+    request -- so a batched call still gets a real (empty but ATTRIBUTED)
+    result for every intent, exactly as a compliant live model would.
     """
 
     def log_message(self, *args):
         pass
 
     def do_POST(self):
+        import re as _re
+
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        body = self.rfile.read(length)
+        try:
+            request = json.loads(body)
+        except json.JSONDecodeError:
+            request = {}
+        prompt_text = ""
+        for message in request.get("messages", []):
+            content = message.get("content", "")
+            prompt_text += content if isinstance(content, str) else json.dumps(content)
+        intent_ids = _re.findall(r"INTENT (\S+) \(domain:", prompt_text)
+
+        if intent_ids:
+            content_blocks = []
+            for intent_id in intent_ids:
+                content_blocks.append({"type": "text", "text": f"-- INTENT {intent_id} --"})
+                content_blocks.append({"type": "web_search_tool_result", "content": []})
+        else:
+            content_blocks = [{"type": "web_search_tool_result", "content": []}]
+
         payload = json.dumps(
             {
                 "id": "msg_test",
                 "type": "message",
                 "role": "assistant",
                 "model": "claude-sonnet-5",
-                "content": [{"type": "web_search_tool_result", "content": []}],
+                "content": content_blocks,
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 10, "output_tokens": 5},
             }
