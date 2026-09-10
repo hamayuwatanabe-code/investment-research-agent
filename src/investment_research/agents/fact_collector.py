@@ -180,4 +180,5 @@ class FactCollectorAgent(Agent):
             notes=f"collected_by={raw.collector}",
             content_kind=raw.content_kind,
             primary_source_url=raw.primary_source_url,
+            document_id=raw.document_id,
         )

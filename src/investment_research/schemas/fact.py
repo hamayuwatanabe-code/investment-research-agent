@@ -208,6 +208,13 @@ class RawFact:
 
     ticker: str
     category: FactCategory
+    #: The matched sentence, truncated to 1200 chars (see ``extract_from_chunk``).
+    #: Not guaranteed to be the full verbatim span for a sentence longer than
+    #: that -- callers must not describe this field as "always exact" or rely
+    #: on it as a byte-for-byte excerpt. A future revision may add
+    #: ``chunk_id``/``document_id``/character-offset (``start``/``end``) fields
+    #: alongside an explicit ``verbatim excerpt`` and ``excerpt_truncated``
+    #: flag; none of that exists yet.
     claim: str
     source: Source
     value: Any = UNKNOWN
@@ -219,6 +226,13 @@ class RawFact:
     content_kind: ContentKind = ContentKind.FULL_DOCUMENT
     #: The document that would settle this claim, when it is known but unread.
     primary_source_url: str | None = None
+    #: The DocumentStore identity (``Document.doc_id``) of the document this
+    #: observation was extracted from, when extraction ran over a chunked
+    #: Document (``extract_from_chunk``). ``None`` for a raw fact built by a
+    #: path that never had a Document (e.g. a structured collector emitting a
+    #: fact straight from an API payload) -- never a guessed or best-effort
+    #: identity.
+    document_id: str | None = None
 
     def fact_id(self) -> str:
         return make_fact_id(
@@ -271,6 +285,17 @@ class Fact:
     #: Set when the document that would settle this claim has been located but
     #: its body was never fetched (requirement M1).
     primary_source_url: str | None = None
+    #: The DocumentStore identity (``Document.doc_id``) this fact was
+    #: extracted from, carried forward from ``RawFact.document_id`` by
+    #: ``FactCollectorAgent._to_fact``. ``None`` when no Document was
+    #: involved. NOT yet persisted by ``to_row``/``storage/schema.sql`` (out
+    #: of scope for this change) -- see the Phase 1 report for that gap.
+    #: ``Document.authority`` is the canonical authority for this fact and is
+    #: only reachable by resolving this id through a ``DocumentStore``; a
+    #: caller with a ``Fact`` but no ``DocumentStore`` (e.g. a report path
+    #: that only reads columns already in ``facts.db``) cannot recover it
+    #: from the ``Fact`` alone in Phase 1.
+    document_id: str | None = None
 
     # -- derived -----------------------------------------------------------
     @property

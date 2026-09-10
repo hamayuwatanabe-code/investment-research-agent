@@ -282,6 +282,7 @@ def extract_from_chunk(chunk: Chunk, ticker: str) -> list[RawFact]:
                     company_claim=document.is_company_ir or rule.company_claim_default,
                     collector=f"extraction:{rule.key}",
                     raw_payload_ref=chunk.chunk_id,
+                    document_id=chunk.document.doc_id,
                     # Requirement M1/M2: carry forward how much of the document
                     # was actually read. A claim lifted from a search summary is
                     # marked as such here and can never become verified evidence

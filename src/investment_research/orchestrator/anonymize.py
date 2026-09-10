@@ -99,6 +99,15 @@ def anonymize_facts(
                 if fact.primary_source_url
                 else None
             ),
+            # Phase 1 addition: Document.doc_id is commonly built from the
+            # ticker/company (e.g. "lgvn_typec_pr_20260508"), exactly like the
+            # source ids this function already maps through ref_map. The
+            # Blind Judge has no DocumentStore in Phase 1 to resolve this
+            # through anyway (see schemas/fact.py's Fact.document_id note), so
+            # it is nulled here rather than mapped to a ref -- there is
+            # nothing legitimate for the Judge to do with it, and leaving it
+            # untouched would leak the identity marker straight through.
+            "document_id": None,
         }
         for field_name in _IDENTIFYING_FACT_FIELDS:
             if field_name in ("source_title",):
