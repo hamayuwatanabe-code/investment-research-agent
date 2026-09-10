@@ -24,11 +24,11 @@ MEASURED_ANCHOR_LOW_TOKENS = 31_492
 MEASURED_ANCHOR_HIGH_SEARCHES = 6
 MEASURED_ANCHOR_HIGH_TOKENS = 102_192
 
-_LOW_PER_SEARCH = MEASURED_ANCHOR_LOW_TOKENS // MEASURED_ANCHOR_LOW_SEARCHES  # 15,746
-_HIGH_PER_SEARCH = MEASURED_ANCHOR_HIGH_TOKENS // MEASURED_ANCHOR_HIGH_SEARCHES  # 17,032
+LOW_TOKENS_PER_SEARCH = MEASURED_ANCHOR_LOW_TOKENS // MEASURED_ANCHOR_LOW_SEARCHES  # 15,746
+HIGH_TOKENS_PER_SEARCH = MEASURED_ANCHOR_HIGH_TOKENS // MEASURED_ANCHOR_HIGH_SEARCHES  # 17,032
 #: Midpoint of the two measured rates -- a "base" estimate for reporting,
 #: never presented as itself measured.
-_BASE_PER_SEARCH = (_LOW_PER_SEARCH + _HIGH_PER_SEARCH) // 2
+BASE_TOKENS_PER_SEARCH = (LOW_TOKENS_PER_SEARCH + HIGH_TOKENS_PER_SEARCH) // 2
 
 #: A plan needing 4 or more actual searches is UNSAFE against a 60,000-token
 #: discovery quota: fitting the preflight RESERVATION ceiling is a different
@@ -84,7 +84,7 @@ def _reservation_for(uses: int) -> int:
     applied to every use, mirroring the existing scaled-reservation principle
     in ``research/anthropic_web.py``'s ``_batch_reservation`` (reserve for the
     worse-observed case, not the average)."""
-    return uses * _HIGH_PER_SEARCH
+    return uses * HIGH_TOKENS_PER_SEARCH
 
 
 def assess_budget_feasibility(
@@ -112,9 +112,9 @@ def assess_budget_feasibility(
     uses = web_search + web_fetch
 
     reservation = _reservation_for(uses)
-    low = uses * _LOW_PER_SEARCH
-    base = uses * _BASE_PER_SEARCH
-    high = uses * _HIGH_PER_SEARCH
+    low = uses * LOW_TOKENS_PER_SEARCH
+    base = uses * BASE_TOKENS_PER_SEARCH
+    high = uses * HIGH_TOKENS_PER_SEARCH
 
     unsafe = uses >= UNSAFE_SEARCH_COUNT_THRESHOLD
     feasible = (not unsafe) and high <= discovery_budget_tokens
