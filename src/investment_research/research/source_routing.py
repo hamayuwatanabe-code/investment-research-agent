@@ -1,55 +1,98 @@
-"""Source Routing Graph: EvidenceRequirement / AcquisitionTarget / AcquisitionRoute.
+"""Source Routing Graph v2 (Phase 2.6): EvidenceRequirement / AcquisitionTarget
+/ AcquisitionStep, expressed as an explicit AND/OR step DAG.
 
-Phase 2.5 scope only. Pure types and pure functions -- no network call, no
-pipeline wiring, no execution. This module replaces the Phase 2
-one-need-equals-one-method assumption (``acquisition_planning.AcquisitionTask``,
-kept for backward compatibility and its own passing tests, but no longer the
-model this project treats as authoritative) with an explicit many-to-many
-graph:
+Phase 2.6 scope only. Pure types and pure functions -- no network call, no
+pipeline wiring, no execution.
 
-    LegacyResearchNeed --(many)--> EvidenceRequirement --(many)--> AcquisitionTarget --(priority-ordered)--> AcquisitionRoute
+This corrects Phase 2.5's defect: a "Route" there was a flat priority chain
+whose SUCCESS state was the same regardless of whether it had actually
+located a URL, fetched a body, or parsed one -- so a NORMAL scenario assuming
+"the Direct route succeeds" halted at metadata/URL discovery and never
+modeled a body fetch at all (``Direct HTTP requests == 0`` even for SEC
+targets). Here, obtaining a real document is always a chain of separately
+gated steps:
 
-* One ``LegacyResearchNeed`` (or exact-equivalence group of them) can raise
-  MORE THAN ONE ``EvidenceRequirement`` -- most importantly, a claim about
-  what a REGULATOR said and a claim about what the ISSUER disclosed a
-  regulator said are two different propositions with two different
-  authorities, never one requirement (Phase 2.5 requirement 5).
-* One ``AcquisitionTarget`` (one real document, e.g. "the primary 10-Q body")
-  can satisfy several ``EvidenceRequirement``s.
-* One ``AcquisitionTarget`` has one or more priority-ordered
-  ``AcquisitionRoute``s -- different ways of obtaining the SAME document,
-  cheapest/free-est first (EXISTING_DIRECT_API before KNOWN_URL_HTTP before
-  WEB_SEARCH_DISCOVERY before ANTHROPIC_WEB_FETCH before
-  NOT_PUBLICLY_AVAILABLE/MANUAL_VERIFICATION_REQUIRED).
+    LOCATE (find/resolve a URL, or a metadata pointer)
+    -> FETCH (retrieve the body)
+    -> PARSE (turn it into something Evidence Integrity can read)
 
-31 is the count of exact-equivalence GROUPS (``legacy_catalog.group_legacy_needs``).
-It is not, and must never be read as, the count of ``EvidenceRequirement``s,
-``AcquisitionTarget``s, or routes -- see ``source_routing_catalog.py`` for the
-actual, separately-measured counts.
+and a target is complete only once every REQUIRED step -- not merely the
+first one -- has reached its own success state. ``AcquisitionTarget`` states
+this as an explicit dependency graph:
 
-Acquiring a document through a route, even successfully, never promotes any
-``LegacyResearchNeed`` to an evidence-level status -- see ``checks.py``'s
-module docstring for the Acquisition/Evidence/Check boundary this module
-also respects. ``resolve_active_route`` below decides only which route a
-state machine would try next; it never claims a document was fetched or a
-claim confirmed.
+* ``required_step_ids`` -- AND: every one of these must reach its own
+  ``completion_condition`` for the target to be complete.
+* ``alternative_step_groups`` -- OR within a group, AND across groups: at
+  least one member of each group must succeed. A later step whose
+  ``depends_on_step_ids`` names a member of one of these groups is satisfied
+  once ANY member of that group succeeds (see ``resolve_next_steps``).
+
+``resolve_next_steps``/``is_target_complete`` are pure: given step outcomes
+(real, from an execution this module never performs, or hypothetical, as
+``routing_budget_scenarios``'s NORMAL/DEGRADED/WORST use), they only decide
+what a state machine would try next, and whether a target counts as done.
+Neither ever claims a claim was confirmed -- see ``checks.py``'s
+Acquisition/Evidence/Check boundary, which this module continues to respect.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
-from ..schemas.enums import DocumentAuthority
+from ..schemas.enums import ContentKind, DocumentAuthority, ResearchDomain
 from .acquisition_planning import AcquisitionMethod
-from .checks import AcquisitionStatus, SubjectScope
-from .document_store import DocumentRole
+from .checks import SubjectScope
+
+
+class StepKind(str, Enum):
+    LOCATE = "LOCATE"
+    FETCH = "FETCH"
+    PARSE = "PARSE"
+
+
+class StepStatus(str, Enum):
+    """Fine-grained per-step outcome. Deliberately NOT the same vocabulary as
+    ``checks.AcquisitionStatus`` (that is the coarser per-LegacyResearchNeed/
+    CoverageLedger axis) -- this one exists so a LOCATE step's success is
+    structurally incapable of being read as a FETCH or PARSE success.
+    """
+
+    PLANNED = "PLANNED"
+    LOCATED_METADATA = "LOCATED_METADATA"
+    URL_RESOLVED = "URL_RESOLVED"
+    BODY_FETCHED = "BODY_FETCHED"
+    PARSED = "PARSED"
+    #: Structured-API equivalents of BODY_FETCHED/PARSED (requirement 2):
+    #: a registry/API record retrieved whole, vs. the specific fields this
+    #: requirement needs actually being present in it.
+    STRUCTURED_RECORD_RETRIEVED = "STRUCTURED_RECORD_RETRIEVED"
+    REQUIRED_FIELDS_PARSED = "REQUIRED_FIELDS_PARSED"
+    ZERO_RESULTS = "ZERO_RESULTS"
+    NOT_FOUND = "NOT_FOUND"
+    NOT_PUBLICLY_AVAILABLE = "NOT_PUBLICLY_AVAILABLE"
+    FAILED = "FAILED"
+    SKIPPED_DUE_TO_BUDGET = "SKIPPED_DUE_TO_BUDGET"
+    MANUAL_VERIFICATION_REQUIRED = "MANUAL_VERIFICATION_REQUIRED"
+
+    @property
+    def is_document_content(self) -> bool:
+        """Whether this status means "Evidence Integrity has something to
+        read" -- never true for a locator-only outcome."""
+        return self in (StepStatus.BODY_FETCHED, StepStatus.PARSED, StepStatus.REQUIRED_FIELDS_PARSED)
+
+
+class FailurePolicy(str, Enum):
+    #: This step is not optional on its path: if it does not reach its own
+    #: completion_condition, the target cannot complete via this path.
+    REQUIRED = "REQUIRED"
+    #: This step is one candidate within an alternative_step_group: failing
+    #: it makes the group try its next untried member, if any.
+    ALTERNATIVE = "ALTERNATIVE"
 
 
 class TargetKind(str, Enum):
-    """What real-world kind of document/record an ``AcquisitionTarget`` is."""
-
     SEC_FILING_METADATA = "SEC_FILING_METADATA"
     SEC_PRIMARY_DOCUMENT = "SEC_PRIMARY_DOCUMENT"
     SEC_EXHIBIT = "SEC_EXHIBIT"
@@ -63,113 +106,134 @@ class TargetKind(str, Enum):
 
 
 class TokenCostClass(str, Enum):
-    """Coarse LLM-token cost band for a route, if it were executed."""
-
-    ZERO = "ZERO"  # direct API/HTTP: no LLM call at all
-    LOW = "LOW"  # a targeted Anthropic web_fetch of an already-known URL
-    HIGH = "HIGH"  # an open-ended web_search discovery call
+    ZERO = "ZERO"
+    LOW = "LOW"
+    HIGH = "HIGH"
 
 
 class RequestCostClass(str, Enum):
-    """Coarse network-request cost/constraint band for a route."""
-
     FREE = "FREE"
     RATE_LIMITED = "RATE_LIMITED"
     PAID_LLM_CALL = "PAID_LLM_CALL"
 
 
-@dataclass(frozen=True)
-class EvidenceRequirement:
-    """One distinct proposition that would need to be confirmed.
-
-    Two requirements about superficially "the same" query can differ in
-    everything that matters: who would need to be the speaker
-    (``required_authorities``), whether independent (non-issuer) confirmation
-    is required at all, and what document roles could possibly satisfy them.
+class RequirementPriorityTier(str, Enum):
+    """Requirement 8's fixed priority order for bounded search selection when
+    Direct routes cannot cover every requirement. Lower tier number = served
+    first when only ``MAX_WEB_SEARCH_USES`` web searches are affordable.
     """
 
+    BLOCKING_REGULATORY = "BLOCKING_REGULATORY"
+    CONTRADICTION_FALSIFICATION = "CONTRADICTION_FALSIFICATION"
+    CURRENT_PROGRAM_SCIENCE = "CURRENT_PROGRAM_SCIENCE"
+    CAPITAL_SURVIVAL = "CAPITAL_SURVIVAL"
+    REMAINING_GAPS = "REMAINING_GAPS"
+
+    @property
+    def rank(self) -> int:
+        return {
+            "BLOCKING_REGULATORY": 1,
+            "CONTRADICTION_FALSIFICATION": 2,
+            "CURRENT_PROGRAM_SCIENCE": 3,
+            "CAPITAL_SURVIVAL": 4,
+            "REMAINING_GAPS": 5,
+        }[self.value]
+
+
+def priority_tier_for(*, domain: ResearchDomain, blocking_if_unresolved: bool) -> RequirementPriorityTier:
+    """Deterministic, code-visible mapping from (domain, blocking) to
+    requirement 8's fixed priority order. Never randomized, never tuned per
+    run -- the same inputs always rank the same way.
+    """
+    if blocking_if_unresolved and domain is ResearchDomain.REGULATORY:
+        return RequirementPriorityTier.BLOCKING_REGULATORY
+    if domain is ResearchDomain.CONTRADICTION:
+        return RequirementPriorityTier.CONTRADICTION_FALSIFICATION
+    if domain is ResearchDomain.SCIENCE_TECHNOLOGY:
+        return RequirementPriorityTier.CURRENT_PROGRAM_SCIENCE
+    if domain is ResearchDomain.CAPITAL_STRUCTURE:
+        return RequirementPriorityTier.CAPITAL_SURVIVAL
+    return RequirementPriorityTier.REMAINING_GAPS
+
+
+@dataclass(frozen=True)
+class EvidenceRequirement:
     requirement_id: str
-    #: EVERY legacy_need_id (across every LegacyResearchNeed that raised this
-    #: requirement) -- never a representative sample.
     serves_legacy_need_ids: tuple[str, ...]
     subject_scope: SubjectScope
-    #: A specific programme identifier when subject_scope is PROGRAM;
-    #: "UNKNOWN" for a company-wide requirement. Never a real drug/programme
-    #: name in this catalog -- filled in only when a real run instantiates it.
+    domain: ResearchDomain
     program_scope: str = "UNKNOWN"
-    #: Free-text description of exactly what is being claimed and by whom,
-    #: e.g. "issuer disclosed FDA meeting content" vs. "FDA itself stated
-    #: this" -- the axis requirement 5 exists to keep apart.
     claim_scope: str = ""
     required_authorities: tuple[DocumentAuthority, ...] = ()
-    #: True only for a requirement that specifically needs a non-issuer
-    #: (REGULATOR/INDEPENDENT) speaker -- an issuer's own filing can never
-    #: satisfy one of these, however primary the filing's tier.
     independence_requirement: bool = False
-    #: Coarse recency/applicability window, e.g. "CURRENT_PROGRAM_ONLY" or
-    #: "ANY" -- deliberately a plain string, not a date-arithmetic type, since
-    #: Phase 2.5 does no date computation.
     date_scope: str = "ANY"
-    acceptable_document_roles: tuple[DocumentRole, ...] = ()
     blocking_if_unresolved: bool = False
+
+    @property
+    def priority_tier(self) -> RequirementPriorityTier:
+        return priority_tier_for(domain=self.domain, blocking_if_unresolved=self.blocking_if_unresolved)
+
+
+@dataclass(frozen=True)
+class AcquisitionStep:
+    step_id: str
+    target_id: str
+    step_kind: StepKind
+    acquisition_method: AcquisitionMethod
+    depends_on_step_ids: tuple[str, ...] = ()
+    failure_policy: FailurePolicy = FailurePolicy.REQUIRED
+    authority: DocumentAuthority = DocumentAuthority.UNKNOWN
+    expected_content_kind: ContentKind = ContentKind.FULL_DOCUMENT
+    #: The StepStatus value that counts as THIS step's own success.
+    completion_condition: StepStatus = StepStatus.BODY_FETCHED
+    adapter_id: str = "UNKNOWN"
+    token_cost_class: TokenCostClass = TokenCostClass.ZERO
+    request_cost_class: RequestCostClass = RequestCostClass.FREE
+
+    @property
+    def required(self) -> bool:
+        return self.failure_policy is FailurePolicy.REQUIRED
+
+    @property
+    def sends_to_web_search(self) -> bool:
+        return self.acquisition_method.requires_web_search_budget
 
 
 @dataclass(frozen=True)
 class AcquisitionTarget:
-    """One real document (or structured record) that, if obtained, could
-    satisfy one or more ``EvidenceRequirement``s."""
-
     target_id: str
     target_kind: TargetKind
-    #: Placeholder-level identifiers only -- "UNKNOWN" in this static catalog;
-    #: a real run would fill in the run's own issuer/programme identifiers,
-    #: never a value hardcoded here.
     issuer_identifier: str = "UNKNOWN"
     program_identifier: str = "UNKNOWN"
-    document_role: DocumentRole = DocumentRole.UNKNOWN
-    authority: DocumentAuthority = DocumentAuthority.UNKNOWN
-    lookup_parameters: Mapping[str, str] = field(default_factory=dict)
-    #: EVERY EvidenceRequirement this target could satisfy.
+    #: AND set: every one of these step_ids must reach its own
+    #: completion_condition for this target to be complete.
+    required_step_ids: tuple[str, ...] = ()
+    #: AND-of-ORs: each inner tuple is a group where at least one member
+    #: must succeed; every group must be satisfied.
+    alternative_step_groups: tuple[tuple[str, ...], ...] = ()
     serves_requirement_ids: tuple[str, ...] = ()
 
-
-@dataclass(frozen=True)
-class AcquisitionRoute:
-    """One way of obtaining one ``AcquisitionTarget``, at one priority."""
-
-    route_id: str
-    target_id: str
-    #: Lower number = tried first. Unique per target.
-    priority: int
-    acquisition_method: AcquisitionMethod
-    #: Names the specific collector/adapter this route would use, e.g.
-    #: "sec_edgar_submissions", "clinicaltrials_api", "pubmed" (unimplemented
-    #: -- NEW_DIRECT_ADAPTER), "http_client", "anthropic_web_search". Purely
-    #: documentary in Phase 2.5 -- nothing here calls it.
-    adapter_id: str = "UNKNOWN"
-    expected_authority: DocumentAuthority = DocumentAuthority.UNKNOWN
-    token_cost_class: TokenCostClass = TokenCostClass.ZERO
-    request_cost_class: RequestCostClass = RequestCostClass.FREE
-    #: The set of outcomes on the PRECEDING route (this route's target,
-    #: previous priority) that make this route eligible to be attempted.
-    #: Meaningless (never consulted) for the lowest-priority route on a
-    #: target, which is always eligible first.
-    fallback_conditions: tuple[AcquisitionStatus, ...] = ()
-    #: The set of outcomes on THIS route, once attempted, after which no
-    #: further route on this target is attempted.
-    terminal_conditions: tuple[AcquisitionStatus, ...] = (AcquisitionStatus.ACQUIRED,)
+    def completion_condition_label(self, steps: Sequence[AcquisitionStep]) -> str:
+        """Human-readable description derived from the actual step graph --
+        never a separately-maintained enum that could drift out of sync with
+        ``required_step_ids``/``alternative_step_groups``."""
+        by_id = {s.step_id: s for s in steps if s.target_id == self.target_id}
+        parts = [by_id[sid].completion_condition.value for sid in self.required_step_ids if sid in by_id]
+        for group in self.alternative_step_groups:
+            labels = [by_id[sid].completion_condition.value for sid in group if sid in by_id]
+            if labels:
+                parts.append("(" + " OR ".join(labels) + ")")
+        return " AND ".join(parts) if parts else "NONE"
 
 
 @dataclass
 class SourceRoutingGraph:
     requirements: tuple[EvidenceRequirement, ...] = ()
     targets: tuple[AcquisitionTarget, ...] = ()
-    routes: tuple[AcquisitionRoute, ...] = ()
+    steps: tuple[AcquisitionStep, ...] = ()
 
-    def routes_for_target(self, target_id: str) -> list[AcquisitionRoute]:
-        return sorted(
-            (r for r in self.routes if r.target_id == target_id), key=lambda r: r.priority
-        )
+    def steps_for_target(self, target_id: str) -> list[AcquisitionStep]:
+        return [s for s in self.steps if s.target_id == target_id]
 
     def targets_for_requirement(self, requirement_id: str) -> list[AcquisitionTarget]:
         return [t for t in self.targets if requirement_id in t.serves_requirement_ids]
@@ -184,36 +248,105 @@ class SourceRoutingGraph:
         return served
 
 
-def resolve_active_route(
-    routes: Sequence[AcquisitionRoute], outcomes: Mapping[str, AcquisitionStatus]
-) -> AcquisitionRoute | None:
-    """Pure state-machine step: given one target's routes (any order) and a
-    map of route_id -> outcome for routes ALREADY attempted, return the route
-    that should be attempted next, or ``None`` if the chain has reached a
-    terminal outcome (or is exhausted) and no further route should run.
+def _group_containing(target: AcquisitionTarget, step_id: str) -> tuple[str, ...] | None:
+    for group in target.alternative_step_groups:
+        if step_id in group:
+            return group
+    return None
 
-    This performs no acquisition and calls nothing external. It only answers
-    "what would the plan do next", given outcomes the caller supplies (real
-    ones, from an execution this module never performs, or hypothetical ones,
-    as ``budget_feasibility``'s NORMAL/DEGRADED/WORST scenarios use).
+
+def _dependency_satisfied(
+    target: AcquisitionTarget,
+    step: AcquisitionStep,
+    by_id: Mapping[str, AcquisitionStep],
+    outcomes: Mapping[str, StepStatus],
+) -> bool:
+    """Whether every dependency ``step`` cites currently holds.
+
+    Two distinct citation shapes are supported, disambiguated by what the
+    step actually lists:
+
+    * Citing a single member of an alternative_step_group ("I depend
+      specifically on THIS one") requires exactly that member's own
+      completion_condition -- e.g. a structured-record parse step that
+      depends only on the Direct fetch step, never on that fetch's web-
+      search alternative.
+    * Citing an ENTIRE alternative_step_group ("I depend on whichever of
+      these succeeded") is satisfied by any one member succeeding -- e.g. a
+      body-fetch step that can consume a URL resolved by either the Direct
+      locator or its web-search fallback.
+
+    The distinction is structural, not a flag: a group is treated as
+    "wholly cited" only when every one of its members appears in
+    ``step.depends_on_step_ids``.
     """
-    ordered = sorted(routes, key=lambda r: r.priority)
-    previous_outcome: AcquisitionStatus | None = None
-    for index, route in enumerate(ordered):
-        if index > 0:
-            if previous_outcome is None:
-                # A later route was asked about before its predecessor was
-                # ever attempted -- conservatively, nothing beyond the
-                # predecessor is eligible yet.
-                return None
-            if previous_outcome not in route.fallback_conditions:
-                # The predecessor's outcome does not authorize falling
-                # through to this route -- the chain stops here.
-                return None
-        outcome = outcomes.get(route.route_id)
-        if outcome is None:
-            return route  # not yet attempted -- this is the next step
-        if outcome in route.terminal_conditions:
-            return None  # this route's own outcome ends the chain
-        previous_outcome = outcome
-    return None  # every route on this target has been attempted
+    for dep_id in step.depends_on_step_ids:
+        dep = by_id.get(dep_id)
+        if dep is None:
+            return False
+        group = _group_containing(target, dep_id)
+        if group is not None and set(group) <= set(step.depends_on_step_ids):
+            if not any(outcomes.get(sid) == by_id[sid].completion_condition for sid in group if sid in by_id):
+                return False
+        elif outcomes.get(dep_id) != dep.completion_condition:
+            return False
+    return True
+
+
+def resolve_next_steps(
+    target: AcquisitionTarget,
+    steps: Sequence[AcquisitionStep],
+    outcomes: Mapping[str, StepStatus],
+) -> list[AcquisitionStep]:
+    """Pure DAG step: which of ``target``'s steps are eligible to attempt
+    next, given outcomes already recorded for some of them.
+
+    A required step is offered once, when its dependencies are satisfied and
+    it has not been attempted. An alternative_step_group offers only its
+    next untried, dependency-satisfied member -- and offers nothing once any
+    member has already succeeded (its own completion_condition was reached).
+    """
+    by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
+    next_steps: list[AcquisitionStep] = []
+
+    for step_id in target.required_step_ids:
+        step = by_id.get(step_id)
+        if step is None or step_id in outcomes:
+            continue
+        if _dependency_satisfied(target, step, by_id, outcomes):
+            next_steps.append(step)
+
+    for group in target.alternative_step_groups:
+        group_steps = [by_id[sid] for sid in group if sid in by_id]
+        if any(outcomes.get(s.step_id) == s.completion_condition for s in group_steps):
+            continue
+        for step in group_steps:
+            if step.step_id in outcomes:
+                continue
+            if _dependency_satisfied(target, step, by_id, outcomes):
+                next_steps.append(step)
+                break
+
+    return next_steps
+
+
+def is_target_complete(
+    target: AcquisitionTarget,
+    steps: Sequence[AcquisitionStep],
+    outcomes: Mapping[str, StepStatus],
+) -> bool:
+    """Whether every required step and every alternative group has reached
+    its own completion_condition. A LOCATE-only or metadata-only outcome
+    (``URL_RESOLVED``/``LOCATED_METADATA``) never satisfies a FETCH/PARSE
+    step's own condition, so it can never complete a target on its own.
+    """
+    by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
+    for step_id in target.required_step_ids:
+        step = by_id.get(step_id)
+        if step is None or outcomes.get(step_id) != step.completion_condition:
+            return False
+    for group in target.alternative_step_groups:
+        group_steps = [by_id[sid] for sid in group if sid in by_id]
+        if not any(outcomes.get(s.step_id) == s.completion_condition for s in group_steps):
+            return False
+    return True
