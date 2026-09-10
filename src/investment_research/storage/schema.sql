@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS facts (
     tags                        TEXT DEFAULT '',
     content_kind                TEXT NOT NULL DEFAULT 'FULL_DOCUMENT',
     primary_source_url          TEXT,
+    -- Phase 2 addition: DocumentStore identity (Document.doc_id) this fact
+    -- was extracted from, when known. Nullable and additive -- see
+    -- storage/db.py's ADDITIVE_COLUMNS for the same column applied to an
+    -- existing database via ALTER TABLE. There is no DocumentStore table
+    -- yet, so this column alone does not let a stored Fact's Document be
+    -- reloaded after the process that produced it ends (see
+    -- research/document_store.py's module docstring).
+    document_id                 TEXT,
     created_at                  TEXT NOT NULL,
     PRIMARY KEY (fact_id, version)
 );

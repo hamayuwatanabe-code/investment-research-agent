@@ -288,13 +288,19 @@ class Fact:
     #: The DocumentStore identity (``Document.doc_id``) this fact was
     #: extracted from, carried forward from ``RawFact.document_id`` by
     #: ``FactCollectorAgent._to_fact``. ``None`` when no Document was
-    #: involved. NOT yet persisted by ``to_row``/``storage/schema.sql`` (out
-    #: of scope for this change) -- see the Phase 1 report for that gap.
+    #: involved. Persisted additively by ``to_row``/``storage/schema.sql``/
+    #: ``storage/db.py`` (Phase 2) -- an existing database gains a nullable
+    #: ``document_id`` column via ``ADDITIVE_COLUMNS`` and every pre-existing
+    #: row reads back ``NULL``, never a guessed value.
     #: ``Document.authority`` is the canonical authority for this fact and is
-    #: only reachable by resolving this id through a ``DocumentStore``; a
-    #: caller with a ``Fact`` but no ``DocumentStore`` (e.g. a report path
-    #: that only reads columns already in ``facts.db``) cannot recover it
-    #: from the ``Fact`` alone in Phase 1.
+    #: only reachable by resolving this id through a ``DocumentStore``; there
+    #: is still no table that persists a ``DocumentStore`` itself, so a
+    #: stored ``document_id`` can only be resolved back to
+    #: ``Document.authority`` within the same process/run that built the
+    #: ``DocumentStore`` -- it does not survive a process restart. A caller
+    #: with only a database row and no live ``DocumentStore`` (e.g. a report
+    #: generated from a past run) cannot recover authority from
+    #: ``document_id`` alone.
     document_id: str | None = None
 
     # -- derived -----------------------------------------------------------
@@ -373,6 +379,7 @@ class Fact:
             "tags": ",".join(self.tags),
             "content_kind": str(self.content_kind),
             "primary_source_url": self.primary_source_url,
+            "document_id": self.document_id,
         }
 
 

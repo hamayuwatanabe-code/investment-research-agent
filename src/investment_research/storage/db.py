@@ -28,6 +28,10 @@ ADDITIVE_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "facts": (
         ("content_kind", "TEXT NOT NULL DEFAULT 'FULL_DOCUMENT'"),
         ("primary_source_url", "TEXT"),
+        # Phase 2: Document identity a fact was extracted from. Nullable, so
+        # every existing row (which has no document_id at all) reads back as
+        # NULL rather than a guessed or invented value.
+        ("document_id", "TEXT"),
     ),
     "kill_assessments": (("confirmation", "TEXT NOT NULL DEFAULT 'PROVISIONAL'"),),
     "thesis_versions": (

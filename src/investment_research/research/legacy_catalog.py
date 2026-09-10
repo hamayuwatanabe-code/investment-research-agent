@@ -12,21 +12,33 @@ Source of the 49 templates (unchanged, not modified by this module):
 
 17 + 6 + 26 = 49.
 
-Deduplication in Phase 1 is exact-match only, on ``(equivalence_key, domain)``
+Deduplication is exact-match only, on ``(equivalence_key, domain, subject_scope)``
 -- never fuzzy, never token-overlap, never LLM-assisted (that is
 ``research.adversarial._dedupe_semantically``, a different mechanism, used for
 a different purpose, and explicitly out of scope for this dedup). Two legacy
-needs collapse into one group if and only if their ``equivalence_key`` string
-is byte-identical AND their ``domain`` enum member is identical.
+needs collapse into one group if and only if their ``equivalence_key`` string,
+``domain`` enum member AND ``subject_scope`` are all identical.
 
-Running ``group_legacy_needs()`` over ``LEGACY_CATALOG`` produces exactly 31
-groups, collapsing 18 of the 49 rows (49 - 31 = 18). This is locked by
-``tests/unit/test_legacy_catalog.py`` -- see that file for the full row-by-row
-accounting of which of the 49 collapse into which of the 31 groups and why
-(e.g. why ``bear_2`` "{d} endpoint concern" and ``kill_3`` "{t} endpoint" do
-NOT merge despite both falling under ``ResearchDomain.REGULATORY``: their
-equivalence keys, "entity endpoint concern" and "entity endpoint", are not
-identical strings).
+Phase 2 correction to Phase 1: ``equivalence_key`` no longer collapses ``{t}``
+(ticker), ``{c}`` (company name) and ``{d}`` (drug/programme) to one shared
+``ENTITY`` token. Ticker and company name name the same issuer and keep
+sharing a key (both become ``COMPANY``); a drug/programme is a DIFFERENT
+subject and now becomes ``PROGRAM`` instead, so it can never collide with a
+company-level need merely because their trailing words happen to match (see
+``SubjectScope`` in ``checks.py``).
+
+Running ``group_legacy_needs()`` over ``LEGACY_CATALOG`` still produces
+exactly 31 groups, collapsing 18 of the 49 rows (49 - 31 = 18) -- UNCHANGED
+from Phase 1's count. This is not a coincidence that needed forcing: every
+Phase 1 merge already paired a ``{c}``-templated bear row with a
+``{t}``-templated kill row (both now COMPANY-scoped, exactly as before), and
+none of the four ``{d}``-templated ("{d} endpoint concern", "{d} competitor
+superiority", "{d} safety concern", "{d} mechanism efficacy") rows ever shared
+a suffix with another ``{d}`` row, so no PROGRAM-scoped merge existed to lose.
+The scope distinction is real and enforced (see the synthetic tests in
+``tests/unit/test_legacy_catalog.py`` proving a same-text/same-domain but
+different-subject_scope pair does NOT merge), it simply does not change any
+of today's 49 real rows.
 """
 
 from __future__ import annotations
@@ -35,23 +47,48 @@ import re
 from collections import defaultdict
 
 from ..schemas.enums import ResearchDomain
-from .checks import AcquisitionOrigin, LegacyResearchNeed
+from .checks import AcquisitionOrigin, LegacyResearchNeed, SubjectScope
 
-_PLACEHOLDER_RE = re.compile(r"\{[tcd]\}")
+_COMPANY_PLACEHOLDER_RE = re.compile(r"\{[tc]\}")
+_PROGRAM_PLACEHOLDER_RE = re.compile(r"\{d\}")
 _WS_RE = re.compile(r"\s+")
+
+
+def subject_scope_for_template(template: str) -> SubjectScope:
+    """Which entity a template's placeholder names.
+
+    ``{t}`` (ticker) and ``{c}`` (company name) both name the issuer and are
+    COMPANY scope; ``{d}`` (drug/programme) is PROGRAM scope. Every template
+    in this catalog carries exactly one placeholder family -- never both,
+    never neither -- and this raises rather than guessing if that ever stops
+    being true.
+    """
+    has_company = bool(_COMPANY_PLACEHOLDER_RE.search(template))
+    has_program = bool(_PROGRAM_PLACEHOLDER_RE.search(template))
+    if has_program and not has_company:
+        return SubjectScope.PROGRAM
+    if has_company and not has_program:
+        return SubjectScope.COMPANY
+    raise ValueError(
+        f"template must contain exactly one placeholder family ({{t}}/{{c}} xor {{d}}): "
+        f"{template!r}"
+    )
 
 
 def equivalence_key(template: str) -> str:
     """Normalize a raw template to its exact-match dedup key.
 
-    Every ``{t}``/``{c}``/``{d}`` placeholder becomes the literal token
-    ``ENTITY``; the result is lowercased and whitespace-normalized. This is a
-    string-identity operation, not a similarity measure: "{c} going concern"
-    and "{t} going concern" produce the identical key "entity going concern",
-    while "{d} endpoint concern" and "{t} endpoint" do not, because their
-    non-placeholder words differ.
+    Every ``{t}``/``{c}`` placeholder becomes the literal token ``COMPANY``;
+    every ``{d}`` placeholder becomes ``PROGRAM``. The result is lowercased
+    and whitespace-normalized. This is a string-identity operation, not a
+    similarity measure: "{c} going concern" and "{t} going concern" produce
+    the identical key "company going concern" (same subject, same claim),
+    while "{d} endpoint concern" and "{t} endpoint" do not -- both because
+    their non-placeholder words differ AND because one is PROGRAM-scoped and
+    the other COMPANY-scoped.
     """
-    normalized = _PLACEHOLDER_RE.sub("ENTITY", template)
+    normalized = _COMPANY_PLACEHOLDER_RE.sub("COMPANY", template)
+    normalized = _PROGRAM_PLACEHOLDER_RE.sub("PROGRAM", normalized)
     return _WS_RE.sub(" ", normalized).strip().lower()
 
 
@@ -127,38 +164,25 @@ assert len(_KILL_TEMPLATE_ROWS) == 18
 assert len(_KILL_DUPLICATE_ROWS) == 8
 
 
+def _need(need_id: str, origin: AcquisitionOrigin, template: str, domain: ResearchDomain) -> LegacyResearchNeed:
+    return LegacyResearchNeed(
+        legacy_need_id=need_id,
+        origin=origin,
+        original_template=template,
+        domain=domain,
+        subject_scope=subject_scope_for_template(template),
+        equivalence_key=equivalence_key(template),
+    )
+
+
 def _build_catalog() -> tuple[LegacyResearchNeed, ...]:
     rows: list[LegacyResearchNeed] = []
     for need_id, template, domain in _BEAR_ROWS:
-        rows.append(
-            LegacyResearchNeed(
-                legacy_need_id=need_id,
-                origin=AcquisitionOrigin.BEAR,
-                original_template=template,
-                domain=domain,
-                equivalence_key=equivalence_key(template),
-            )
-        )
+        rows.append(_need(need_id, AcquisitionOrigin.BEAR, template, domain))
     for need_id, template, domain in _BULL_ROWS:
-        rows.append(
-            LegacyResearchNeed(
-                legacy_need_id=need_id,
-                origin=AcquisitionOrigin.BULL,
-                original_template=template,
-                domain=domain,
-                equivalence_key=equivalence_key(template),
-            )
-        )
+        rows.append(_need(need_id, AcquisitionOrigin.BULL, template, domain))
     for need_id, template, domain in (*_KILL_TEMPLATE_ROWS, *_KILL_DUPLICATE_ROWS):
-        rows.append(
-            LegacyResearchNeed(
-                legacy_need_id=need_id,
-                origin=AcquisitionOrigin.KILL,
-                original_template=template,
-                domain=domain,
-                equivalence_key=equivalence_key(template),
-            )
-        )
+        rows.append(_need(need_id, AcquisitionOrigin.KILL, template, domain))
     return tuple(rows)
 
 
@@ -171,17 +195,22 @@ assert len({need.legacy_need_id for need in LEGACY_CATALOG}) == 49
 
 def group_legacy_needs(
     needs: tuple[LegacyResearchNeed, ...] = LEGACY_CATALOG,
-) -> dict[tuple[str, ResearchDomain], tuple[str, ...]]:
-    """Group needs by exact ``(equivalence_key, domain)`` match.
+) -> dict[tuple[str, ResearchDomain, SubjectScope], tuple[str, ...]]:
+    """Group needs by exact ``(equivalence_key, domain, subject_scope)`` match.
 
     Returns a mapping from the group's key to the ``legacy_need_id``s in it,
     in catalog order. Over ``LEGACY_CATALOG`` this produces exactly 31 groups.
     No fuzzy or token-overlap comparison is performed anywhere in this
-    function -- grouping is a plain dict keyed on an exact string+enum pair.
+    function -- grouping is a plain dict keyed on an exact string+enum+enum
+    triple. ``subject_scope`` is included explicitly (defense in depth) even
+    though today's ``equivalence_key`` values already encode it via the
+    COMPANY/PROGRAM substitution: a hand-built ``LegacyResearchNeed`` whose
+    ``equivalence_key`` was not produced by this module's own
+    ``equivalence_key()`` function must still never merge across scopes.
     """
-    groups: dict[tuple[str, ResearchDomain], list[str]] = defaultdict(list)
+    groups: dict[tuple[str, ResearchDomain, SubjectScope], list[str]] = defaultdict(list)
     for need in needs:
-        groups[(need.equivalence_key, need.domain)].append(need.legacy_need_id)
+        groups[(need.equivalence_key, need.domain, need.subject_scope)].append(need.legacy_need_id)
     return {key: tuple(ids) for key, ids in groups.items()}
 
 

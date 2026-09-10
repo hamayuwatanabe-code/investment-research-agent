@@ -199,8 +199,27 @@ def test_fresh_database_needs_no_additive_migration():
     for table, column in (
         ("facts", "content_kind"),
         ("facts", "primary_source_url"),
+        ("facts", "document_id"),
         ("kill_assessments", "confirmation"),
         ("thesis_versions", "research_status"),
         ("thesis_versions", "blocking_verification_required"),
     ):
         assert column in _columns(conn, table), f"{table}.{column} missing on a fresh database"
+
+
+# --- Phase 2: document_id additive migration -------------------------------
+def test_migration_adds_document_id_to_facts(pre_gate_db):
+    assert "document_id" not in _columns(pre_gate_db, "facts")
+    migrate(pre_gate_db)
+    assert "document_id" in _columns(pre_gate_db, "facts")
+
+
+def test_existing_fact_history_survives_migration_with_document_id_null(pre_gate_db):
+    """A fact recorded before document_id existed carries no document
+    reference at all; the migration must never invent one -- NULL, not a
+    guessed or empty-string placeholder."""
+    migrate(pre_gate_db)
+    row = pre_gate_db.execute("SELECT * FROM facts WHERE fact_id = 'fact_old1'").fetchone()
+    assert row is not None
+    assert row["claim"] == "A pre-existing claim"
+    assert row["document_id"] is None
