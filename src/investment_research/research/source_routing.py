@@ -92,6 +92,103 @@ class FailurePolicy(str, Enum):
     ALTERNATIVE = "ALTERNATIVE"
 
 
+class ImplementationStatus(str, Enum):
+    """Whether the adapter/collector a step names actually exists in this
+    repository. Phase 2.7 requirement 3: declaring a route in the catalog is
+    not the same claim as it being executable -- a NEW_DIRECT_ADAPTER step
+    for a collector nobody has written yet is NOT_IMPLEMENTED, and no
+    simulation may treat it as a working path except under the explicitly
+    aspirational ASSUME_IMPLEMENTED_ROUTES_SUCCEED assumption.
+    """
+
+    IMPLEMENTED = "IMPLEMENTED"
+    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    DISABLED = "DISABLED"
+
+
+class PlanStatus(str, Enum):
+    """Whether a plan is structurally achievable given what is ACTUALLY
+    implemented today -- never a claim about whether research has been
+    executed or completed (see ExecutionStatus/ResearchStatus for that).
+    """
+
+    FEASIBLE = "FEASIBLE"
+    INFEASIBLE = "INFEASIBLE"
+    #: Feasible overall, but one or more BLOCKING requirements have no
+    #: implemented path to content acquisition at all (e.g. a regulator's
+    #: own non-public position).
+    FEASIBLE_WITH_BLOCKING_GAPS = "FEASIBLE_WITH_BLOCKING_GAPS"
+
+
+class ExecutionStatus(str, Enum):
+    """Whether acquisition actually RAN -- distinct from whether a plan for
+    it is feasible (PlanStatus) and from whether the run's evidence clears
+    the bar for an Action (ResearchStatus, schemas.enums). This module never
+    executes anything, so every simulation result you will find here is
+    NOT_RUN; ExecutionStatus exists as a vocabulary for callers that do
+    execute (Phase 3+), not as something routing_budget_scenarios.py sets.
+    """
+
+    NOT_RUN = "NOT_RUN"
+    PARTIAL = "PARTIAL"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+
+
+class TargetAcquisitionOutcome(str, Enum):
+    """Per-target classification of a (real or simulated) set of step
+    outcomes. Distinct from ``checks.AcquisitionStatus`` -- this is what
+    ``project_step_results_to_coverage`` (``step_graph_coverage.py``)
+    translates INTO that coarser, per-LegacyResearchNeed vocabulary.
+    """
+
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    #: The target's REQUIRED steps and every alternative group each reached
+    #: a genuine content-bearing success (never merely LOCATE/metadata, and
+    #: never NOT_PUBLICLY_AVAILABLE/MANUAL_VERIFICATION_REQUIRED).
+    ACQUIRED = "ACQUIRED"
+    #: Acquisition was conclusively determined NOT to be possible through any
+    #: public channel. This is a resolution, not a success -- it NEVER
+    #: satisfies ``is_target_complete`` and is reported separately.
+    ACQUISITION_EXHAUSTED_NOT_PUBLIC = "ACQUISITION_EXHAUSTED_NOT_PUBLIC"
+    #: Every remaining path was skipped for budget reasons, not attempted.
+    BLOCKED_BY_BUDGET = "BLOCKED_BY_BUDGET"
+    #: The only remaining path required a step whose adapter does not exist
+    #: in this repository yet.
+    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    FAILED = "FAILED"
+
+
+class SimulationAssumption(str, Enum):
+    """What a projection is allowed to assume about routes that do not exist
+    in code yet. Never mixed silently -- every report states which one
+    produced which numbers (Phase 2.7 requirement 4).
+    """
+
+    #: Aspirational: every declared route, implemented or not, succeeds when
+    #: reached. A statement about the DESIGN, never about what would happen
+    #: if run today.
+    ASSUME_IMPLEMENTED_ROUTES_SUCCEED = "ASSUME_IMPLEMENTED_ROUTES_SUCCEED"
+    #: Grounded: a NOT_IMPLEMENTED step can never succeed; only code that
+    #: exists today is assumed capable of running (and, under this
+    #: assumption alone, assumed to succeed when it runs).
+    CURRENT_IMPLEMENTATION_ONLY = "CURRENT_IMPLEMENTATION_ONLY"
+    #: CURRENT_IMPLEMENTATION_ONLY's implementation constraint, plus: every
+    #: implemented discovery-risk step returns a soft failure (ZERO_RESULTS)
+    #: when reached.
+    DIRECT_FAILURES = "DIRECT_FAILURES"
+    #: CURRENT_IMPLEMENTATION_ONLY's implementation constraint, plus: every
+    #: implemented discovery-risk step returns a hard failure (FAILED) when
+    #: reached.
+    WORST_CASE = "WORST_CASE"
+
+    @property
+    def respects_implementation_status(self) -> bool:
+        return self is not SimulationAssumption.ASSUME_IMPLEMENTED_ROUTES_SUCCEED
+
+
 class TargetKind(str, Enum):
     SEC_FILING_METADATA = "SEC_FILING_METADATA"
     SEC_PRIMARY_DOCUMENT = "SEC_PRIMARY_DOCUMENT"
@@ -189,6 +286,10 @@ class AcquisitionStep:
     adapter_id: str = "UNKNOWN"
     token_cost_class: TokenCostClass = TokenCostClass.ZERO
     request_cost_class: RequestCostClass = RequestCostClass.FREE
+    #: Whether ``adapter_id`` actually exists as working code in this
+    #: repository today. Declaring a route is not the same claim as it being
+    #: runnable -- see ``ImplementationStatus``.
+    implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED
 
     @property
     def required(self) -> bool:
@@ -197,6 +298,18 @@ class AcquisitionStep:
     @property
     def sends_to_web_search(self) -> bool:
         return self.acquisition_method.requires_web_search_budget
+
+    @property
+    def never_constitutes_content_acquisition(self) -> bool:
+        """Whether reaching THIS step's own completion_condition can ever
+        mean a document was actually acquired. False for
+        NOT_PUBLICLY_AVAILABLE/MANUAL_VERIFICATION_REQUIRED -- their
+        "success" is a conclusive non-acquisition resolution, never content
+        (Phase 2.7 requirement 5)."""
+        return self.acquisition_method in (
+            AcquisitionMethod.NOT_PUBLICLY_AVAILABLE,
+            AcquisitionMethod.MANUAL_VERIFICATION_REQUIRED,
+        )
 
 
 @dataclass(frozen=True)
@@ -336,17 +449,126 @@ def is_target_complete(
     outcomes: Mapping[str, StepStatus],
 ) -> bool:
     """Whether every required step and every alternative group has reached
-    its own completion_condition. A LOCATE-only or metadata-only outcome
+    its own completion_condition, via a step that can actually constitute
+    content acquisition. A LOCATE-only or metadata-only outcome
     (``URL_RESOLVED``/``LOCATED_METADATA``) never satisfies a FETCH/PARSE
     step's own condition, so it can never complete a target on its own.
+    A NOT_PUBLICLY_AVAILABLE or MANUAL_VERIFICATION_REQUIRED step reaching
+    its own "completion_condition" NEVER counts here either (Phase 2.7
+    requirement 5) -- that is a conclusive non-acquisition resolution, not a
+    success; see ``target_acquisition_outcome`` for how it IS reported.
+    A target with neither required steps nor alternative groups can never be
+    complete -- there is nothing that could constitute acquiring it.
     """
     by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
+    if not target.required_step_ids and not target.alternative_step_groups:
+        return False
     for step_id in target.required_step_ids:
         step = by_id.get(step_id)
-        if step is None or outcomes.get(step_id) != step.completion_condition:
+        if step is None or step.never_constitutes_content_acquisition:
+            return False
+        if outcomes.get(step_id) != step.completion_condition:
             return False
     for group in target.alternative_step_groups:
         group_steps = [by_id[sid] for sid in group if sid in by_id]
-        if not any(outcomes.get(s.step_id) == s.completion_condition for s in group_steps):
+        if not any(
+            outcomes.get(s.step_id) == s.completion_condition and not s.never_constitutes_content_acquisition
+            for s in group_steps
+        ):
             return False
     return True
+
+
+def target_acquisition_outcome(
+    target: AcquisitionTarget,
+    steps: Sequence[AcquisitionStep],
+    outcomes: Mapping[str, StepStatus],
+) -> TargetAcquisitionOutcome:
+    """Classify a target's (real or simulated) step outcomes.
+
+    Ordering matters: ACQUIRED is checked first (via ``is_target_complete``,
+    which already excludes non-content methods), then the terminal negative
+    resolutions, then whether the target is simply still reachable
+    (IN_PROGRESS) or has never been touched (NOT_ATTEMPTED).
+    """
+    if is_target_complete(target, steps, outcomes):
+        return TargetAcquisitionOutcome.ACQUIRED
+
+    by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
+    recorded = {sid: outcome for sid, outcome in outcomes.items() if sid in by_id}
+    if not recorded:
+        return TargetAcquisitionOutcome.NOT_ATTEMPTED
+
+    exhausted = resolve_next_steps(target, steps, outcomes) == []
+
+    if any(outcome == StepStatus.NOT_PUBLICLY_AVAILABLE for outcome in recorded.values()):
+        return TargetAcquisitionOutcome.ACQUISITION_EXHAUSTED_NOT_PUBLIC
+    if exhausted and any(outcome == StepStatus.SKIPPED_DUE_TO_BUDGET for outcome in recorded.values()):
+        return TargetAcquisitionOutcome.BLOCKED_BY_BUDGET
+    if exhausted and any(
+        outcome == StepStatus.FAILED and by_id[sid].implementation_status is ImplementationStatus.NOT_IMPLEMENTED
+        for sid, outcome in recorded.items()
+    ):
+        return TargetAcquisitionOutcome.NOT_IMPLEMENTED
+    if exhausted:
+        return TargetAcquisitionOutcome.FAILED
+    return TargetAcquisitionOutcome.IN_PROGRESS
+
+
+def target_plan_status(target: AcquisitionTarget, steps: Sequence[AcquisitionStep]) -> PlanStatus:
+    """Whether ``target`` has ANY implemented path to genuine content
+    acquisition, independent of whether that path would actually succeed on
+    a given run. Never mutates anything, never executes anything.
+
+    INFEASIBLE covers two structurally different reasons, both real:
+    * every required/alternative step is NOT_IMPLEMENTED, with no viable
+      fallback -- an implementation gap; or
+    * the target's own required steps are inherently incapable of content
+      acquisition (e.g. its only step is NOT_PUBLICLY_AVAILABLE) -- not an
+      implementation gap at all, but a target that can never be "acquired".
+    Requirement 3: a NEW_DIRECT_ADAPTER route existing in the catalog is
+    never, by itself, read as making a target FEASIBLE.
+    """
+    by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
+
+    def usable(step: AcquisitionStep) -> bool:
+        return step.implementation_status is ImplementationStatus.IMPLEMENTED and not step.never_constitutes_content_acquisition
+
+    if not target.required_step_ids and not target.alternative_step_groups:
+        return PlanStatus.INFEASIBLE
+
+    for step_id in target.required_step_ids:
+        step = by_id.get(step_id)
+        if step is None or not usable(step):
+            return PlanStatus.INFEASIBLE
+    for group in target.alternative_step_groups:
+        group_steps = [by_id[sid] for sid in group if sid in by_id]
+        if not any(usable(s) for s in group_steps):
+            return PlanStatus.INFEASIBLE
+    return PlanStatus.FEASIBLE
+
+
+def compute_plan_status(graph: SourceRoutingGraph) -> tuple[PlanStatus, int]:
+    """Aggregate PlanStatus over the whole graph, plus the count of BLOCKING
+    requirements with no implemented path to content acquisition at all
+    (``blocking_unresolved_requirements`` -- Phase 2.7 requirement 1/5).
+    Read-only; never executes or mutates ``graph``.
+    """
+    infeasible_target_ids = {
+        t.target_id
+        for t in graph.targets
+        if target_plan_status(t, graph.steps_for_target(t.target_id)) is PlanStatus.INFEASIBLE
+    }
+    blocking_unresolved = 0
+    for requirement in graph.requirements:
+        if not requirement.blocking_if_unresolved:
+            continue
+        targets = graph.targets_for_requirement(requirement.requirement_id)
+        if targets and all(t.target_id in infeasible_target_ids for t in targets):
+            blocking_unresolved += 1
+
+    if blocking_unresolved > 0:
+        return PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS, blocking_unresolved
+    if graph.targets and infeasible_target_ids == {t.target_id for t in graph.targets}:
+        return PlanStatus.INFEASIBLE, 0
+    return PlanStatus.FEASIBLE, 0

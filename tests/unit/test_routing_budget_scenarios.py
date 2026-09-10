@@ -1,8 +1,10 @@
-"""routing_budget_scenarios.py: bounded NORMAL/DEGRADED/WORST scenarios.
+"""routing_budget_scenarios.py: bounded, honestly-labeled projections.
 
-Covers Phase 2.6 requirement 7 (NORMAL's real feasibility, not just tokens)
-and requirement 8 (the run-level MAX_WEB_SEARCH_USES=3 cap with priority
-selection, never unbounded search). No network call.
+Covers Phase 2.7 requirements 1/2/4/8/9: no ResearchStatus anywhere in this
+module's output, projected/estimated naming, the four SimulationAssumption
+variants (including CURRENT_IMPLEMENTATION_ONLY vs. the aspirational
+ASSUME_IMPLEMENTED_ROUTES_SUCCEED), and the scheduled-overrun-vs-full-
+completion-gap distinction. No network call.
 """
 
 from __future__ import annotations
@@ -11,27 +13,31 @@ from investment_research.research.acquisition_planning import AcquisitionMethod
 from investment_research.research.checks import SubjectScope
 from investment_research.research.routing_budget_scenarios import (
     MAX_WEB_SEARCH_USES,
-    assess_budget_scenarios,
+    assess_simulation_projections,
 )
 from investment_research.research.source_routing import (
     AcquisitionStep,
     AcquisitionTarget,
     EvidenceRequirement,
     FailurePolicy,
+    ImplementationStatus,
+    PlanStatus,
+    SimulationAssumption,
     SourceRoutingGraph,
     StepKind,
     StepStatus,
     TargetKind,
 )
-from investment_research.schemas.enums import ResearchDomain, ResearchStatus
+from investment_research.schemas.enums import ResearchDomain
 
 
-def _sec_style(n: int, *, domain=ResearchDomain.CAPITAL_STRUCTURE, blocking=False):
+def _sec_style(n: int, *, domain=ResearchDomain.CAPITAL_STRUCTURE, blocking=False, direct_implemented=True):
     tid, rid = f"target_{n}", f"req_{n}"
     l1 = AcquisitionStep(
         step_id=f"l1_{n}", target_id=tid, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.EXISTING_DIRECT_API,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+        implementation_status=ImplementationStatus.IMPLEMENTED if direct_implemented else ImplementationStatus.NOT_IMPLEMENTED,
     )
     l2 = AcquisitionStep(
         step_id=f"l2_{n}", target_id=tid, step_kind=StepKind.LOCATE,
@@ -69,148 +75,146 @@ def _graph_of(n_targets: int, **kwargs) -> SourceRoutingGraph:
     )
 
 
-def test_scenarios_are_computed_separately():
-    scenarios = assess_budget_scenarios()
-    assert scenarios.normal.scenario == "NORMAL"
-    assert scenarios.degraded.scenario == "DEGRADED"
-    assert scenarios.worst.scenario == "WORST"
+def test_all_four_assumptions_are_computed():
+    projections = assess_simulation_projections()
+    assert projections.assume_implemented_routes_succeed.assumption is SimulationAssumption.ASSUME_IMPLEMENTED_ROUTES_SUCCEED
+    assert projections.current_implementation_only.assumption is SimulationAssumption.CURRENT_IMPLEMENTATION_ONLY
+    assert projections.direct_failures.assumption is SimulationAssumption.DIRECT_FAILURES
+    assert projections.worst_case.assumption is SimulationAssumption.WORST_CASE
 
 
-# --- requirement 7: NORMAL's completeness, not just tokens ------------------
-def test_normal_direct_success_means_direct_http_fetch_not_zero():
-    graph = _graph_of(1)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.normal.direct_http_body_fetches == 1
-    assert scenarios.normal.web_search_locator_uses == 0
-    assert scenarios.normal.parsed_full_documents == 1
-    assert scenarios.normal.incomplete_targets == 0
+def test_no_research_status_field_exists_anywhere_on_the_projection():
+    projections = assess_simulation_projections()
+    fields = set(projections.assume_implemented_routes_succeed.__dataclass_fields__)
+    assert "research_status" not in fields
+    assert not any("research_status" in f for f in fields)
 
 
-def test_normal_safety_gate_requires_completion_not_just_token_fit():
-    """A scenario with cheap tokens but an incomplete required target must
-    NOT be reported feasible via normal_meets_safety_gate."""
-    graph = _graph_of(1)
-    # Force incompleteness: corrupt one step's dependency to something that
-    # can never be satisfied, by using a target with a step that never gets
-    # offered (dangling dependency).
-    dangling_step = AcquisitionStep(
-        step_id="dangling", target_id="target_0", step_kind=StepKind.PARSE,
-        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP,
-        depends_on_step_ids=("does_not_exist",), completion_condition=StepStatus.PARSED,
+def test_field_names_use_projected_and_estimated_prefixes():
+    fields = set(assess_simulation_projections().current_implementation_only.__dataclass_fields__)
+    for expected in (
+        "projected_metadata_locator_requests",
+        "projected_resolved_urls",
+        "projected_direct_http_body_fetches",
+        "projected_discovered_url_body_fetches",
+        "projected_parsed_full_documents",
+        "projected_web_search_uses",
+        "estimated_actual_low",
+        "estimated_actual_base",
+        "estimated_actual_high",
+    ):
+        assert expected in fields
+    # Forbidden bare names never appear as field names on this simulation type.
+    for forbidden in ("actual_tokens", "completed_targets", "research_status"):
+        assert forbidden not in fields
+
+
+def test_current_implementation_only_never_lets_not_implemented_adapters_succeed():
+    graph = _graph_of(1, direct_implemented=False)
+    projections = assess_simulation_projections(graph)
+    current = projections.current_implementation_only
+    # The Direct locate is NOT_IMPLEMENTED; only the web-search fallback can
+    # ever resolve a URL here, and that fallback's own fetch is what must be
+    # counted as "discovered", never "direct".
+    assert current.projected_direct_http_body_fetches == 0
+    assert current.projected_discovered_url_body_fetches == 1
+
+
+def test_assume_implemented_routes_succeed_is_a_pure_design_projection():
+    graph = _graph_of(1, direct_implemented=False)
+    projections = assess_simulation_projections(graph)
+    aspirational = projections.assume_implemented_routes_succeed
+    # Under the aspirational assumption the NOT_IMPLEMENTED direct route is
+    # still treated as if it worked.
+    assert aspirational.projected_direct_http_body_fetches == 1
+    assert aspirational.projected_discovered_url_body_fetches == 0
+
+
+def test_not_publicly_available_never_counts_as_target_acquired():
+    npa_step = AcquisitionStep(
+        step_id="npa", target_id="t_npa", step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NOT_PUBLICLY_AVAILABLE,
+        completion_condition=StepStatus.NOT_PUBLICLY_AVAILABLE,
     )
-    broken_target = AcquisitionTarget(
-        target_id="target_0", target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
-        required_step_ids=("dangling",),
-        serves_requirement_ids=graph.targets[0].serves_requirement_ids,
+    requirement = EvidenceRequirement(
+        requirement_id="req_npa", serves_legacy_need_ids=("synthetic_npa",),
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True,
     )
-    broken_graph = SourceRoutingGraph(
-        requirements=graph.requirements, targets=(broken_target,), steps=(dangling_step,)
+    target = AcquisitionTarget(
+        target_id="t_npa", target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
+        required_step_ids=("npa",), serves_requirement_ids=("req_npa",),
     )
-    scenarios = assess_budget_scenarios(broken_graph)
-    assert scenarios.normal.incomplete_targets == 1
-    assert scenarios.normal_meets_safety_gate is False
+    graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(npa_step,))
+    projections = assess_simulation_projections(graph)
+    for name in ("assume_implemented_routes_succeed", "current_implementation_only", "direct_failures", "worst_case"):
+        scenario = getattr(projections, name)
+        assert scenario.incomplete_targets == 1
+        assert scenario.plan_status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+        assert scenario.blocking_unresolved_requirements == 1
 
 
-def test_normal_metadata_only_is_never_reported_as_a_body_fetch():
-    graph = _graph_of(1)
-    scenarios = assess_budget_scenarios(graph)
-    # metadata_locator_requests counts a successful LOCATE; it is a distinct
-    # field from direct_http_body_fetches, never conflated.
-    assert scenarios.normal.metadata_locator_requests == 1
-    assert scenarios.normal.direct_http_body_fetches == 1
-
-
-# --- requirement 8: hard cap, priority selection, bounded degradation ------
-def test_degraded_never_exceeds_the_hard_cap():
-    graph = _graph_of(10)  # 10 independent targets, each needing a fallback under DEGRADED
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.web_search_locator_uses <= MAX_WEB_SEARCH_USES
-    assert scenarios.degraded.executed_web_search_count == MAX_WEB_SEARCH_USES
-
-
-def test_worst_never_exceeds_the_hard_cap_either():
-    graph = _graph_of(10)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.worst.web_search_locator_uses <= MAX_WEB_SEARCH_USES
-
-
-def test_fourth_and_beyond_targets_are_recorded_unexecuted_not_deleted():
-    graph = _graph_of(5)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.unexecuted_web_search_count == 5 - MAX_WEB_SEARCH_USES
-    assert len(graph.targets) == 5  # nothing removed from the graph itself
-
-
-def test_blocking_unexecuted_is_reported_when_a_blocking_target_misses_the_cap():
-    # 5 blocking targets compete for only 3 slots.
-    graph = _graph_of(5, domain=ResearchDomain.REGULATORY, blocking=True)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.blocking_unexecuted_count == 2
-
-
-def test_completion_is_required_for_blocking_not_just_reduced_count():
-    graph = _graph_of(5, domain=ResearchDomain.REGULATORY, blocking=True)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
-
-
-def test_non_blocking_incompleteness_is_incomplete_not_blocked():
-    graph = _graph_of(5, domain=ResearchDomain.CATALYST, blocking=False)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.blocking_unexecuted_count == 0
-    assert scenarios.degraded.research_status is ResearchStatus.INCOMPLETE
-
-
-def test_degraded_and_worst_never_report_a_token_shortfall_they_deliberately_avoided():
-    """The bounded design never lets estimated_actual_high exceed the
-    discovery budget in the first place -- shortfall_tokens stays 0, by
-    construction, rather than reporting a huge number this module then
-    ignores."""
-    graph = _graph_of(50, domain=ResearchDomain.REGULATORY, blocking=True)
-    scenarios = assess_budget_scenarios(graph)
-    assert scenarios.degraded.shortfall_tokens == 0
-    assert scenarios.worst.shortfall_tokens == 0
-
-
-def test_priority_order_picks_blocking_regulatory_before_remaining_gaps():
-    blocking_parts = [_sec_style(i, domain=ResearchDomain.REGULATORY, blocking=True) for i in range(2)]
-    gap_parts = [_sec_style(i + 100, domain=ResearchDomain.CATALYST, blocking=False) for i in range(2)]
-    graph = SourceRoutingGraph(
-        requirements=tuple(p[0] for p in (*gap_parts, *blocking_parts)),  # declared in "wrong" order
-        targets=tuple(p[1] for p in (*gap_parts, *blocking_parts)),
-        steps=tuple(s for p in (*gap_parts, *blocking_parts) for s in p[2]),
+def test_blocking_non_public_requirement_is_reported_as_blocking_unresolved():
+    npa_step = AcquisitionStep(
+        step_id="npa", target_id="t_npa", step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NOT_PUBLICLY_AVAILABLE,
+        completion_condition=StepStatus.NOT_PUBLICLY_AVAILABLE,
     )
-    scenarios = assess_budget_scenarios(graph)
-    # Only 4 total candidates, well within the cap of 3 minus... exactly 4
-    # candidates but cap=3: blocking ones (2) must both be selected before
-    # any gap one.
-    assert scenarios.degraded.blocking_unexecuted_count == 0
-    assert scenarios.degraded.executed_web_search_count == MAX_WEB_SEARCH_USES
+    requirement = EvidenceRequirement(
+        requirement_id="req_npa", serves_legacy_need_ids=("synthetic_npa",),
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True,
+    )
+    target = AcquisitionTarget(
+        target_id="t_npa", target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
+        required_step_ids=("npa",), serves_requirement_ids=("req_npa",),
+    )
+    graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(npa_step,))
+    projections = assess_simulation_projections(graph)
+    assert projections.current_implementation_only.blocking_unresolved_requirements == 1
 
 
-# --- split/retry never reduces the total ------------------------------------
+# --- scheduled overrun vs. full-completion gap ------------------------------
+def test_scheduled_overrun_is_zero_and_full_completion_gap_is_positive_when_capped():
+    graph = _graph_of(10)  # 10 independent web-fallback-needing targets
+    projections = assess_simulation_projections(graph)
+    degraded = projections.direct_failures
+    assert degraded.scheduled_budget_overrun_tokens == 0
+    assert degraded.budget_gap_to_full_completion_high > 0
+    assert degraded.unserved_web_search_uses == 10 - MAX_WEB_SEARCH_USES
+
+
+def test_degraded_holds_unserved_count_for_the_real_catalog():
+    projections = assess_simulation_projections()
+    degraded = projections.direct_failures
+    assert degraded.unserved_web_search_uses == 29
+    assert degraded.scheduled_budget_overrun_tokens == 0
+    assert degraded.budget_gap_to_full_completion_high > 0
+
+
+def test_worst_case_matches_direct_failures_shape_on_this_linear_catalog():
+    projections = assess_simulation_projections()
+    assert projections.worst_case.unserved_web_search_uses == projections.direct_failures.unserved_web_search_uses
+
+
+# --- real catalog: 49/31/18-adjacent invariants and honesty -----------------
+def test_real_catalog_current_implementation_only_never_claims_full_completion():
+    projections = assess_simulation_projections()
+    current = projections.current_implementation_only
+    assert current.incomplete_targets > 0
+    assert current.plan_status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+    assert current.blocking_unresolved_requirements == 6
+
+
+def test_real_catalog_aspirational_projection_still_has_incomplete_targets():
+    """Even the BEST-case design projection has 6 incomplete targets -- the
+    FDA regulator-confirmation ones, which can never be "acquired" by
+    construction (Phase 2.7 requirement 5), regardless of implementation."""
+    projections = assess_simulation_projections()
+    aspirational = projections.assume_implemented_routes_succeed
+    assert aspirational.incomplete_targets == 6
+
+
 def test_repeated_computation_is_stable():
-    first = assess_budget_scenarios()
-    second = assess_budget_scenarios()
-    assert first.normal.estimated_actual_high == second.normal.estimated_actual_high
-    assert first.degraded.executed_web_search_count == second.degraded.executed_web_search_count
-
-
-# --- the real catalog, reported honestly -------------------------------------
-def test_real_catalog_normal_scenario_is_now_actually_complete():
-    scenarios = assess_budget_scenarios()
-    assert scenarios.normal.web_search_locator_uses <= MAX_WEB_SEARCH_USES
-    assert scenarios.normal.estimated_actual_high <= 60_000
-    assert scenarios.normal.incomplete_targets == 0
-    assert scenarios.normal.direct_http_body_fetches > 0
-    assert scenarios.normal_meets_safety_gate is True
-    assert scenarios.normal.research_status.value == "COMPLETE"
-
-
-def test_real_catalog_degraded_and_worst_are_bounded_and_blocked():
-    scenarios = assess_budget_scenarios()
-    assert scenarios.degraded.executed_web_search_count == MAX_WEB_SEARCH_USES
-    assert scenarios.worst.executed_web_search_count == MAX_WEB_SEARCH_USES
-    assert scenarios.degraded.shortfall_tokens == 0
-    assert scenarios.degraded.blocking_unexecuted_count > 0
-    assert scenarios.degraded.research_status.value == "BLOCKED_PENDING_VERIFICATION"
+    first = assess_simulation_projections()
+    second = assess_simulation_projections()
+    assert first.direct_failures.unserved_web_search_uses == second.direct_failures.unserved_web_search_uses
+    assert first.current_implementation_only.projected_direct_http_body_fetches == second.current_implementation_only.projected_direct_http_body_fetches

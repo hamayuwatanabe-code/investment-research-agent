@@ -103,6 +103,9 @@ class CoverageSummary:
     manual_verification_required: int
     skipped_due_to_budget: int
     skipped_due_to_direct_coverage: int
+    #: Phase 2.7 addition (additive): needs whose only acquisition path
+    #: requires an adapter not yet implemented in this repository.
+    not_implemented: int = 0
 
     def accounted_total(self) -> int:
         return (
@@ -114,6 +117,7 @@ class CoverageSummary:
             + self.manual_verification_required
             + self.skipped_due_to_budget
             + self.skipped_due_to_direct_coverage
+            + self.not_implemented
         )
 
     @property
@@ -138,4 +142,5 @@ def summarize_coverage(ledger: CoverageLedger, plan: AcquisitionPlan) -> Coverag
         manual_verification_required=c(AcquisitionStatus.MANUAL_VERIFICATION_REQUIRED),
         skipped_due_to_budget=c(AcquisitionStatus.SKIPPED_DUE_TO_BUDGET),
         skipped_due_to_direct_coverage=c(AcquisitionStatus.SKIPPED_DUE_TO_DIRECT_COVERAGE),
+        not_implemented=c(AcquisitionStatus.NOT_IMPLEMENTED),
     )

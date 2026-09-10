@@ -13,10 +13,14 @@ from __future__ import annotations
 from investment_research.research.acquisition_planning import AcquisitionMethod
 from investment_research.research.legacy_catalog import LEGACY_CATALOG, group_legacy_needs
 from investment_research.research.source_routing import (
+    ImplementationStatus,
+    PlanStatus,
     StepStatus,
     TargetKind,
+    compute_plan_status,
     is_target_complete,
     resolve_next_steps,
+    target_plan_status,
 )
 from investment_research.research.source_routing_catalog import (
     _ARCHETYPE_BY_KEY,
@@ -213,3 +217,57 @@ def test_building_graph_raises_if_a_real_group_is_left_unclassified(monkeypatch)
     except ValueError:
         raised = True
     assert raised
+
+
+# =========================== Phase 2.7: implementation status ==============
+def test_the_three_unimplemented_adapters_are_marked_not_implemented():
+    graph = build_source_routing_graph()
+    not_implemented_adapters = {
+        s.adapter_id
+        for s in graph.steps
+        if s.implementation_status is ImplementationStatus.NOT_IMPLEMENTED and s.adapter_id != "local_parser"
+    }
+    assert not_implemented_adapters == {"sec_exhibit_enumeration", "form4_xml_parser", "pubmed_europepmc"}
+
+
+def test_declaring_a_not_implemented_route_does_not_by_itself_make_the_target_infeasible():
+    """requirement 4's example: SEC exhibit enumeration is NOT_IMPLEMENTED,
+    but the web-search alternative exists, so the exhibit target stays
+    FEASIBLE (never blocked merely because ONE route is unimplemented when
+    another exists)."""
+    graph = build_source_routing_graph()
+    reqs = graph.requirements_for_need("bull_1")
+    exhibit_req = next(
+        r for r in reqs if graph.targets_for_requirement(r.requirement_id)[0].target_kind is TargetKind.SEC_EXHIBIT
+    )
+    target = graph.targets_for_requirement(exhibit_req.requirement_id)[0]
+    steps = graph.steps_for_target(target.target_id)
+    assert target_plan_status(target, steps) is PlanStatus.FEASIBLE
+
+
+def test_form4_and_literature_targets_are_feasible_via_web_fallback_despite_not_implemented_direct():
+    graph = build_source_routing_graph()
+    form4_req = graph.requirements_for_need("bear_12")[0]
+    form4_target = graph.targets_for_requirement(form4_req.requirement_id)[0]
+    assert target_plan_status(form4_target, graph.steps_for_target(form4_target.target_id)) is PlanStatus.FEASIBLE
+
+    lit_req = graph.requirements_for_need("bull_0")[0]
+    lit_target = graph.targets_for_requirement(lit_req.requirement_id)[0]
+    assert target_plan_status(lit_target, graph.steps_for_target(lit_target.target_id)) is PlanStatus.FEASIBLE
+
+
+def test_real_catalog_plan_status_is_feasible_with_blocking_gaps():
+    """The 6 fda_dual regulator-confirmation targets have no path to content
+    acquisition at all (by design, not by implementation gap), and each
+    serves a blocking requirement -- the aggregate PlanStatus reflects this
+    honestly rather than reporting plain FEASIBLE."""
+    graph = build_source_routing_graph()
+    status, blocking = compute_plan_status(graph)
+    assert status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+    assert blocking == 6
+
+
+def test_routing_coverage_counts_reports_implementation_split():
+    counts = routing_coverage_counts()
+    assert counts.not_implemented_steps == 8
+    assert counts.implemented_steps + counts.not_implemented_steps == counts.locate_steps + counts.fetch_steps + counts.parse_steps

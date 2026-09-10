@@ -57,6 +57,7 @@ from .source_routing import (
     AcquisitionTarget,
     EvidenceRequirement,
     FailurePolicy,
+    ImplementationStatus,
     RequestCostClass,
     SourceRoutingGraph,
     StepKind,
@@ -110,11 +111,17 @@ def _document_chain(
     direct_adapter: str,
     direct_authority: DocumentAuthority,
     direct_locate_completion: StepStatus = StepStatus.URL_RESOLVED,
+    direct_implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED,
 ) -> tuple[list[AcquisitionStep], tuple[str, ...], tuple[tuple[str, ...], ...]]:
     """LOCATE(direct) altOR LOCATE(web) -> FETCH(http, required) -> PARSE(required).
 
     Reaching only the locate stage -- by either path -- never completes the
-    target: FETCH and PARSE are both in ``required_step_ids``.
+    target: FETCH and PARSE are both in ``required_step_ids``. The Direct
+    locate's ``direct_implementation_status`` defaults IMPLEMENTED (the
+    genuinely-wired SEC EDGAR/ClinicalTrials collectors); callers using an
+    unimplemented adapter (SEC exhibit enumeration, Form 4 XML) must pass
+    NOT_IMPLEMENTED explicitly -- declaring the route is never itself a claim
+    that it runs (Phase 2.7 requirement 3).
     """
     l1, l2, f, p = f"step_{tag}_L1", f"step_{tag}_L2", f"step_{tag}_F", f"step_{tag}_P"
     steps = [
@@ -122,7 +129,7 @@ def _document_chain(
             step_id=l1, target_id=target_id, step_kind=StepKind.LOCATE,
             acquisition_method=direct_method, adapter_id=direct_adapter,
             authority=direct_authority, completion_condition=direct_locate_completion,
-            failure_policy=FailurePolicy.ALTERNATIVE,
+            failure_policy=FailurePolicy.ALTERNATIVE, implementation_status=direct_implementation_status,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.RATE_LIMITED,
         ),
         AcquisitionStep(
@@ -154,12 +161,15 @@ def _structured_or_web_chain(
     direct_method: AcquisitionMethod,
     direct_adapter: str,
     direct_authority: DocumentAuthority,
+    direct_implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED,
 ) -> tuple[list[AcquisitionStep], tuple[str, ...], tuple[tuple[str, ...], ...]]:
     """Direct structured fetch, OR (only if that fails) a full web-search
     locate -> fetch -> parse chain. Two alt-groups: an entry gate (which
     path to attempt) and a terminal gate (which path's own terminal step
     actually completed) -- a mid-chain step (e.g. a resolved URL with no
-    fetch yet) satisfies neither.
+    fetch yet) satisfies neither. ``direct_implementation_status`` defaults
+    IMPLEMENTED (ClinicalTrialsCollector); callers using an unimplemented
+    adapter (PubMed/Europe PMC) must pass NOT_IMPLEMENTED explicitly.
     """
     s1, sp = f"step_{tag}_S1", f"step_{tag}_SP"
     lw, fw, pw = f"step_{tag}_LW", f"step_{tag}_FW", f"step_{tag}_PW"
@@ -168,13 +178,14 @@ def _structured_or_web_chain(
             step_id=s1, target_id=target_id, step_kind=StepKind.FETCH,
             acquisition_method=direct_method, adapter_id=direct_adapter, authority=direct_authority,
             completion_condition=StepStatus.STRUCTURED_RECORD_RETRIEVED, failure_policy=FailurePolicy.ALTERNATIVE,
+            implementation_status=direct_implementation_status,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
         AcquisitionStep(
             step_id=sp, target_id=target_id, step_kind=StepKind.PARSE,
             acquisition_method=direct_method, adapter_id="local_parser",
             depends_on_step_ids=(s1,), completion_condition=StepStatus.REQUIRED_FIELDS_PARSED,
-            failure_policy=FailurePolicy.ALTERNATIVE,
+            failure_policy=FailurePolicy.ALTERNATIVE, implementation_status=direct_implementation_status,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
         AcquisitionStep(
@@ -284,6 +295,7 @@ def _sec_chain_with_exhibit(index, need_ids, domain, subject_scope, key) -> Sour
         exhibit_tag, exhibit_target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="sec_exhibit_enumeration", direct_authority=DocumentAuthority.STATUTORY_FILING,
         direct_locate_completion=StepStatus.URL_RESOLVED,
+        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
     )
     exhibit_requirement = EvidenceRequirement(
         requirement_id=exhibit_req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -372,6 +384,7 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     steps, required, alt_groups = _structured_or_web_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="pubmed_europepmc", direct_authority=DocumentAuthority.INDEPENDENT,
+        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -391,6 +404,7 @@ def _form4(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="form4_xml_parser", direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -468,6 +482,8 @@ class RoutingCoverageCounts:
     anthropic_web_fetch_steps: int
     not_publicly_available_steps: int
     manual_verification_required_steps: int
+    implemented_steps: int
+    not_implemented_steps: int
 
 
 def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingCoverageCounts:
@@ -478,6 +494,9 @@ def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingC
 
     def by_kind(kind: StepKind) -> int:
         return sum(1 for s in graph.steps if s.step_kind is kind)
+
+    def by_implementation(status: ImplementationStatus) -> int:
+        return sum(1 for s in graph.steps if s.implementation_status is status)
 
     return RoutingCoverageCounts(
         legacy_needs=len(LEGACY_CATALOG),
@@ -493,5 +512,7 @@ def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingC
         web_search_discovery_steps=by_method(AcquisitionMethod.WEB_SEARCH_DISCOVERY),
         anthropic_web_fetch_steps=by_method(AcquisitionMethod.ANTHROPIC_WEB_FETCH),
         not_publicly_available_steps=by_method(AcquisitionMethod.NOT_PUBLICLY_AVAILABLE),
+        implemented_steps=by_implementation(ImplementationStatus.IMPLEMENTED),
+        not_implemented_steps=by_implementation(ImplementationStatus.NOT_IMPLEMENTED),
         manual_verification_required_steps=by_method(AcquisitionMethod.MANUAL_VERIFICATION_REQUIRED),
     )

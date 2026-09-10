@@ -5,19 +5,30 @@ No network, no execution -- these feed hypothetical outcome maps directly.
 
 from __future__ import annotations
 
+import dataclasses
+
 from investment_research.research.acquisition_planning import AcquisitionMethod
 from investment_research.research.checks import SubjectScope
 from investment_research.research.source_routing import (
     AcquisitionStep,
     AcquisitionTarget,
+    EvidenceRequirement,
     FailurePolicy,
+    ImplementationStatus,
+    PlanStatus,
     RequirementPriorityTier,
+    SimulationAssumption,
+    SourceRoutingGraph,
     StepKind,
     StepStatus,
+    TargetAcquisitionOutcome,
     TargetKind,
+    compute_plan_status,
     is_target_complete,
     priority_tier_for,
     resolve_next_steps,
+    target_acquisition_outcome,
+    target_plan_status,
 )
 from investment_research.schemas.enums import ResearchDomain
 
@@ -141,7 +152,10 @@ def test_downstream_step_depends_on_the_specific_alternative_it_cites():
     assert "sp" not in [s.step_id for s in next_steps]
 
 
-def test_not_publicly_available_single_step_target_completes_without_search():
+def test_not_publicly_available_single_step_target_never_reaches_search_and_never_completes():
+    """Phase 2.7 correction: NOT_PUBLICLY_AVAILABLE is a conclusive
+    non-acquisition resolution, never a completion. It still terminates the
+    chain (nothing further is offered) and never sends to web search."""
     target_id = "t3"
     step = AcquisitionStep(
         step_id="npa", target_id=target_id, step_kind=StepKind.LOCATE,
@@ -151,9 +165,10 @@ def test_not_publicly_available_single_step_target_completes_without_search():
     target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE, required_step_ids=("npa",))
     assert [s.step_id for s in resolve_next_steps(target, [step], {})] == ["npa"]
     outcomes = {"npa": StepStatus.NOT_PUBLICLY_AVAILABLE}
-    assert is_target_complete(target, [step], outcomes)
+    assert not is_target_complete(target, [step], outcomes)
     assert resolve_next_steps(target, [step], outcomes) == []
     assert not step.acquisition_method.requires_web_search_budget
+    assert step.never_constitutes_content_acquisition
 
 
 def test_an_undeclared_outcome_is_conservatively_treated_as_a_dead_end():
@@ -189,3 +204,116 @@ def test_subject_scope_import_smoke():
     # SubjectScope is reused unmodified from checks.py in this new module --
     # confirm the import path still resolves.
     assert SubjectScope.COMPANY.value == "COMPANY"
+
+
+# =========================== Phase 2.7 additions ============================
+def _npa_target(target_id: str = "npa_target"):
+    step = AcquisitionStep(
+        step_id="npa", target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NOT_PUBLICLY_AVAILABLE,
+        completion_condition=StepStatus.NOT_PUBLICLY_AVAILABLE,
+    )
+    target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE, required_step_ids=("npa",))
+    return target, [step]
+
+
+def test_target_acquisition_outcome_not_attempted_when_no_outcomes_recorded():
+    target, steps = _sec_style_target()
+    assert target_acquisition_outcome(target, steps, {}) is TargetAcquisitionOutcome.NOT_ATTEMPTED
+
+
+def test_target_acquisition_outcome_in_progress_when_only_locate_succeeded():
+    target, steps = _sec_style_target()
+    outcomes = {"l1": StepStatus.URL_RESOLVED}
+    assert target_acquisition_outcome(target, steps, outcomes) is TargetAcquisitionOutcome.IN_PROGRESS
+
+
+def test_target_acquisition_outcome_acquired_only_after_full_chain():
+    target, steps = _sec_style_target()
+    outcomes = {"l1": StepStatus.URL_RESOLVED, "f": StepStatus.BODY_FETCHED, "p": StepStatus.PARSED}
+    assert target_acquisition_outcome(target, steps, outcomes) is TargetAcquisitionOutcome.ACQUIRED
+
+
+def test_target_acquisition_outcome_exhausted_not_public_never_acquired():
+    target, steps = _npa_target()
+    outcomes = {"npa": StepStatus.NOT_PUBLICLY_AVAILABLE}
+    outcome = target_acquisition_outcome(target, steps, outcomes)
+    assert outcome is TargetAcquisitionOutcome.ACQUISITION_EXHAUSTED_NOT_PUBLIC
+    assert outcome is not TargetAcquisitionOutcome.ACQUIRED
+
+
+def test_target_acquisition_outcome_blocked_by_budget():
+    target, steps = _sec_style_target()
+    outcomes = {"l1": StepStatus.ZERO_RESULTS, "l2": StepStatus.SKIPPED_DUE_TO_BUDGET}
+    assert target_acquisition_outcome(target, steps, outcomes) is TargetAcquisitionOutcome.BLOCKED_BY_BUDGET
+
+
+def test_target_acquisition_outcome_not_implemented_when_exhausted_via_unimplemented_step():
+    target_id = "t_ni"
+    l1 = AcquisitionStep(
+        step_id="l1", target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
+        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.REQUIRED,
+        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+    )
+    target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, required_step_ids=("l1",))
+    outcomes = {"l1": StepStatus.FAILED}
+    assert target_acquisition_outcome(target, [l1], outcomes) is TargetAcquisitionOutcome.NOT_IMPLEMENTED
+
+
+# --- ImplementationStatus / PlanStatus --------------------------------------
+def test_target_plan_status_infeasible_when_required_step_not_implemented_with_no_alternative():
+    target_id = "t"
+    step = AcquisitionStep(
+        step_id="s", target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
+        completion_condition=StepStatus.URL_RESOLVED,
+        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+    )
+    target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, required_step_ids=("s",))
+    assert target_plan_status(target, [step]) is PlanStatus.INFEASIBLE
+
+
+def test_target_plan_status_feasible_when_alternative_exists():
+    target_id = "t"
+    unimplemented = AcquisitionStep(
+        step_id="s1", target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
+        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+    )
+    web = AcquisitionStep(
+        step_id="s2", target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY,
+        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+    )
+    target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, alternative_step_groups=(("s1", "s2"),))
+    assert target_plan_status(target, [unimplemented, web]) is PlanStatus.FEASIBLE
+
+
+def test_target_plan_status_infeasible_for_not_publicly_available_only_target():
+    target, steps = _npa_target()
+    # Declaring a route is IMPLEMENTED-trivial here, but the method itself
+    # never constitutes content acquisition -- INFEASIBLE regardless.
+    assert target_plan_status(target, steps) is PlanStatus.INFEASIBLE
+
+
+def test_compute_plan_status_reports_blocking_gaps_for_non_public_blocking_requirement():
+    target, steps = _npa_target()
+    requirement = EvidenceRequirement(
+        requirement_id="req_npa", serves_legacy_need_ids=("synthetic",),
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY,
+        blocking_if_unresolved=True,
+    )
+    target = dataclasses.replace(target, serves_requirement_ids=("req_npa",))
+    graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=steps)
+    status, blocking = compute_plan_status(graph)
+    assert status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+    assert blocking == 1
+
+
+def test_simulation_assumption_respects_implementation_status_flag():
+    assert SimulationAssumption.ASSUME_IMPLEMENTED_ROUTES_SUCCEED.respects_implementation_status is False
+    assert SimulationAssumption.CURRENT_IMPLEMENTATION_ONLY.respects_implementation_status is True
+    assert SimulationAssumption.DIRECT_FAILURES.respects_implementation_status is True
+    assert SimulationAssumption.WORST_CASE.respects_implementation_status is True

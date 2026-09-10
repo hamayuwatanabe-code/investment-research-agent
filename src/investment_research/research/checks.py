@@ -124,6 +124,14 @@ class AcquisitionStatus(str, Enum):
     #: provider or the document.
     SKIPPED_DUE_TO_BUDGET = "SKIPPED_DUE_TO_BUDGET"
     SKIPPED_DUE_TO_DIRECT_COVERAGE = "SKIPPED_DUE_TO_DIRECT_COVERAGE"
+    #: Phase 2.7 addition (additive -- no existing value renamed or removed).
+    #: The only path that could have acquired this need's evidence requires
+    #: an adapter that does not exist as working code in this repository yet
+    #: (e.g. SEC exhibit enumeration, Form 4 XML parsing, PubMed/Europe PMC).
+    #: Distinct from FAILED (a real attempt that errored) and from
+    #: UNSEARCHED (nothing was ever attempted) -- this need was never
+    #: attemptable at all under the current implementation.
+    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
 
 @dataclass(frozen=True)
