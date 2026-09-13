@@ -9,6 +9,7 @@
 data/research.db
 data/research.db-*
 data/cache/
+data/live_smoke/
 logs/*.jsonl
 logs/*.log
 reports/

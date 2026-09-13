@@ -78,7 +78,13 @@ class Settings:
     stale_after_days: int = 400
 
     def secret_values(self) -> list[str]:
-        """Every secret this process knows about, for log redaction."""
+        """Every secret this process knows about, for log redaction.
+
+        ``sec_user_agent`` is included because SEC's own convention is to
+        embed a real contact email address in it -- personal information,
+        not merely an API key, but exactly the kind of value that must never
+        reach a log line uncensored.
+        """
         return [
             v
             for v in (
@@ -86,6 +92,7 @@ class Settings:
                 self.tavily_api_key,
                 self.brave_api_key,
                 self.polygon_api_key,
+                self.sec_user_agent,
             )
             if v and len(v) >= 8
         ]
