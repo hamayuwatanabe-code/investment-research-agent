@@ -111,6 +111,88 @@ def test_secret_values_includes_sec_user_agent_for_defense_in_depth(monkeypatch)
     assert _REAL_SECRET_LOOKING_AGENT in settings.secret_values()
 
 
+# --- explicit user_agent vs. ambient environment (regression) ---------------
+#
+# Reproduces a real failure: on a machine where IRA_SEC_USER_AGENT is
+# genuinely and validly set (e.g. a developer's own Mac), a test that passes
+# user_agent=None/""/placeholder EXPLICITLY must still refuse -- it must
+# never silently fall back to that valid ambient value. Only OMITTING the
+# parameter entirely may resolve from the environment. Every test below
+# monkeypatches a valid ambient value on purpose, so these fail loudly if
+# the distinction between "omitted" and "explicitly invalid" ever collapses
+# again, regardless of what is or isn't set in whatever environment runs
+# the suite.
+_AMBIENT_VALID_AGENT = "investment-research-agent ambient-mac-contact@example.test"
+
+
+def test_explicit_none_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live.run_live_smoke(CIK, user_agent=None, http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_placeholder_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live.run_live_smoke(CIK, user_agent=live.PLACEHOLDER_SEC_USER_AGENT, http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_empty_string_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live.run_live_smoke(CIK, user_agent="", http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_whitespace_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live.run_live_smoke(CIK, user_agent="   ", http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_omitted_user_agent_resolves_from_ambient_env(monkeypatch):
+    """Only omitting the parameter entirely -- the shape ``main()`` uses
+    after it has already validated the ambient value itself -- may resolve
+    from the real environment. Uses ``FakeHttpClient`` (never the real
+    transport) to prove the resolved value actually let the run past the
+    refusal gate."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, http_client=http)
+    assert not report.refused
+    assert report.request_count > 0
+
+
+def test_explicit_valid_value_takes_priority_over_ambient_env(monkeypatch):
+    """An explicitly-passed valid value must win over a DIFFERENT ambient
+    value -- proven by setting the ambient env to the placeholder itself:
+    if the explicit value were ever ignored in favour of the ambient one,
+    this would refuse instead of proceeding."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", live.PLACEHOLDER_SEC_USER_AGENT)
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+    assert not report.refused
+    assert report.request_count > 0
+
+
+def test_no_leak_of_ambient_user_agent_when_explicit_value_refuses(monkeypatch):
+    """Even though a real, valid ambient value exists, it must never appear
+    in the printed report of a run that was refused because of a
+    DIFFERENT, explicitly-passed invalid value."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live.run_live_smoke(CIK, user_agent=None, http_client=_PoisonHttpClient())
+    printed = live.format_report_for_print(report, secrets=[_AMBIENT_VALID_AGENT, _REAL_SECRET_LOOKING_AGENT])
+    assert _AMBIENT_VALID_AGENT not in printed
+    assert "ambient-mac-contact@example.test" not in printed
+
+
 # --- full offline orchestration (FakeHttpClient, real-format fixtures) -----
 def test_full_orchestration_against_fake_transport_mirrors_phase3b_fixtures():
     http = FakeHttpClient(responses=fx.default_responses())

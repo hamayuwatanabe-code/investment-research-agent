@@ -152,6 +152,23 @@ def _valid_user_agent_or_none(value: str | None) -> str | None:
     return stripped
 
 
+class _Unset:
+    """Sentinel type for ``run_live_smoke``'s ``user_agent`` parameter --
+    distinguishes "the caller didn't pass anything" (resolve from the real
+    environment) from "the caller explicitly passed ``None``/blank/the
+    placeholder" (validate that exact value, never silently falling back to
+    the ambient environment instead). ``None`` cannot serve as that
+    "omitted" marker itself, because ``None`` is also a value a caller can
+    legitimately pass on purpose (e.g. a test proving a resolved-to-None
+    value is refused)."""
+
+    def __repr__(self) -> str:
+        return "<UNSET>"
+
+
+_UNSET = _Unset()
+
+
 def resolve_user_agent(env: dict[str, str] | None = None) -> str | None:
     """The configured SEC User-Agent, or ``None`` if it is unset, blank, or
     still the built-in placeholder. Never logs or returns anything when the
@@ -528,15 +545,30 @@ def _collect_transport_diagnostics(client: Any, report: LiveSmokeReport) -> None
 def run_live_smoke(
     cik: int = DEFAULT_APPLE_CIK,
     *,
-    user_agent: str | None = None,
+    user_agent: str | None | _Unset = _UNSET,
     http_client: Any | None = None,
     out_dir: Path | None = None,
     exhibit_priority_keywords: tuple[str, ...] = DEFAULT_EXHIBIT_PRIORITY_KEYWORDS,
 ) -> LiveSmokeReport:
-    """Run the control-filing smoke test. ``user_agent``/``http_client`` are
-    injectable for offline testing only -- production callers (``scripts/
-    sec_live_smoke.py``) leave both as ``None`` so this resolves the real
-    environment variable and constructs a real, host-allowlisted client.
+    """Run the control-filing smoke test. ``http_client`` is injectable for
+    offline testing only -- production callers (``scripts/sec_live_smoke.py``)
+    leave it as ``None`` so this constructs a real, host-allowlisted client.
+
+    ``user_agent`` has three distinct states, not two:
+
+    * omitted entirely (the default, ``_UNSET``) -- production behaviour:
+      resolve from the real ``IRA_SEC_USER_AGENT`` environment variable.
+    * explicitly passed as ``None``, blank, or the built-in placeholder --
+      validated as that exact value and refused if invalid, WITHOUT ever
+      falling back to the ambient environment. This matters because a
+      caller (a test, deliberately) may want to prove that an
+      already-resolved-to-invalid value is refused, even when the real
+      environment this process happens to be running in has a perfectly
+      valid ``IRA_SEC_USER_AGENT`` set (e.g. a human running this on their
+      own Mac, where the tests must not depend on that env var being
+      unset to pass).
+    * explicitly passed as a real value -- used as-is, taking priority
+      over the ambient environment.
 
     Never called from Pipeline.run(); never makes an Anthropic/LLM/Web
     Search call (report.anthropic_api_calls/web_search_calls/
@@ -546,7 +578,10 @@ def run_live_smoke(
     plan = build_plan(cik)
     report = LiveSmokeReport(plan=plan)
 
-    resolved_user_agent = _valid_user_agent_or_none(user_agent) if user_agent is not None else resolve_user_agent()
+    if isinstance(user_agent, _Unset):
+        resolved_user_agent = resolve_user_agent()
+    else:
+        resolved_user_agent = _valid_user_agent_or_none(user_agent)
     if resolved_user_agent is None:
         report.refused_reason = (
             "IRA_SEC_USER_AGENT is unset, blank, or still the built-in placeholder -- "
@@ -761,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         # at least the submissions GET is made) counts as the one run.
         return 1
 
-    report = run_live_smoke(args.cik, out_dir=out_dir)
+    report = run_live_smoke(args.cik, user_agent=user_agent, out_dir=out_dir)
     print()
     print(format_report_for_print(report, secrets=secrets))
     _write_marker(marker_path, refused=report.refused)
