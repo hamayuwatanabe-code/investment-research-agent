@@ -1,0 +1,39 @@
+{
+  "cik": "9999999",
+  "entityType": "operating",
+  "sic": "2836",
+  "sicDescription": "Biological Products, (No Diagnostic Substances)",
+  "name": "Generic Biotech Holdings, Inc.",
+  "tickers": ["TESTCO"],
+  "exchanges": ["NASDAQ"],
+  "ein": "990000000",
+  "stateOfIncorporation": "DE",
+  "fiscalYearEnd": "1231",
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0009999999-26-000123",
+        "0009999999-26-000098",
+        "0009999999-25-000201"
+      ],
+      "filingDate": ["2026-03-02", "2026-01-15", "2025-11-10"],
+      "reportDate": ["2025-12-31", "", ""],
+      "acceptanceDateTime": [
+        "2026-03-02T16:31:22.000Z",
+        "2026-01-15T08:02:11.000Z",
+        "2025-11-10T07:45:00.000Z"
+      ],
+      "act": ["34", "34", "33"],
+      "form": ["10-K", "8-K", "S-1"],
+      "fileNumber": ["001-99999", "001-99999", "333-99999"],
+      "filmNumber": ["26600123", "26600098", "25700201"],
+      "items": ["", "8.01", ""],
+      "size": [4821012, 812345, 2011234],
+      "isXBRL": [1, 0, 0],
+      "isInlineXBRL": [1, 0, 0],
+      "primaryDocument": ["testco-20251231.htm", "testco-8k.htm", "testco-s1.htm"],
+      "primaryDocDescription": ["10-K", "8-K", "S-1"]
+    },
+    "files": []
+  }
+}

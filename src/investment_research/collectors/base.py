@@ -34,6 +34,13 @@ class CollectionResult:
     #: this flag exists purely to make that determination explicit and
     #: auditable, not to change what "degraded" means generically.
     zero_results: bool = False
+    #: Phase 3B requirement 8: how many RawFacts extraction produced BEFORE
+    #: deduplication, for a collector that extracts from documents (0 for
+    #: every other collector, which never runs the extraction/dedup path at
+    #: all -- never a guess). ``len(raw_facts)`` is the AFTER count; the two
+    #: together let a caller see the dedup step actually bounded output,
+    #: rather than inferring it from a single number.
+    raw_fact_count_before_dedup: int = 0
 
     @property
     def ok(self) -> bool:

@@ -110,6 +110,27 @@ class ImplementationStatus(str, Enum):
     fake transport -- they do not require PIPELINE_WIRED first (pipeline
     connection is explicitly forbidden in Phase 3A), so a step can be
     EXECUTOR_WIRED and OFFLINE_VERIFIED while still not PIPELINE_WIRED.
+
+    Phase 3B requirement 6 (option A, ordered maturity): every level implies
+    every lower-numbered capability. ``rank`` is the single source of truth
+    for this, and it is monotonic on purpose -- DISABLED sits *below*
+    DECLARED (rank -1) so that a plain ``rank >= threshold`` comparison
+    already excludes it everywhere, with no separate special case needed.
+    ``is_executor_ready``/``has_runnable_code`` (below) are both derived
+    from ``rank`` alone; never re-implement either as a hand-picked tuple of
+    member names -- that is exactly the shape of bug this requirement exists
+    to catch (a hand-picked tuple silently omitting a higher-ranked member,
+    e.g. PIPELINE_WIRED, produces a downstream contradiction: "wired into
+    the real pipeline" would then read as *less* capable than
+    "wired into a test executor", which is never true). Every consumer of
+    this enum -- ``target_plan_status``/``compute_plan_status`` (source_
+    routing.py), ``_resolve_non_search_outcome``/``_implementation_agnostic_
+    view`` (routing_budget_scenarios.py), and ``routing_coverage_counts``
+    (source_routing_catalog.py) -- reads capability exclusively through
+    these two properties, never through a raw ``is``/``==`` comparison
+    against a specific member, so promoting or demoting a step's status
+    never produces a contradiction between "could this run" and "how is
+    this counted".
     """
 
     #: The route exists only as catalog data -- no code backs it at all.
@@ -150,12 +171,16 @@ class ImplementationStatus(str, Enum):
     @property
     def is_executor_ready(self) -> bool:
         """Whether an ``AcquisitionExecutor`` could actually invoke this step
-        today, in isolation (never a claim about pipeline connection)."""
-        return self in (
-            ImplementationStatus.EXECUTOR_WIRED,
-            ImplementationStatus.OFFLINE_VERIFIED,
-            ImplementationStatus.LIVE_VERIFIED,
-        )
+        today, in isolation (never a claim about pipeline connection).
+
+        Rank-based, not a hand-picked member list: EXECUTOR_WIRED and
+        everything ranked above it (PIPELINE_WIRED, OFFLINE_VERIFIED,
+        LIVE_VERIFIED) all qualify -- a step the real production pipeline
+        already calls is, at minimum, exactly as executor-ready as one only
+        wired to a test executor; it is never *less* capable. DISABLED is
+        excluded automatically (its rank is -1), never via a special case.
+        """
+        return self.rank >= ImplementationStatus.EXECUTOR_WIRED.rank
 
     @property
     def has_runnable_code(self) -> bool:
@@ -164,8 +189,31 @@ class ImplementationStatus(str, Enum):
         rather than through an ``AcquisitionExecutor``. Weaker than
         ``is_executor_ready``: a primitive or adapter can exist without any
         executor wiring at all. False only for DECLARED (nothing behind it)
-        and DISABLED (deliberately switched off)."""
+        and DISABLED (deliberately switched off) -- both excluded by the
+        same rank comparison, not by name."""
         return self.rank >= ImplementationStatus.PRIMITIVE_AVAILABLE.rank
+
+    @property
+    def has_dedicated_adapter(self) -> bool:
+        """Whether a source-specific adapter exists as code -- ADAPTER_
+        IMPLEMENTED and everything ranked above it. False for DECLARED and
+        PRIMITIVE_AVAILABLE: a generic primitive existing is never, by
+        itself, a claim that a dedicated adapter does."""
+        return self.rank >= ImplementationStatus.ADAPTER_IMPLEMENTED.rank
+
+    @property
+    def is_pipeline_wired(self) -> bool:
+        """Whether the real production ``Pipeline.run()`` calls this step --
+        PIPELINE_WIRED and everything ranked above it. Never true anywhere
+        in this repository yet (Phase 3A/3B forbid pipeline connection)."""
+        return self.rank >= ImplementationStatus.PIPELINE_WIRED.rank
+
+    @property
+    def is_live_verified(self) -> bool:
+        """Whether this step was checked against the real site/API. Never
+        true in this environment -- no live network, no Live API credential
+        reaches this code."""
+        return self.rank >= ImplementationStatus.LIVE_VERIFIED.rank
 
 
 class PlanStatus(str, Enum):

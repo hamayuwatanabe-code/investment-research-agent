@@ -69,24 +69,52 @@ RULES: tuple[ExtractionRule, ...] = (
     ExtractionRule(
         "regulator_endpoint_not_accepted",
         FactCategory.REGULATORY,
-        # Phase 3A requirement 8: a GENERIC rule for "the regulator did not
-        # consider the proposed endpoint appropriate/adequate/sufficient to
-        # establish effectiveness/efficacy" -- the class of statement that
-        # invalidated the real-world case this system was built to catch.
+        # Phase 3A requirement 8 / Phase 3B requirement 7: a GENERIC rule for
+        # "the regulator did not consider the proposed endpoint appropriate/
+        # adequate/sufficient to establish/demonstrate effectiveness/
+        # efficacy/approval" -- the class of statement that invalidated the
+        # real-world case this system was built to catch.
         # ``endpoint_not_sufficient`` above already fires when the negation
         # comes AFTER "endpoint" in the sentence ("the endpoint ... is not
         # sufficient to demonstrate ..."); it misses the equally natural
         # "did not consider the endpoint appropriate to establish
-        # effectiveness" phrasing, where the negation precedes "endpoint".
-        # Two order-independent branches cover both directions. No drug,
-        # company, or endpoint name appears in this pattern -- "endpoint" is
-        # the only domain anchor, exactly as generic as the existing rule.
+        # effectiveness" phrasing (negation precedes "endpoint"), and
+        # neither rule covers the plain "would not support approval"
+        # construction, which has no appropriate/adequate/sufficient
+        # adjective at all. Three order-independent branches cover all
+        # three shapes. No drug, company, or endpoint name appears anywhere
+        # in this pattern -- "endpoint" is the only domain anchor, exactly
+        # as generic as the existing rule.
+        #
+        # Two exclusions, anchored to the whole sentence via ``^`` (Phase 3B
+        # requirement 7's negative examples), keep this from over-firing:
+        # * ``analyst`` anywhere in the sentence -- this rule exists to
+        #   capture a company/regulator statement, never third-party
+        #   analyst commentary (that belongs to ANALYST_OPINION, not a
+        #   REGULATORY company/regulator claim).
+        # * an "if ... were ... to ..." hypothetical/subjunctive construction
+        #   -- a conditional scenario is not a statement that anything
+        #   actually happened.
+        # NOT attempted here, and not this rule's job (Phase 3B report's
+        # known limitations): detecting that a sentence is a QUOTATION of
+        # separately-dated prior text, and telling a CURRENT-program
+        # statement apart from an unrelated historical program's -- the
+        # latter is handled downstream by ``scoring/program_resolution.py``,
+        # never by the extraction layer (CLAUDE.md: never let an unrelated
+        # historical program's finding kill the current program).
         _rx(
-            r"\bendpoint\b[^.]*?\b(?:not|never|no longer|does not consider|did not consider)\b"
-            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\bestablish\b[^.]*?\b(?:effectiveness|efficacy)\b"
+            r"^(?!.*\banalyst\b)(?!.*\bif\b[^.]*\bwere\b[^.]*\bto\b)"
+            r"(?:"
+            r".*?\bendpoint\b[^.]*?\b(?:not|never|no longer|does not consider|did not consider)\b"
+            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\b(?:establish|demonstrate|support)\b"
+            r"[^.]*?\b(?:effectiveness|efficacy|approval)\b"
             r"|"
-            r"\b(?:not|never|no longer|does not consider|did not consider)\b[^.]*?\bendpoint\b"
-            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\bestablish\b[^.]*?\b(?:effectiveness|efficacy)\b"
+            r".*?\b(?:not|never|no longer|does not consider|did not consider)\b[^.]*?\bendpoint\b"
+            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\b(?:establish|demonstrate|support)\b"
+            r"[^.]*?\b(?:effectiveness|efficacy|approval)\b"
+            r"|"
+            r".*?\bendpoint\b[^.]*?\bnot\b[^.]*?\bsupport\b[^.]*?\b(?:approval|effectiveness|efficacy)\b"
+            r")"
         ),
     ),
     ExtractionRule(
@@ -323,6 +351,22 @@ def extract_documents(
     documents: Sequence[Document], ticker: str, *, target_tokens: int = 400
 ) -> tuple[list[RawFact], list[Chunk]]:
     """Chunk each document and extract facts from every chunk."""
+    facts, chunks, _before, _after = extract_documents_with_dedup_counts(
+        documents, ticker, target_tokens=target_tokens
+    )
+    return facts, chunks
+
+
+def extract_documents_with_dedup_counts(
+    documents: Sequence[Document], ticker: str, *, target_tokens: int = 400
+) -> tuple[list[RawFact], list[Chunk], int, int]:
+    """Same as :func:`extract_documents`, plus the raw-fact count before and
+    after deduplication (Phase 3B requirement 8) -- so a caller can see, and
+    a test can assert, that a sentence matched by several rules (or the same
+    rule matched twice via overlapping chunks) collapses to a bounded number
+    of facts rather than growing without limit, without having to guess at
+    it from ``len(facts)`` alone.
+    """
     all_facts: list[RawFact] = []
     all_chunks: list[Chunk] = []
     for document in documents:
@@ -330,7 +374,8 @@ def extract_documents(
         all_chunks.extend(chunks)
         for chunk in chunks:
             all_facts.extend(extract_from_chunk(chunk, ticker))
-    return _deduplicate(all_facts), all_chunks
+    deduplicated = _deduplicate(all_facts)
+    return deduplicated, all_chunks, len(all_facts), len(deduplicated)
 
 
 def _deduplicate(facts: Iterable[RawFact]) -> list[RawFact]:
@@ -373,9 +418,10 @@ class DocumentCollector:
             out.errors.append(f"no documents available for {ticker}")
             return out
 
-        facts, chunks = extract_documents(self.documents, ticker)
+        facts, chunks, before_dedup, after_dedup = extract_documents_with_dedup_counts(self.documents, ticker)
         self.chunks = chunks
         out.raw_facts.extend(facts)
+        out.raw_fact_count_before_dedup = before_dedup
         out.sources.extend(_source_for(document) for document in self.documents)
 
         summary_only = [
@@ -389,5 +435,8 @@ class DocumentCollector:
                 "rather than the source text; claims drawn from them are marked for "
                 "primary-source escalation"
             )
-        out.notes.append(f"chunked into {len(chunks)} chunks; {len(facts)} candidate facts")
+        out.notes.append(
+            f"chunked into {len(chunks)} chunks; {before_dedup} candidate facts before dedup, "
+            f"{after_dedup} after"
+        )
         return out

@@ -1,0 +1,23 @@
+{
+  "directory": {
+    "item": [
+      {"last-modified": "2026-03-02 16:31:22", "name": "0009999999-26-000123-index.htm", "type": "text.gif", "size": ""},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231.htm", "type": "10-K", "size": "4821012"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_ex99-1.htm", "type": "EX-99.1", "size": "18234"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_ex10-1.htm", "type": "EX-10.1", "size": "52310"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_ex31-1.htm", "type": "EX-31.1", "size": "3120"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_ex31-2.htm", "type": "EX-31.2", "size": "3118"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_ex32-1.htm", "type": "EX-32.1", "size": "1450"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_g1.jpg", "type": "GRAPHIC", "size": "88213"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231.xsd", "type": "EX-101.SCH", "size": "9876"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_cal.xml", "type": "EX-101.CAL", "size": "6543"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_def.xml", "type": "EX-101.DEF", "size": "5432"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_lab.xml", "type": "EX-101.LAB", "size": "22110"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "testco-20251231_pre.xml", "type": "EX-101.PRE", "size": "8765"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "R1.htm", "type": "", "size": "4021"},
+      {"last-modified": "2026-03-02 16:31:22", "name": "R2.htm", "type": "", "size": "3987"}
+    ],
+    "name": "/Archives/edgar/data/9999999/000999999926000123",
+    "parent-dir": "/Archives/edgar/data/9999999/"
+  }
+}

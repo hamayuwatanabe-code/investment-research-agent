@@ -554,6 +554,18 @@ class RoutingCoverageCounts:
     offline_verified_steps: int
     live_verified_steps: int
     disabled_steps: int
+    #: Cumulative capability counts (Phase 3B requirement 6): how many steps
+    #: satisfy each ``ImplementationStatus`` capability property, computed
+    #: the SAME way ``target_plan_status``/``compute_plan_status`` and
+    #: ``routing_budget_scenarios.py`` decide executability -- never a
+    #: second, independently-reasoned notion of "ready". These are the
+    #: numbers to read alongside the exact-level histogram above: e.g.
+    #: ``offline_verified_steps=63, executor_wired_steps=0`` is not a
+    #: contradiction once ``executor_ready_steps=63`` sits beside it --
+    #: OFFLINE_VERIFIED steps are executor-ready too, they are just not
+    #: sitting at the EXECUTOR_WIRED rung exactly.
+    runnable_code_steps: int
+    executor_ready_steps: int
     #: Requirement-level criticality split (Phase 3A requirement 3).
     required_requirements: int
     conditional_blocking_requirements: int
@@ -598,6 +610,8 @@ def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingC
         offline_verified_steps=by_implementation(ImplementationStatus.OFFLINE_VERIFIED),
         live_verified_steps=by_implementation(ImplementationStatus.LIVE_VERIFIED),
         disabled_steps=by_implementation(ImplementationStatus.DISABLED),
+        runnable_code_steps=sum(1 for s in graph.steps if s.implementation_status.has_runnable_code),
+        executor_ready_steps=sum(1 for s in graph.steps if s.implementation_status.is_executor_ready),
         required_requirements=by_criticality(RequirementCriticality.REQUIRED),
         conditional_blocking_requirements=by_criticality(RequirementCriticality.CONDITIONAL_BLOCKING),
         best_effort_requirements=by_criticality(RequirementCriticality.BEST_EFFORT),
