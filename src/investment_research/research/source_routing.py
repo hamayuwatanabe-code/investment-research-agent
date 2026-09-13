@@ -93,31 +93,113 @@ class FailurePolicy(str, Enum):
 
 
 class ImplementationStatus(str, Enum):
-    """Whether the adapter/collector a step names actually exists in this
-    repository. Phase 2.7 requirement 3: declaring a route in the catalog is
-    not the same claim as it being executable -- a NEW_DIRECT_ADAPTER step
-    for a collector nobody has written yet is NOT_IMPLEMENTED, and no
-    simulation may treat it as a working path except under the explicitly
-    aspirational ASSUME_IMPLEMENTED_ROUTES_SUCCEED assumption.
+    """How far a step's adapter/collector has actually progressed toward
+    running for real. Phase 2.7's binary IMPLEMENTED/NOT_IMPLEMENTED
+    collapsed several genuinely different claims into one -- "a generic
+    HttpClient could fetch this" is not the same claim as "a dedicated
+    adapter exists", which is not the same claim as "that adapter is
+    registered with an executor", which is not the same claim as "the
+    production pipeline calls it", which is not the same claim as "this was
+    actually verified against mock/fake transport", which is not the same
+    claim as "this was verified against the real site/API". Never promote a
+    step past the level actually reached this turn (Phase 3A requirement 1).
+
+    The levels are listed in the order Phase 3A's authorization gave them;
+    OFFLINE_VERIFIED and LIVE_VERIFIED are verification checkpoints that, in
+    this repository, are reached by direct executor tests using injected
+    fake transport -- they do not require PIPELINE_WIRED first (pipeline
+    connection is explicitly forbidden in Phase 3A), so a step can be
+    EXECUTOR_WIRED and OFFLINE_VERIFIED while still not PIPELINE_WIRED.
     """
 
-    IMPLEMENTED = "IMPLEMENTED"
-    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    #: The route exists only as catalog data -- no code backs it at all.
+    DECLARED = "DECLARED"
+    #: A generic, source-agnostic primitive (e.g. ``HttpClient``) could serve
+    #: this step, but no source-specific adapter exists.
+    PRIMITIVE_AVAILABLE = "PRIMITIVE_AVAILABLE"
+    #: A dedicated adapter for this exact source exists as code.
+    ADAPTER_IMPLEMENTED = "ADAPTER_IMPLEMENTED"
+    #: The adapter is registered with an ``AcquisitionExecutor`` and can
+    #: actually be invoked to run this step, in isolation.
+    EXECUTOR_WIRED = "EXECUTOR_WIRED"
+    #: The production ``Pipeline.run()`` calls this step. Never true before
+    #: Phase 3A explicitly authorizes pipeline connection.
+    PIPELINE_WIRED = "PIPELINE_WIRED"
+    #: Verified against injected fake/mock transport in this repository's
+    #: test suite -- no real network call was made.
+    OFFLINE_VERIFIED = "OFFLINE_VERIFIED"
+    #: Verified against the real site/API. Never true in this environment
+    #: (no live network, no Live API credential reaches this code).
+    LIVE_VERIFIED = "LIVE_VERIFIED"
+    #: Deliberately switched off (distinct from never having been built).
     DISABLED = "DISABLED"
+
+    @property
+    def rank(self) -> int:
+        return {
+            "DECLARED": 0,
+            "PRIMITIVE_AVAILABLE": 1,
+            "ADAPTER_IMPLEMENTED": 2,
+            "EXECUTOR_WIRED": 3,
+            "PIPELINE_WIRED": 4,
+            "OFFLINE_VERIFIED": 5,
+            "LIVE_VERIFIED": 6,
+            "DISABLED": -1,
+        }[self.value]
+
+    @property
+    def is_executor_ready(self) -> bool:
+        """Whether an ``AcquisitionExecutor`` could actually invoke this step
+        today, in isolation (never a claim about pipeline connection)."""
+        return self in (
+            ImplementationStatus.EXECUTOR_WIRED,
+            ImplementationStatus.OFFLINE_VERIFIED,
+            ImplementationStatus.LIVE_VERIFIED,
+        )
+
+    @property
+    def has_runnable_code(self) -> bool:
+        """Whether SOME code -- a generic primitive, a dedicated adapter, or
+        better -- exists that could attempt this step today, called directly
+        rather than through an ``AcquisitionExecutor``. Weaker than
+        ``is_executor_ready``: a primitive or adapter can exist without any
+        executor wiring at all. False only for DECLARED (nothing behind it)
+        and DISABLED (deliberately switched off)."""
+        return self.rank >= ImplementationStatus.PRIMITIVE_AVAILABLE.rank
 
 
 class PlanStatus(str, Enum):
-    """Whether a plan is structurally achievable given what is ACTUALLY
-    implemented today -- never a claim about whether research has been
-    executed or completed (see ExecutionStatus/ResearchStatus for that).
+    """Whether a plan is structurally achievable -- and, now, whether that
+    achievability has actually been exercised by an executor -- never a
+    claim about whether research has been executed or completed for a real
+    run (see ExecutionStatus/ResearchStatus for that).
+
+    Phase 3A correction: Phase 2.7's FEASIBLE conflated "an adapter exists
+    somewhere in the catalog" with "something could actually run it". These
+    five values separate structural feasibility from executor readiness and
+    from budget:
     """
 
-    FEASIBLE = "FEASIBLE"
-    INFEASIBLE = "INFEASIBLE"
-    #: Feasible overall, but one or more BLOCKING requirements have no
-    #: implemented path to content acquisition at all (e.g. a regulator's
-    #: own non-public position).
-    FEASIBLE_WITH_BLOCKING_GAPS = "FEASIBLE_WITH_BLOCKING_GAPS"
+    #: No executor-ready path exists for one or more REQUIRED steps, with no
+    #: viable alternative -- nothing could run this today even in isolation.
+    NOT_EXECUTABLE = "NOT_EXECUTABLE"
+    #: An executor-ready path exists for at least one target, but not for
+    #: every target -- some remain out of reach given what is genuinely
+    #: executor-wired today (an adapter that was never built, or a target
+    #: whose steps are all executor-wired but the run-level web-search cap
+    #: leaves some of them unserved once budget is considered downstream).
+    EXECUTABLE_BOUNDED_INCOMPLETE = "EXECUTABLE_BOUNDED_INCOMPLETE"
+    #: Feasible only under the aspirational ASSUME_IMPLEMENTED_ROUTES_SUCCEED
+    #: projection -- a statement about a possible future design, not about
+    #: what could run today.
+    PROJECTED_FEASIBLE_WITH_GAPS = "PROJECTED_FEASIBLE_WITH_GAPS"
+    #: Every required adapter is executor-wired, all required targets can
+    #: complete within the projected budget, and no unresolved structural
+    #: REQUIRED-criticality requirement remains blocking.
+    EXECUTABLE_COMPLETE = "EXECUTABLE_COMPLETE"
+    #: Executor-ready, but the required search volume itself cannot fit the
+    #: discovery budget even before considering the hard cap.
+    BUDGET_INFEASIBLE = "BUDGET_INFEASIBLE"
 
 
 class ExecutionStatus(str, Enum):
@@ -237,12 +319,44 @@ class RequirementPriorityTier(str, Enum):
         }[self.value]
 
 
-def priority_tier_for(*, domain: ResearchDomain, blocking_if_unresolved: bool) -> RequirementPriorityTier:
-    """Deterministic, code-visible mapping from (domain, blocking) to
-    requirement 8's fixed priority order. Never randomized, never tuned per
-    run -- the same inputs always rank the same way.
+class RequirementCriticality(str, Enum):
+    """How much an unresolved requirement should matter -- replaces Phase
+    2.7's blanket ``blocking_if_unresolved: bool``, which forced every FDA
+    regulator-confirmation requirement to be unconditionally blocking merely
+    because it happened to be non-public (Phase 3A requirement 3).
+
+    Whether a CONDITIONAL_BLOCKING requirement actually blocks depends on
+    facts a static catalog cannot know without a real run -- whether the
+    claim concerns the company's CURRENT/lead/registrational program,
+    whether it is material to the investment decision, whether issuer
+    disclosure alone already resolves the question, and whether an
+    alternative primary source exists. Phase 3A does not implement that
+    materiality assessment; a CONDITIONAL_BLOCKING requirement is reported
+    as ``requires_materiality_assessment`` (PENDING_MATERIALITY_ASSESSMENT)
+    rather than resolved either way, never defaulted to blocking or to
+    non-blocking.
     """
-    if blocking_if_unresolved and domain is ResearchDomain.REGULATORY:
+
+    #: Always counts as blocking if unresolved -- no runtime condition gates
+    #: it (e.g. the issuer's own required statutory disclosure).
+    REQUIRED = "REQUIRED"
+    #: Blocking ONLY if a materiality assessment (not implemented in Phase
+    #: 3A) determines the specific conditions apply. Never silently resolved
+    #: to blocking OR to non-blocking by this catalog.
+    CONDITIONAL_BLOCKING = "CONDITIONAL_BLOCKING"
+    #: Never blocks completion; valuable if obtained, not required.
+    BEST_EFFORT = "BEST_EFFORT"
+
+
+def priority_tier_for(*, domain: ResearchDomain, criticality: RequirementCriticality) -> RequirementPriorityTier:
+    """Deterministic, code-visible mapping from (domain, criticality) to
+    requirement 8's fixed priority order. Never randomized, never tuned per
+    run -- the same inputs always rank the same way. A CONDITIONAL_BLOCKING
+    requirement is never treated as REQUIRED-strength for prioritization --
+    it competes on domain alone, since whether it actually blocks is still
+    pending a materiality assessment this module does not perform.
+    """
+    if criticality is RequirementCriticality.REQUIRED and domain is ResearchDomain.REGULATORY:
         return RequirementPriorityTier.BLOCKING_REGULATORY
     if domain is ResearchDomain.CONTRADICTION:
         return RequirementPriorityTier.CONTRADICTION_FALSIFICATION
@@ -264,11 +378,18 @@ class EvidenceRequirement:
     required_authorities: tuple[DocumentAuthority, ...] = ()
     independence_requirement: bool = False
     date_scope: str = "ANY"
-    blocking_if_unresolved: bool = False
+    criticality: RequirementCriticality = RequirementCriticality.REQUIRED
 
     @property
     def priority_tier(self) -> RequirementPriorityTier:
-        return priority_tier_for(domain=self.domain, blocking_if_unresolved=self.blocking_if_unresolved)
+        return priority_tier_for(domain=self.domain, criticality=self.criticality)
+
+    @property
+    def requires_materiality_assessment(self) -> bool:
+        """PENDING_MATERIALITY_ASSESSMENT: true for a CONDITIONAL_BLOCKING
+        requirement, whose actual blocking-ness this catalog does not (and,
+        without a real run's facts, cannot) resolve either way."""
+        return self.criticality is RequirementCriticality.CONDITIONAL_BLOCKING
 
 
 @dataclass(frozen=True)
@@ -288,8 +409,10 @@ class AcquisitionStep:
     request_cost_class: RequestCostClass = RequestCostClass.FREE
     #: Whether ``adapter_id`` actually exists as working code in this
     #: repository today. Declaring a route is not the same claim as it being
-    #: runnable -- see ``ImplementationStatus``.
-    implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED
+    #: runnable -- see ``ImplementationStatus``. Defaults to the honest
+    #: baseline (nothing stated -> nothing earned): a step that does not
+    #: explicitly claim otherwise is DECLARED, never assumed IMPLEMENTED.
+    implementation_status: ImplementationStatus = ImplementationStatus.DECLARED
 
     @property
     def required(self) -> bool:
@@ -506,7 +629,7 @@ def target_acquisition_outcome(
     if exhausted and any(outcome == StepStatus.SKIPPED_DUE_TO_BUDGET for outcome in recorded.values()):
         return TargetAcquisitionOutcome.BLOCKED_BY_BUDGET
     if exhausted and any(
-        outcome == StepStatus.FAILED and by_id[sid].implementation_status is ImplementationStatus.NOT_IMPLEMENTED
+        outcome == StepStatus.FAILED and not by_id[sid].implementation_status.is_executor_ready
         for sid, outcome in recorded.items()
     ):
         return TargetAcquisitionOutcome.NOT_IMPLEMENTED
@@ -516,59 +639,83 @@ def target_acquisition_outcome(
 
 
 def target_plan_status(target: AcquisitionTarget, steps: Sequence[AcquisitionStep]) -> PlanStatus:
-    """Whether ``target`` has ANY implemented path to genuine content
-    acquisition, independent of whether that path would actually succeed on
-    a given run. Never mutates anything, never executes anything.
+    """Whether ``target`` has ANY EXECUTOR-READY path to genuine content
+    acquisition today, independent of whether that path would actually
+    succeed on a given run. Never mutates anything, never executes anything.
 
-    INFEASIBLE covers two structurally different reasons, both real:
-    * every required/alternative step is NOT_IMPLEMENTED, with no viable
-      fallback -- an implementation gap; or
+    Per-target, this collapses to two values -- NOT_EXECUTABLE or
+    EXECUTABLE_COMPLETE -- for two structurally different reasons a target
+    can fail to be executor-ready:
+    * every required/alternative step falls short of EXECUTOR_WIRED (Phase
+      3A requirement 1's ladder), with no viable fallback -- an
+      implementation/wiring gap; or
     * the target's own required steps are inherently incapable of content
-      acquisition (e.g. its only step is NOT_PUBLICLY_AVAILABLE) -- not an
-      implementation gap at all, but a target that can never be "acquired".
-    Requirement 3: a NEW_DIRECT_ADAPTER route existing in the catalog is
-    never, by itself, read as making a target FEASIBLE.
+      acquisition (e.g. its only step is NOT_PUBLICLY_AVAILABLE) -- not a
+      wiring gap at all, but a target that can never be "acquired".
+    (BUDGET_INFEASIBLE and the two PROJECTED_*/EXECUTABLE_BOUNDED_INCOMPLETE
+    graph-level distinctions are computed in ``compute_plan_status`` and in
+    ``routing_budget_scenarios.py``, which know about budget and about
+    multiple targets; a single target has no "some targets, not others" case
+    of its own.) Requirement 1: a step declared but not EXECUTOR_WIRED is
+    never, by itself, read as making a target EXECUTABLE_COMPLETE.
     """
     by_id = {s.step_id: s for s in steps if s.target_id == target.target_id}
 
     def usable(step: AcquisitionStep) -> bool:
-        return step.implementation_status is ImplementationStatus.IMPLEMENTED and not step.never_constitutes_content_acquisition
+        return step.implementation_status.is_executor_ready and not step.never_constitutes_content_acquisition
 
     if not target.required_step_ids and not target.alternative_step_groups:
-        return PlanStatus.INFEASIBLE
+        return PlanStatus.NOT_EXECUTABLE
 
     for step_id in target.required_step_ids:
         step = by_id.get(step_id)
         if step is None or not usable(step):
-            return PlanStatus.INFEASIBLE
+            return PlanStatus.NOT_EXECUTABLE
     for group in target.alternative_step_groups:
         group_steps = [by_id[sid] for sid in group if sid in by_id]
         if not any(usable(s) for s in group_steps):
-            return PlanStatus.INFEASIBLE
-    return PlanStatus.FEASIBLE
+            return PlanStatus.NOT_EXECUTABLE
+    return PlanStatus.EXECUTABLE_COMPLETE
 
 
-def compute_plan_status(graph: SourceRoutingGraph) -> tuple[PlanStatus, int]:
-    """Aggregate PlanStatus over the whole graph, plus the count of BLOCKING
-    requirements with no implemented path to content acquisition at all
-    (``blocking_unresolved_requirements`` -- Phase 2.7 requirement 1/5).
+def compute_plan_status(graph: SourceRoutingGraph) -> tuple[PlanStatus, int, int]:
+    """Aggregate PlanStatus over the whole graph from EXECUTOR-READINESS
+    alone (never budget, never the aspirational assumption -- those live in
+    ``routing_budget_scenarios.py``, which knows about both), plus two counts:
+
+    * ``blocking_unresolved_requirements`` -- REQUIRED-criticality
+      requirements with no executor-ready path to content acquisition at all
+      (Phase 2.7 requirement 1/5, Phase 3A requirement 3: only REQUIRED
+      criticality counts here unconditionally).
+    * ``pending_materiality_requirements`` -- CONDITIONAL_BLOCKING
+      requirements whose only targets are not executor-ready. Phase 3A
+      requirement 3 forbids defaulting these to blocking OR to non-blocking
+      without a real run's materiality facts, so they are counted
+      separately, never folded into ``blocking_unresolved_requirements``.
+
     Read-only; never executes or mutates ``graph``.
     """
-    infeasible_target_ids = {
+    executable_target_ids = {
         t.target_id
         for t in graph.targets
-        if target_plan_status(t, graph.steps_for_target(t.target_id)) is PlanStatus.INFEASIBLE
+        if target_plan_status(t, graph.steps_for_target(t.target_id)) is PlanStatus.EXECUTABLE_COMPLETE
     }
-    blocking_unresolved = 0
-    for requirement in graph.requirements:
-        if not requirement.blocking_if_unresolved:
-            continue
-        targets = graph.targets_for_requirement(requirement.requirement_id)
-        if targets and all(t.target_id in infeasible_target_ids for t in targets):
-            blocking_unresolved += 1
+    all_target_ids = {t.target_id for t in graph.targets}
+    not_executable_target_ids = all_target_ids - executable_target_ids
 
-    if blocking_unresolved > 0:
-        return PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS, blocking_unresolved
-    if graph.targets and infeasible_target_ids == {t.target_id for t in graph.targets}:
-        return PlanStatus.INFEASIBLE, 0
-    return PlanStatus.FEASIBLE, 0
+    blocking_unresolved = 0
+    pending_materiality = 0
+    for requirement in graph.requirements:
+        targets = graph.targets_for_requirement(requirement.requirement_id)
+        if not targets or not all(t.target_id in not_executable_target_ids for t in targets):
+            continue
+        if requirement.criticality is RequirementCriticality.REQUIRED:
+            blocking_unresolved += 1
+        elif requirement.criticality is RequirementCriticality.CONDITIONAL_BLOCKING:
+            pending_materiality += 1
+
+    if not graph.targets or not_executable_target_ids == all_target_ids:
+        return PlanStatus.NOT_EXECUTABLE, blocking_unresolved, pending_materiality
+    if not_executable_target_ids:
+        return PlanStatus.EXECUTABLE_BOUNDED_INCOMPLETE, blocking_unresolved, pending_materiality
+    return PlanStatus.EXECUTABLE_COMPLETE, blocking_unresolved, pending_materiality

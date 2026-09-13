@@ -16,6 +16,7 @@ from investment_research.research.source_routing import (
     FailurePolicy,
     ImplementationStatus,
     PlanStatus,
+    RequirementCriticality,
     RequirementPriorityTier,
     SimulationAssumption,
     SourceRoutingGraph,
@@ -183,12 +184,15 @@ def test_an_undeclared_outcome_is_conservatively_treated_as_a_dead_end():
 
 
 def test_priority_tier_for_blocking_regulatory_is_top():
-    assert priority_tier_for(domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True) is RequirementPriorityTier.BLOCKING_REGULATORY
-    assert priority_tier_for(domain=ResearchDomain.REGULATORY, blocking_if_unresolved=False) is not RequirementPriorityTier.BLOCKING_REGULATORY
-    assert priority_tier_for(domain=ResearchDomain.CONTRADICTION, blocking_if_unresolved=True) is RequirementPriorityTier.CONTRADICTION_FALSIFICATION
-    assert priority_tier_for(domain=ResearchDomain.SCIENCE_TECHNOLOGY, blocking_if_unresolved=False) is RequirementPriorityTier.CURRENT_PROGRAM_SCIENCE
-    assert priority_tier_for(domain=ResearchDomain.CAPITAL_STRUCTURE, blocking_if_unresolved=False) is RequirementPriorityTier.CAPITAL_SURVIVAL
-    assert priority_tier_for(domain=ResearchDomain.CATALYST, blocking_if_unresolved=False) is RequirementPriorityTier.REMAINING_GAPS
+    assert priority_tier_for(domain=ResearchDomain.REGULATORY, criticality=RequirementCriticality.REQUIRED) is RequirementPriorityTier.BLOCKING_REGULATORY
+    assert priority_tier_for(domain=ResearchDomain.REGULATORY, criticality=RequirementCriticality.BEST_EFFORT) is not RequirementPriorityTier.BLOCKING_REGULATORY
+    assert priority_tier_for(domain=ResearchDomain.CONTRADICTION, criticality=RequirementCriticality.REQUIRED) is RequirementPriorityTier.CONTRADICTION_FALSIFICATION
+    assert priority_tier_for(domain=ResearchDomain.SCIENCE_TECHNOLOGY, criticality=RequirementCriticality.BEST_EFFORT) is RequirementPriorityTier.CURRENT_PROGRAM_SCIENCE
+    assert priority_tier_for(domain=ResearchDomain.CAPITAL_STRUCTURE, criticality=RequirementCriticality.BEST_EFFORT) is RequirementPriorityTier.CAPITAL_SURVIVAL
+    assert priority_tier_for(domain=ResearchDomain.CATALYST, criticality=RequirementCriticality.BEST_EFFORT) is RequirementPriorityTier.REMAINING_GAPS
+    # A CONDITIONAL_BLOCKING requirement never gets REQUIRED-strength priority
+    # -- it competes on domain alone (Phase 3A requirement 3).
+    assert priority_tier_for(domain=ResearchDomain.REGULATORY, criticality=RequirementCriticality.CONDITIONAL_BLOCKING) is not RequirementPriorityTier.BLOCKING_REGULATORY
     ranks = [t.rank for t in RequirementPriorityTier]
     assert ranks == sorted(ranks)
 
@@ -254,7 +258,7 @@ def test_target_acquisition_outcome_not_implemented_when_exhausted_via_unimpleme
         step_id="l1", target_id=target_id, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.REQUIRED,
-        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        implementation_status=ImplementationStatus.DECLARED,
     )
     target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, required_step_ids=("l1",))
     outcomes = {"l1": StepStatus.FAILED}
@@ -262,54 +266,72 @@ def test_target_acquisition_outcome_not_implemented_when_exhausted_via_unimpleme
 
 
 # --- ImplementationStatus / PlanStatus --------------------------------------
-def test_target_plan_status_infeasible_when_required_step_not_implemented_with_no_alternative():
+def test_target_plan_status_not_executable_when_required_step_not_executor_wired_with_no_alternative():
     target_id = "t"
     step = AcquisitionStep(
         step_id="s", target_id=target_id, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         completion_condition=StepStatus.URL_RESOLVED,
-        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        implementation_status=ImplementationStatus.DECLARED,
     )
     target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, required_step_ids=("s",))
-    assert target_plan_status(target, [step]) is PlanStatus.INFEASIBLE
+    assert target_plan_status(target, [step]) is PlanStatus.NOT_EXECUTABLE
 
 
-def test_target_plan_status_feasible_when_alternative_exists():
+def test_target_plan_status_executable_complete_when_executor_wired_alternative_exists():
     target_id = "t"
-    unimplemented = AcquisitionStep(
+    undeclared = AcquisitionStep(
         step_id="s1", target_id=target_id, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
-        implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        implementation_status=ImplementationStatus.DECLARED,
     )
     web = AcquisitionStep(
         step_id="s2", target_id=target_id, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+        implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     target = AcquisitionTarget(target_id=target_id, target_kind=TargetKind.FORM4_FILING, alternative_step_groups=(("s1", "s2"),))
-    assert target_plan_status(target, [unimplemented, web]) is PlanStatus.FEASIBLE
+    assert target_plan_status(target, [undeclared, web]) is PlanStatus.EXECUTABLE_COMPLETE
 
 
-def test_target_plan_status_infeasible_for_not_publicly_available_only_target():
+def test_target_plan_status_not_executable_for_not_publicly_available_only_target():
     target, steps = _npa_target()
-    # Declaring a route is IMPLEMENTED-trivial here, but the method itself
-    # never constitutes content acquisition -- INFEASIBLE regardless.
-    assert target_plan_status(target, steps) is PlanStatus.INFEASIBLE
+    # DECLARED-trivial here (the default), but the method itself never
+    # constitutes content acquisition -- NOT_EXECUTABLE regardless of
+    # implementation status.
+    assert target_plan_status(target, steps) is PlanStatus.NOT_EXECUTABLE
 
 
-def test_compute_plan_status_reports_blocking_gaps_for_non_public_blocking_requirement():
+def test_compute_plan_status_reports_blocking_gaps_for_non_public_required_requirement():
     target, steps = _npa_target()
     requirement = EvidenceRequirement(
         requirement_id="req_npa", serves_legacy_need_ids=("synthetic",),
         subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY,
-        blocking_if_unresolved=True,
+        criticality=RequirementCriticality.REQUIRED,
     )
     target = dataclasses.replace(target, serves_requirement_ids=("req_npa",))
     graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=steps)
-    status, blocking = compute_plan_status(graph)
-    assert status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+    status, blocking, pending = compute_plan_status(graph)
+    assert status is PlanStatus.NOT_EXECUTABLE
     assert blocking == 1
+    assert pending == 0
+
+
+def test_compute_plan_status_reports_pending_materiality_for_conditional_blocking_requirement():
+    target, steps = _npa_target()
+    requirement = EvidenceRequirement(
+        requirement_id="req_npa", serves_legacy_need_ids=("synthetic",),
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY,
+        criticality=RequirementCriticality.CONDITIONAL_BLOCKING,
+    )
+    target = dataclasses.replace(target, serves_requirement_ids=("req_npa",))
+    graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=steps)
+    status, blocking, pending = compute_plan_status(graph)
+    assert status is PlanStatus.NOT_EXECUTABLE
+    assert blocking == 0
+    assert pending == 1
 
 
 def test_simulation_assumption_respects_implementation_status_flag():

@@ -101,11 +101,16 @@ def _resolve_non_search_outcome(
     step: AcquisitionStep, *, assumption: SimulationAssumption
 ) -> StepStatus:
     """What a non-search step resolves to when ``resolve_next_steps`` offers
-    it, under ``assumption``. NOT_IMPLEMENTED always fails when the
-    assumption respects implementation status -- it is never treated as
-    "the route exists, so it can succeed" (requirement 3).
+    it, under ``assumption``. A step with no runnable code at all (DECLARED
+    or DISABLED) always fails when the assumption respects implementation
+    status -- it is never treated as "the route exists, so it can succeed"
+    (Phase 3A requirement 1). This checks ``has_runnable_code`` -- whether
+    SOME code (a generic primitive or better) could attempt the step if
+    called directly, a lower bar than ``is_executor_ready`` (which additionally
+    requires an ``AcquisitionExecutor`` to be wired -- that is what
+    ``target_plan_status``/``compute_plan_status`` require).
     """
-    if assumption.respects_implementation_status and step.implementation_status is ImplementationStatus.NOT_IMPLEMENTED:
+    if assumption.respects_implementation_status and not step.implementation_status.has_runnable_code:
         return StepStatus.FAILED
     if not _is_discovery_risk(step):
         return step.completion_condition
@@ -173,12 +178,17 @@ def _select_within_cap(graph: SourceRoutingGraph, *, assumption: SimulationAssum
 class ScenarioProjection:
     assumption: SimulationAssumption
     plan_status: PlanStatus
-    #: Requirements that are BLOCKING and have NO implemented path to
-    #: content acquisition at all (structural -- ``compute_plan_status``).
-    #: Under ASSUME_IMPLEMENTED_ROUTES_SUCCEED this still counts a
+    #: REQUIRED-criticality requirements with NO executor-ready (or, under
+    #: ASSUME_IMPLEMENTED_ROUTES_SUCCEED, no OFFLINE_VERIFIED-or-better)
+    #: path to content acquisition at all (structural --
+    #: ``compute_plan_status``). Under every assumption this still counts a
     #: NOT_PUBLICLY_AVAILABLE-only path, since that is never an
     #: implementation gap.
     blocking_unresolved_requirements: int
+    #: CONDITIONAL_BLOCKING requirements with no such path either -- reported
+    #: separately, never folded into ``blocking_unresolved_requirements``
+    #: (Phase 3A requirement 3: never defaulted to blocking or non-blocking).
+    pending_materiality_requirements: int
 
     projected_metadata_locator_requests: int
     projected_resolved_urls: int
@@ -290,14 +300,27 @@ def _tally(
     )
 
     respect_impl = assumption.respects_implementation_status
-    plan_status, blocking_unresolved = compute_plan_status(
+    plan_status, blocking_unresolved, pending_materiality = compute_plan_status(
         graph if respect_impl else _implementation_agnostic_view(graph)
     )
+    if not respect_impl and plan_status is PlanStatus.EXECUTABLE_BOUNDED_INCOMPLETE:
+        # ASSUME_IMPLEMENTED_ROUTES_SUCCEED is a statement about a possible
+        # future design, never about what could run today -- a "some
+        # targets, not others" mix under this assumption is
+        # PROJECTED_FEASIBLE_WITH_GAPS, not EXECUTABLE_BOUNDED_INCOMPLETE
+        # (Phase 3A requirement 2).
+        plan_status = PlanStatus.PROJECTED_FEASIBLE_WITH_GAPS
+    elif plan_status is PlanStatus.EXECUTABLE_COMPLETE and gap_high > 0:
+        # Executor-ready (or, aspirationally, fully OFFLINE_VERIFIED), but
+        # the search volume this plan actually needs cannot fit the
+        # discovery budget even before the hard 3-search cap is applied.
+        plan_status = PlanStatus.BUDGET_INFEASIBLE
 
     return ScenarioProjection(
         assumption=assumption,
         plan_status=plan_status,
         blocking_unresolved_requirements=blocking_unresolved,
+        pending_materiality_requirements=pending_materiality,
         projected_metadata_locator_requests=metadata_locator,
         projected_resolved_urls=resolved_urls,
         projected_direct_http_body_fetches=direct_fetches,
@@ -325,17 +348,21 @@ def _tally(
 
 
 def _implementation_agnostic_view(graph: SourceRoutingGraph) -> SourceRoutingGraph:
-    """A copy of ``graph`` with every step's implementation_status forced
-    IMPLEMENTED, for computing PlanStatus under
-    ASSUME_IMPLEMENTED_ROUTES_SUCCEED -- a NOT_PUBLICLY_AVAILABLE-only path
-    is still INFEASIBLE under this view (that is never an implementation
-    gap), but a NOT_IMPLEMENTED adapter is not."""
+    """A copy of ``graph`` with every step's implementation_status forced to
+    the highest earned-verification rung (OFFLINE_VERIFIED), for computing
+    PlanStatus under ASSUME_IMPLEMENTED_ROUTES_SUCCEED -- a
+    NOT_PUBLICLY_AVAILABLE-only path is still NOT_EXECUTABLE under this view
+    (that is never an implementation gap, see
+    ``AcquisitionStep.never_constitutes_content_acquisition``), but a
+    DECLARED/DISABLED adapter is not. Never LIVE_VERIFIED: this view is a
+    statement about a possible future design, never a claim that anything
+    was checked against a real site/API (Phase 3A requirement 1)."""
     from dataclasses import replace
 
     return SourceRoutingGraph(
         requirements=graph.requirements,
         targets=graph.targets,
-        steps=tuple(replace(s, implementation_status=ImplementationStatus.IMPLEMENTED) for s in graph.steps),
+        steps=tuple(replace(s, implementation_status=ImplementationStatus.OFFLINE_VERIFIED) for s in graph.steps),
     )
 
 

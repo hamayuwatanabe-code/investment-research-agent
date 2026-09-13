@@ -59,6 +59,7 @@ from .source_routing import (
     FailurePolicy,
     ImplementationStatus,
     RequestCostClass,
+    RequirementCriticality,
     SourceRoutingGraph,
     StepKind,
     StepStatus,
@@ -100,7 +101,26 @@ _ARCHETYPE_BY_KEY: dict[str, str] = {
     "company offering priced": "sec_chain",
 }
 
-_BLOCKING_DOMAINS = (ResearchDomain.REGULATORY, ResearchDomain.CAPITAL_STRUCTURE)
+#: Phase 3A requirements 4/5/6: ``acquisition_executor.AcquisitionExecutor``
+#: plus ``sec_acquisition_adapters.SecPrimaryDocumentAdapter``/
+#: ``SecExhibitAdapter`` now exist as code and are proven, in this
+#: repository's own test suite, against an injected FakeHttpClient --
+#: genuinely OFFLINE_VERIFIED, never LIVE_VERIFIED (no real network call was
+#: ever made). These adapter_id strings match exactly what those adapters
+#: register under; steps below that use them are promoted from
+#: ADAPTER_IMPLEMENTED/DECLARED to OFFLINE_VERIFIED accordingly -- an earned
+#: promotion, not a blanket one: every OTHER step in this catalog (web
+#: search, ClinicalTrials, PubMed, Form 4) is untouched by Phase 3A and stays
+#: at its pre-existing, honest level.
+_SEC_PRIMARY_DOCUMENT_ADAPTER_ID = "sec_primary_document_adapter"
+_SEC_EXHIBIT_ADAPTER_ID = "sec_exhibit_enumeration"
+
+#: REQUIRED-strength (never conditional) domains for the plain sec_chain/
+#: sec_chain_with_exhibit archetypes -- capital-structure/regulatory issuer
+#: disclosure is the company's own statutory obligation, not contingent on a
+#: later materiality assessment. (fda_dual's REGULATOR-side sub-requirement
+#: is handled separately, as CONDITIONAL_BLOCKING -- see ``_fda_dual``.)
+_REQUIRED_DOMAINS = (ResearchDomain.REGULATORY, ResearchDomain.CAPITAL_STRUCTURE)
 
 
 def _document_chain(
@@ -111,17 +131,29 @@ def _document_chain(
     direct_adapter: str,
     direct_authority: DocumentAuthority,
     direct_locate_completion: StepStatus = StepStatus.URL_RESOLVED,
-    direct_implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED,
+    direct_implementation_status: ImplementationStatus = ImplementationStatus.ADAPTER_IMPLEMENTED,
+    fetch_adapter_id: str = "http_client",
+    fetch_implementation_status: ImplementationStatus = ImplementationStatus.PRIMITIVE_AVAILABLE,
+    parse_adapter_id: str = "local_parser",
+    parse_implementation_status: ImplementationStatus = ImplementationStatus.PRIMITIVE_AVAILABLE,
 ) -> tuple[list[AcquisitionStep], tuple[str, ...], tuple[tuple[str, ...], ...]]:
     """LOCATE(direct) altOR LOCATE(web) -> FETCH(http, required) -> PARSE(required).
 
     Reaching only the locate stage -- by either path -- never completes the
     target: FETCH and PARSE are both in ``required_step_ids``. The Direct
-    locate's ``direct_implementation_status`` defaults IMPLEMENTED (the
-    genuinely-wired SEC EDGAR/ClinicalTrials collectors); callers using an
-    unimplemented adapter (SEC exhibit enumeration, Form 4 XML) must pass
-    NOT_IMPLEMENTED explicitly -- declaring the route is never itself a claim
-    that it runs (Phase 2.7 requirement 3).
+    locate's ``direct_implementation_status`` defaults ADAPTER_IMPLEMENTED
+    (the genuinely-existing SEC EDGAR/ClinicalTrials collector code); callers
+    whose adapter does not exist yet (SEC exhibit enumeration prior to this
+    module wiring it, Form 4 XML, PubMed/Europe PMC) must pass DECLARED
+    explicitly -- declaring the route is never itself a claim that it runs
+    (Phase 3A requirement 1). The web-search locate is always DISABLED here:
+    Phase 3A explicitly does not execute Web Search from this graph (Phase 3A
+    requirement 7), regardless of what search code exists elsewhere in the
+    application. ``fetch_implementation_status``/``parse_implementation_status``
+    default to PRIMITIVE_AVAILABLE (a generic ``HttpClient``/local parser
+    exists); callers whose FETCH/PARSE is backed by a genuinely offline-
+    verified, executor-wired adapter (the SEC primary-document/exhibit
+    adapters) pass the earned, higher status explicitly.
     """
     l1, l2, f, p = f"step_{tag}_L1", f"step_{tag}_L2", f"step_{tag}_F", f"step_{tag}_P"
     steps = [
@@ -136,18 +168,21 @@ def _document_chain(
             step_id=l2, target_id=target_id, step_kind=StepKind.LOCATE,
             acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY, adapter_id="anthropic_web_search",
             completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+            implementation_status=ImplementationStatus.DISABLED,
             token_cost_class=TokenCostClass.HIGH, request_cost_class=RequestCostClass.PAID_LLM_CALL,
         ),
         AcquisitionStep(
             step_id=f, target_id=target_id, step_kind=StepKind.FETCH,
-            acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="http_client",
+            acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=fetch_adapter_id,
             depends_on_step_ids=(l1, l2), completion_condition=StepStatus.BODY_FETCHED,
+            implementation_status=fetch_implementation_status,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
         AcquisitionStep(
             step_id=p, target_id=target_id, step_kind=StepKind.PARSE,
-            acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="local_parser",
+            acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=parse_adapter_id,
             depends_on_step_ids=(f,), completion_condition=StepStatus.PARSED,
+            implementation_status=parse_implementation_status,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
     ]
@@ -161,15 +196,18 @@ def _structured_or_web_chain(
     direct_method: AcquisitionMethod,
     direct_adapter: str,
     direct_authority: DocumentAuthority,
-    direct_implementation_status: ImplementationStatus = ImplementationStatus.IMPLEMENTED,
+    direct_implementation_status: ImplementationStatus = ImplementationStatus.ADAPTER_IMPLEMENTED,
 ) -> tuple[list[AcquisitionStep], tuple[str, ...], tuple[tuple[str, ...], ...]]:
     """Direct structured fetch, OR (only if that fails) a full web-search
     locate -> fetch -> parse chain. Two alt-groups: an entry gate (which
     path to attempt) and a terminal gate (which path's own terminal step
     actually completed) -- a mid-chain step (e.g. a resolved URL with no
     fetch yet) satisfies neither. ``direct_implementation_status`` defaults
-    IMPLEMENTED (ClinicalTrialsCollector); callers using an unimplemented
-    adapter (PubMed/Europe PMC) must pass NOT_IMPLEMENTED explicitly.
+    ADAPTER_IMPLEMENTED (ClinicalTrialsCollector); callers using an
+    unimplemented adapter (PubMed/Europe PMC) must pass DECLARED explicitly.
+    The web-search fallback is always DISABLED for LOCATE (Phase 3A
+    requirement 7) and PRIMITIVE_AVAILABLE for its generic FETCH/PARSE (a
+    plain HttpClient/local parser exists, but nothing source-specific).
     """
     s1, sp = f"step_{tag}_S1", f"step_{tag}_SP"
     lw, fw, pw = f"step_{tag}_LW", f"step_{tag}_FW", f"step_{tag}_PW"
@@ -192,20 +230,21 @@ def _structured_or_web_chain(
             step_id=lw, target_id=target_id, step_kind=StepKind.LOCATE,
             acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY, adapter_id="anthropic_web_search",
             completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+            implementation_status=ImplementationStatus.DISABLED,
             token_cost_class=TokenCostClass.HIGH, request_cost_class=RequestCostClass.PAID_LLM_CALL,
         ),
         AcquisitionStep(
             step_id=fw, target_id=target_id, step_kind=StepKind.FETCH,
             acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="http_client",
             depends_on_step_ids=(lw,), completion_condition=StepStatus.BODY_FETCHED,
-            failure_policy=FailurePolicy.ALTERNATIVE,
+            failure_policy=FailurePolicy.ALTERNATIVE, implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
         AcquisitionStep(
             step_id=pw, target_id=target_id, step_kind=StepKind.PARSE,
             acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="local_parser",
             depends_on_step_ids=(fw,), completion_condition=StepStatus.PARSED,
-            failure_policy=FailurePolicy.ALTERNATIVE,
+            failure_policy=FailurePolicy.ALTERNATIVE, implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
     ]
@@ -233,18 +272,21 @@ def _web_only_chain(tag: str, target_id: str) -> tuple[list[AcquisitionStep], tu
             step_id=lw, target_id=target_id, step_kind=StepKind.LOCATE,
             acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY, adapter_id="anthropic_web_search",
             completion_condition=StepStatus.URL_RESOLVED,
+            implementation_status=ImplementationStatus.DISABLED,
             token_cost_class=TokenCostClass.HIGH, request_cost_class=RequestCostClass.PAID_LLM_CALL,
         ),
         AcquisitionStep(
             step_id=fw, target_id=target_id, step_kind=StepKind.FETCH,
             acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="http_client",
             depends_on_step_ids=(lw,), completion_condition=StepStatus.BODY_FETCHED,
+            implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
         AcquisitionStep(
             step_id=pw, target_id=target_id, step_kind=StepKind.PARSE,
             acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="local_parser",
             depends_on_step_ids=(fw,), completion_condition=StepStatus.PARSED,
+            implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
             token_cost_class=TokenCostClass.ZERO, request_cost_class=RequestCostClass.FREE,
         ),
     ]
@@ -256,13 +298,16 @@ def _sec_chain(index, need_ids, domain, subject_scope, key) -> SourceRoutingGrap
     req_id, target_id = f"req_{tag}", f"target_{tag}"
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.EXISTING_DIRECT_API,
-        direct_adapter="sec_edgar_submissions", direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_adapter=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"issuer disclosed in a filing: {key}",
         required_authorities=(DocumentAuthority.STATUTORY_FILING, DocumentAuthority.COMPANY_IR),
-        blocking_if_unresolved=domain in _BLOCKING_DOMAINS,
+        criticality=RequirementCriticality.REQUIRED if domain in _REQUIRED_DOMAINS else RequirementCriticality.BEST_EFFORT,
     )
     target = AcquisitionTarget(
         target_id=target_id, target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
@@ -276,13 +321,16 @@ def _sec_chain_with_exhibit(index, need_ids, domain, subject_scope, key) -> Sour
     body_req_id, body_target_id = f"req_{body_tag}", f"target_{body_tag}"
     body_steps, body_required, body_alt = _document_chain(
         body_tag, body_target_id, direct_method=AcquisitionMethod.EXISTING_DIRECT_API,
-        direct_adapter="sec_edgar_submissions", direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_adapter=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     body_requirement = EvidenceRequirement(
         requirement_id=body_req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"issuer disclosed in a filing (body): {key}",
         required_authorities=(DocumentAuthority.STATUTORY_FILING, DocumentAuthority.COMPANY_IR),
-        blocking_if_unresolved=domain in _BLOCKING_DOMAINS,
+        criticality=RequirementCriticality.REQUIRED if domain in _REQUIRED_DOMAINS else RequirementCriticality.BEST_EFFORT,
     )
     body_target = AcquisitionTarget(
         target_id=body_target_id, target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
@@ -293,9 +341,11 @@ def _sec_chain_with_exhibit(index, need_ids, domain, subject_scope, key) -> Sour
     exhibit_req_id, exhibit_target_id = f"req_{exhibit_tag}", f"target_{exhibit_tag}"
     exhibit_steps, exhibit_required, exhibit_alt = _document_chain(
         exhibit_tag, exhibit_target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
-        direct_adapter="sec_exhibit_enumeration", direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_adapter=_SEC_EXHIBIT_ADAPTER_ID, direct_authority=DocumentAuthority.STATUTORY_FILING,
         direct_locate_completion=StepStatus.URL_RESOLVED,
-        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_SEC_EXHIBIT_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id=_SEC_EXHIBIT_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     exhibit_requirement = EvidenceRequirement(
         requirement_id=exhibit_req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -320,13 +370,16 @@ def _fda_dual(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph
     disclosure_req_id, disclosure_target_id = f"req_{disclosure_tag}", f"target_{disclosure_tag}"
     disclosure_steps, disclosure_required, disclosure_alt = _document_chain(
         disclosure_tag, disclosure_target_id, direct_method=AcquisitionMethod.EXISTING_DIRECT_API,
-        direct_adapter="sec_edgar_submissions", direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_adapter=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, direct_authority=DocumentAuthority.STATUTORY_FILING,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id=_SEC_PRIMARY_DOCUMENT_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     disclosure_requirement = EvidenceRequirement(
         requirement_id=disclosure_req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"issuer disclosed in a filing: {key}",
         required_authorities=(DocumentAuthority.STATUTORY_FILING, DocumentAuthority.COMPANY_IR),
-        blocking_if_unresolved=True,
+        criticality=RequirementCriticality.REQUIRED,
     )
     disclosure_target = AcquisitionTarget(
         target_id=disclosure_target_id, target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
@@ -341,7 +394,14 @@ def _fda_dual(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph
         requirement_id=regulator_req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"the regulator itself stated: {key}",
         required_authorities=(DocumentAuthority.REGULATOR,), independence_requirement=True,
-        blocking_if_unresolved=True,
+        # Phase 3A requirement 3: the regulator's own non-public correspondence
+        # is never uniformly blocking merely because it is non-public. Whether
+        # it actually blocks depends on program-currency, materiality, and
+        # whether issuer disclosure/an alternative source already resolves it
+        # -- facts this static catalog does not have at program_scope=UNKNOWN.
+        # Reported as CONDITIONAL_BLOCKING (-> PENDING_MATERIALITY_ASSESSMENT),
+        # never defaulted to blocking or to non-blocking.
+        criticality=RequirementCriticality.CONDITIONAL_BLOCKING,
     )
     regulator_target = AcquisitionTarget(
         target_id=regulator_target_id, target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
@@ -384,7 +444,7 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     steps, required, alt_groups = _structured_or_web_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="pubmed_europepmc", direct_authority=DocumentAuthority.INDEPENDENT,
-        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        direct_implementation_status=ImplementationStatus.DECLARED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -404,7 +464,7 @@ def _form4(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="form4_xml_parser", direct_authority=DocumentAuthority.STATUTORY_FILING,
-        direct_implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        direct_implementation_status=ImplementationStatus.DECLARED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
@@ -482,8 +542,22 @@ class RoutingCoverageCounts:
     anthropic_web_fetch_steps: int
     not_publicly_available_steps: int
     manual_verification_required_steps: int
-    implemented_steps: int
-    not_implemented_steps: int
+    #: Per-``ImplementationStatus`` ladder rung (Phase 3A requirement 1) --
+    #: replaces Phase 2.7's binary implemented_steps/not_implemented_steps,
+    #: which could not distinguish "a generic primitive exists" from "an
+    #: adapter exists" from "an executor could run it today".
+    declared_steps: int
+    primitive_available_steps: int
+    adapter_implemented_steps: int
+    executor_wired_steps: int
+    pipeline_wired_steps: int
+    offline_verified_steps: int
+    live_verified_steps: int
+    disabled_steps: int
+    #: Requirement-level criticality split (Phase 3A requirement 3).
+    required_requirements: int
+    conditional_blocking_requirements: int
+    best_effort_requirements: int
 
 
 def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingCoverageCounts:
@@ -497,6 +571,9 @@ def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingC
 
     def by_implementation(status: ImplementationStatus) -> int:
         return sum(1 for s in graph.steps if s.implementation_status is status)
+
+    def by_criticality(criticality: RequirementCriticality) -> int:
+        return sum(1 for r in graph.requirements if r.criticality is criticality)
 
     return RoutingCoverageCounts(
         legacy_needs=len(LEGACY_CATALOG),
@@ -512,7 +589,16 @@ def routing_coverage_counts(graph: SourceRoutingGraph | None = None) -> RoutingC
         web_search_discovery_steps=by_method(AcquisitionMethod.WEB_SEARCH_DISCOVERY),
         anthropic_web_fetch_steps=by_method(AcquisitionMethod.ANTHROPIC_WEB_FETCH),
         not_publicly_available_steps=by_method(AcquisitionMethod.NOT_PUBLICLY_AVAILABLE),
-        implemented_steps=by_implementation(ImplementationStatus.IMPLEMENTED),
-        not_implemented_steps=by_implementation(ImplementationStatus.NOT_IMPLEMENTED),
         manual_verification_required_steps=by_method(AcquisitionMethod.MANUAL_VERIFICATION_REQUIRED),
+        declared_steps=by_implementation(ImplementationStatus.DECLARED),
+        primitive_available_steps=by_implementation(ImplementationStatus.PRIMITIVE_AVAILABLE),
+        adapter_implemented_steps=by_implementation(ImplementationStatus.ADAPTER_IMPLEMENTED),
+        executor_wired_steps=by_implementation(ImplementationStatus.EXECUTOR_WIRED),
+        pipeline_wired_steps=by_implementation(ImplementationStatus.PIPELINE_WIRED),
+        offline_verified_steps=by_implementation(ImplementationStatus.OFFLINE_VERIFIED),
+        live_verified_steps=by_implementation(ImplementationStatus.LIVE_VERIFIED),
+        disabled_steps=by_implementation(ImplementationStatus.DISABLED),
+        required_requirements=by_criticality(RequirementCriticality.REQUIRED),
+        conditional_blocking_requirements=by_criticality(RequirementCriticality.CONDITIONAL_BLOCKING),
+        best_effort_requirements=by_criticality(RequirementCriticality.BEST_EFFORT),
     )

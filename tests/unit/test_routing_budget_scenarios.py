@@ -22,6 +22,7 @@ from investment_research.research.source_routing import (
     FailurePolicy,
     ImplementationStatus,
     PlanStatus,
+    RequirementCriticality,
     SimulationAssumption,
     SourceRoutingGraph,
     StepKind,
@@ -37,26 +38,29 @@ def _sec_style(n: int, *, domain=ResearchDomain.CAPITAL_STRUCTURE, blocking=Fals
         step_id=f"l1_{n}", target_id=tid, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.EXISTING_DIRECT_API,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
-        implementation_status=ImplementationStatus.IMPLEMENTED if direct_implemented else ImplementationStatus.NOT_IMPLEMENTED,
+        implementation_status=ImplementationStatus.ADAPTER_IMPLEMENTED if direct_implemented else ImplementationStatus.DECLARED,
     )
     l2 = AcquisitionStep(
         step_id=f"l2_{n}", target_id=tid, step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.WEB_SEARCH_DISCOVERY,
         completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.ALTERNATIVE,
+        implementation_status=ImplementationStatus.DISABLED,
     )
     f = AcquisitionStep(
         step_id=f"f_{n}", target_id=tid, step_kind=StepKind.FETCH,
         acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP,
         depends_on_step_ids=(f"l1_{n}", f"l2_{n}"), completion_condition=StepStatus.BODY_FETCHED,
+        implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
     )
     p = AcquisitionStep(
         step_id=f"p_{n}", target_id=tid, step_kind=StepKind.PARSE,
         acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP,
         depends_on_step_ids=(f"f_{n}",), completion_condition=StepStatus.PARSED,
+        implementation_status=ImplementationStatus.PRIMITIVE_AVAILABLE,
     )
     requirement = EvidenceRequirement(
         requirement_id=rid, serves_legacy_need_ids=(f"synthetic_{n}",), subject_scope=SubjectScope.COMPANY,
-        domain=domain, blocking_if_unresolved=blocking,
+        domain=domain, criticality=RequirementCriticality.REQUIRED if blocking else RequirementCriticality.BEST_EFFORT,
     )
     target = AcquisitionTarget(
         target_id=tid, target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
@@ -138,7 +142,8 @@ def test_not_publicly_available_never_counts_as_target_acquired():
     )
     requirement = EvidenceRequirement(
         requirement_id="req_npa", serves_legacy_need_ids=("synthetic_npa",),
-        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True,
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY,
+        criticality=RequirementCriticality.REQUIRED,
     )
     target = AcquisitionTarget(
         target_id="t_npa", target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
@@ -149,11 +154,16 @@ def test_not_publicly_available_never_counts_as_target_acquired():
     for name in ("assume_implemented_routes_succeed", "current_implementation_only", "direct_failures", "worst_case"):
         scenario = getattr(projections, name)
         assert scenario.incomplete_targets == 1
-        assert scenario.plan_status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
+        # The only target in this graph can never constitute content
+        # acquisition (its only step is NOT_PUBLICLY_AVAILABLE) -- with
+        # every target in the graph unresolvable, the honest aggregate is
+        # NOT_EXECUTABLE, never a partial-completion status.
+        assert scenario.plan_status is PlanStatus.NOT_EXECUTABLE
         assert scenario.blocking_unresolved_requirements == 1
+        assert scenario.pending_materiality_requirements == 0
 
 
-def test_blocking_non_public_requirement_is_reported_as_blocking_unresolved():
+def test_conditional_blocking_non_public_requirement_is_reported_as_pending_materiality():
     npa_step = AcquisitionStep(
         step_id="npa", target_id="t_npa", step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.NOT_PUBLICLY_AVAILABLE,
@@ -161,7 +171,8 @@ def test_blocking_non_public_requirement_is_reported_as_blocking_unresolved():
     )
     requirement = EvidenceRequirement(
         requirement_id="req_npa", serves_legacy_need_ids=("synthetic_npa",),
-        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True,
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.REGULATORY,
+        criticality=RequirementCriticality.CONDITIONAL_BLOCKING,
     )
     target = AcquisitionTarget(
         target_id="t_npa", target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
@@ -169,7 +180,8 @@ def test_blocking_non_public_requirement_is_reported_as_blocking_unresolved():
     )
     graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(npa_step,))
     projections = assess_simulation_projections(graph)
-    assert projections.current_implementation_only.blocking_unresolved_requirements == 1
+    assert projections.current_implementation_only.blocking_unresolved_requirements == 0
+    assert projections.current_implementation_only.pending_materiality_requirements == 1
 
 
 # --- scheduled overrun vs. full-completion gap ------------------------------
@@ -200,8 +212,12 @@ def test_real_catalog_current_implementation_only_never_claims_full_completion()
     projections = assess_simulation_projections()
     current = projections.current_implementation_only
     assert current.incomplete_targets > 0
-    assert current.plan_status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
-    assert current.blocking_unresolved_requirements == 6
+    # Never EXECUTABLE_COMPLETE: no AcquisitionExecutor exists to wire any
+    # step to yet (Phase 3A requirement 1/2), so this can never read as
+    # fully-executable research today.
+    assert current.plan_status is not PlanStatus.EXECUTABLE_COMPLETE
+    assert current.blocking_unresolved_requirements > 0
+    assert current.pending_materiality_requirements == 6  # the 6 fda_dual regulator sub-requirements
 
 
 def test_real_catalog_aspirational_projection_still_has_incomplete_targets():

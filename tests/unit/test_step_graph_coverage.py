@@ -93,7 +93,7 @@ def test_not_publicly_available_maps_to_not_publicly_available_status():
     )
     requirement = EvidenceRequirement(
         requirement_id="req_npa", serves_legacy_need_ids=("bear_0",), subject_scope=SubjectScope.COMPANY,
-        domain=ResearchDomain.REGULATORY, blocking_if_unresolved=True,
+        domain=ResearchDomain.REGULATORY,
     )
     target = AcquisitionTarget(
         target_id="t_npa", target_kind=TargetKind.FDA_NONPUBLIC_CORRESPONDENCE,
@@ -118,7 +118,7 @@ def test_not_implemented_adapter_maps_to_not_implemented_status():
     step = AcquisitionStep(
         step_id="l1", target_id="t_ni", step_kind=StepKind.LOCATE,
         acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
-        completion_condition=StepStatus.URL_RESOLVED, implementation_status=ImplementationStatus.NOT_IMPLEMENTED,
+        completion_condition=StepStatus.URL_RESOLVED, implementation_status=ImplementationStatus.DECLARED,
     )
     requirement = EvidenceRequirement(
         requirement_id="req_ni", serves_legacy_need_ids=("bear_0",), subject_scope=SubjectScope.COMPANY,

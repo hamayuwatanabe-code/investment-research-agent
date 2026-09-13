@@ -15,6 +15,7 @@ from investment_research.research.legacy_catalog import LEGACY_CATALOG, group_le
 from investment_research.research.source_routing import (
     ImplementationStatus,
     PlanStatus,
+    RequirementCriticality,
     StepStatus,
     TargetKind,
     compute_plan_status,
@@ -219,55 +220,109 @@ def test_building_graph_raises_if_a_real_group_is_left_unclassified(monkeypatch)
     assert raised
 
 
-# =========================== Phase 2.7: implementation status ==============
-def test_the_three_unimplemented_adapters_are_marked_not_implemented():
+# =========================== Phase 3A: implementation status ===============
+def test_form4_and_pubmed_adapters_are_declared_not_yet_coded():
+    """Only the two adapters Phase 3A actually built (SEC primary document,
+    SEC exhibit) are promoted; Form 4 XML parsing and PubMed/Europe PMC
+    remain honestly DECLARED -- Phase 3A never touched them (requirement 1:
+    never promote to an unearned level)."""
     graph = build_source_routing_graph()
-    not_implemented_adapters = {
+    declared_adapters = {
         s.adapter_id
         for s in graph.steps
-        if s.implementation_status is ImplementationStatus.NOT_IMPLEMENTED and s.adapter_id != "local_parser"
+        if s.implementation_status is ImplementationStatus.DECLARED and s.adapter_id not in ("local_parser", "none")
     }
-    assert not_implemented_adapters == {"sec_exhibit_enumeration", "form4_xml_parser", "pubmed_europepmc"}
+    assert declared_adapters == {"form4_xml_parser", "pubmed_europepmc"}
 
 
-def test_declaring_a_not_implemented_route_does_not_by_itself_make_the_target_infeasible():
-    """requirement 4's example: SEC exhibit enumeration is NOT_IMPLEMENTED,
-    but the web-search alternative exists, so the exhibit target stays
-    FEASIBLE (never blocked merely because ONE route is unimplemented when
-    another exists)."""
+def test_only_the_sec_primary_and_exhibit_adapters_are_offline_verified():
+    """Phase 3A requirement 1/5/6: AcquisitionExecutor plus the two SEC
+    adapters are built and proven against a FakeHttpClient this phase, so
+    (and only so) their steps earn OFFLINE_VERIFIED. Every other step
+    (ClinicalTrials, web search, Form 4, PubMed) is untouched and stays
+    below is_executor_ready -- OFFLINE_VERIFIED/EXECUTOR_WIRED/PIPELINE_
+    WIRED/LIVE_VERIFIED must never appear anywhere else in this catalog."""
     graph = build_source_routing_graph()
-    reqs = graph.requirements_for_need("bull_1")
-    exhibit_req = next(
-        r for r in reqs if graph.targets_for_requirement(r.requirement_id)[0].target_kind is TargetKind.SEC_EXHIBIT
-    )
-    target = graph.targets_for_requirement(exhibit_req.requirement_id)[0]
-    steps = graph.steps_for_target(target.target_id)
-    assert target_plan_status(target, steps) is PlanStatus.FEASIBLE
+    offline_verified_adapters = {
+        s.adapter_id for s in graph.steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
+    }
+    assert offline_verified_adapters == {"sec_primary_document_adapter", "sec_exhibit_enumeration"}
+    executor_ready_ids = {s.adapter_id for s in graph.steps if s.implementation_status.is_executor_ready}
+    assert executor_ready_ids == offline_verified_adapters
+    assert not any(s.implementation_status is ImplementationStatus.EXECUTOR_WIRED for s in graph.steps)
+    assert not any(s.implementation_status is ImplementationStatus.PIPELINE_WIRED for s in graph.steps)
+    assert not any(s.implementation_status is ImplementationStatus.LIVE_VERIFIED for s in graph.steps)
 
 
-def test_form4_and_literature_targets_are_feasible_via_web_fallback_despite_not_implemented_direct():
+def test_real_catalog_plan_status_is_executable_bounded_incomplete():
+    """Phase 3A requirement 2: with the SEC primary/exhibit adapters now
+    genuinely executor-ready (OFFLINE_VERIFIED) but every other source
+    (ClinicalTrials web fallback, Form 4, PubMed, web-only) still below that
+    bar, the honest aggregate is a MIX -- EXECUTABLE_BOUNDED_INCOMPLETE, never
+    NOT_EXECUTABLE (that would ignore the real SEC promotion) and never
+    EXECUTABLE_COMPLETE (that would overclaim the untouched sources). The 6
+    fda_dual regulator-confirmation requirements remain pending_materiality,
+    never folded into blocking (requirement 3)."""
     graph = build_source_routing_graph()
-    form4_req = graph.requirements_for_need("bear_12")[0]
-    form4_target = graph.targets_for_requirement(form4_req.requirement_id)[0]
-    assert target_plan_status(form4_target, graph.steps_for_target(form4_target.target_id)) is PlanStatus.FEASIBLE
-
-    lit_req = graph.requirements_for_need("bull_0")[0]
-    lit_target = graph.targets_for_requirement(lit_req.requirement_id)[0]
-    assert target_plan_status(lit_target, graph.steps_for_target(lit_target.target_id)) is PlanStatus.FEASIBLE
+    status, blocking, pending = compute_plan_status(graph)
+    assert status is PlanStatus.EXECUTABLE_BOUNDED_INCOMPLETE
+    assert blocking > 0
+    assert pending == 6  # exactly the 6 fda_dual regulator-confirmation requirements
 
 
-def test_real_catalog_plan_status_is_feasible_with_blocking_gaps():
-    """The 6 fda_dual regulator-confirmation targets have no path to content
-    acquisition at all (by design, not by implementation gap), and each
-    serves a blocking requirement -- the aggregate PlanStatus reflects this
-    honestly rather than reporting plain FEASIBLE."""
+def test_sec_primary_and_exhibit_targets_are_now_individually_executable():
     graph = build_source_routing_graph()
-    status, blocking = compute_plan_status(graph)
-    assert status is PlanStatus.FEASIBLE_WITH_BLOCKING_GAPS
-    assert blocking == 6
+    sec_target_kinds = {TargetKind.SEC_PRIMARY_DOCUMENT, TargetKind.SEC_EXHIBIT}
+    for target in graph.targets:
+        if target.target_kind not in sec_target_kinds:
+            continue
+        assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.EXECUTABLE_COMPLETE
 
 
-def test_routing_coverage_counts_reports_implementation_split():
+def test_non_sec_targets_remain_not_executable():
+    """ClinicalTrials/web-only/Form4/literature targets were never touched
+    this phase -- they must still read NOT_EXECUTABLE, never silently
+    upgraded by association with the SEC promotion."""
+    graph = build_source_routing_graph()
+    non_sec_kinds = {TargetKind.CLINICALTRIALS_RECORD, TargetKind.LITERATURE_ARTICLE, TargetKind.FORM4_FILING, TargetKind.GENERIC_WEB_DOCUMENT}
+    checked = 0
+    for target in graph.targets:
+        if target.target_kind not in non_sec_kinds:
+            continue
+        checked += 1
+        assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.NOT_EXECUTABLE
+    assert checked > 0
+
+
+def test_fda_regulator_confirmation_is_conditional_blocking_not_required():
+    graph = build_source_routing_graph()
+    reqs = graph.requirements_for_need("bear_0")  # "company fda concern"
+    regulator = next(r for r in reqs if r.independence_requirement)
+    disclosure = next(r for r in reqs if not r.independence_requirement)
+    assert regulator.criticality is RequirementCriticality.CONDITIONAL_BLOCKING
+    assert regulator.requires_materiality_assessment
+    assert disclosure.criticality is RequirementCriticality.REQUIRED
+    assert not disclosure.requires_materiality_assessment
+
+
+def test_routing_coverage_counts_reports_implementation_ladder_split():
     counts = routing_coverage_counts()
-    assert counts.not_implemented_steps == 8
-    assert counts.implemented_steps + counts.not_implemented_steps == counts.locate_steps + counts.fetch_steps + counts.parse_steps
+    assert counts.declared_steps > 0  # Form 4 / PubMed -- untouched this phase
+    assert counts.primitive_available_steps > 0  # generic web-fallback fetch/parse
+    assert counts.adapter_implemented_steps > 0  # ClinicalTrials direct fetch/parse
+    assert counts.executor_wired_steps == 0  # no step is wired-but-unverified
+    assert counts.pipeline_wired_steps == 0  # Pipeline.run() connection forbidden this phase
+    assert counts.offline_verified_steps > 0  # the SEC primary/exhibit chain, proven this phase
+    assert counts.live_verified_steps == 0  # no real network call was ever made
+    ladder_total = (
+        counts.declared_steps + counts.primitive_available_steps + counts.adapter_implemented_steps
+        + counts.executor_wired_steps + counts.pipeline_wired_steps + counts.offline_verified_steps
+        + counts.live_verified_steps + counts.disabled_steps
+    )
+    assert ladder_total == counts.locate_steps + counts.fetch_steps + counts.parse_steps
+
+
+def test_routing_coverage_counts_reports_criticality_split():
+    counts = routing_coverage_counts()
+    assert counts.conditional_blocking_requirements == 6  # the 6 fda_dual regulator sub-requirements
+    assert counts.required_requirements + counts.conditional_blocking_requirements + counts.best_effort_requirements == counts.evidence_requirements

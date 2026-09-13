@@ -67,6 +67,29 @@ RULES: tuple[ExtractionRule, ...] = (
         _rx(r"\bno longer\b[^.]*\b(?:pivotal|registrational)\b"),
     ),
     ExtractionRule(
+        "regulator_endpoint_not_accepted",
+        FactCategory.REGULATORY,
+        # Phase 3A requirement 8: a GENERIC rule for "the regulator did not
+        # consider the proposed endpoint appropriate/adequate/sufficient to
+        # establish effectiveness/efficacy" -- the class of statement that
+        # invalidated the real-world case this system was built to catch.
+        # ``endpoint_not_sufficient`` above already fires when the negation
+        # comes AFTER "endpoint" in the sentence ("the endpoint ... is not
+        # sufficient to demonstrate ..."); it misses the equally natural
+        # "did not consider the endpoint appropriate to establish
+        # effectiveness" phrasing, where the negation precedes "endpoint".
+        # Two order-independent branches cover both directions. No drug,
+        # company, or endpoint name appears in this pattern -- "endpoint" is
+        # the only domain anchor, exactly as generic as the existing rule.
+        _rx(
+            r"\bendpoint\b[^.]*?\b(?:not|never|no longer|does not consider|did not consider)\b"
+            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\bestablish\b[^.]*?\b(?:effectiveness|efficacy)\b"
+            r"|"
+            r"\b(?:not|never|no longer|does not consider|did not consider)\b[^.]*?\bendpoint\b"
+            r"[^.]*?\b(?:appropriate|adequate|sufficient)\b[^.]*?\bestablish\b[^.]*?\b(?:effectiveness|efficacy)\b"
+        ),
+    ),
+    ExtractionRule(
         "regulator_recommends_endpoints",
         FactCategory.REGULATORY,
         _rx(r"\brecommend(?:ed|s)?\b[^.]*\b(?:mortality|survival|MACE|objective measures)\b"),
