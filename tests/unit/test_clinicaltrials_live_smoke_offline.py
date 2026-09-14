@@ -225,20 +225,30 @@ def test_stale_after_days_threshold_matches_config_settings():
     assert Settings.__dataclass_fields__["stale_after_days"].default == live.REGISTRY_STALE_AFTER_DAYS
 
 
-def test_retrieved_at_is_never_confused_with_a_study_date():
+def test_as_of_date_is_never_confused_with_a_study_date():
     parsed = {
         "last_update_post": "2026-02-15", "last_update_submit": "2026-02-10",
         "primary_completion": "2026-06-30", "primary_completion_type": "ESTIMATED",
         "completion_date": "2026-12-31", "completion_date_type": "ESTIMATED",
     }
     freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
-    assert freshness.retrieved_at == "2026-09-14T00:00:00+00:00"
+    assert freshness.as_of_date == "2026-09-14T00:00:00+00:00"
     assert freshness.last_update_post == "2026-02-15"
     assert freshness.primary_completion == "2026-06-30"
     assert freshness.completion_date == "2026-12-31"
     # All four kept as four distinct values -- never collapsed into one.
-    assert len({freshness.retrieved_at[:10], freshness.last_update_post,
+    assert len({freshness.as_of_date[:10], freshness.last_update_post,
                 freshness.primary_completion, freshness.completion_date}) == 4
+
+
+def test_capture_retrieved_at_defaults_to_unknown_never_fabricated_from_as_of():
+    """_build_freshness_diagnostics's caller decides capture_retrieved_at
+    explicitly; when it doesn't (the default), it is UNKNOWN -- never
+    silently filled in from as_of_date (Phase 3D.3 requirement 2)."""
+    parsed = {"last_update_post": "2026-02-15"}
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    assert freshness.capture_retrieved_at == UNKNOWN
+    assert freshness.capture_retrieved_at != freshness.as_of_date
 
 
 def test_estimated_date_in_the_past_is_flagged_factually_never_interpreted():
@@ -311,7 +321,11 @@ def test_full_orchestration_populates_freshness_from_the_real_document():
     http = FakeHttpClient(responses=fx.default_responses())
     report = live.run_live_smoke(fx.NCT_ID, http_client=http)
     assert report.freshness is not None
-    assert report.freshness.retrieved_at == report.document_diagnostics["retrieved_at"]
+    # A genuine live run: both the as-of point AND the recorded capture
+    # time are the real Document.retrieved_at -- never fabricated, and
+    # equal to each other only because this IS the moment of capture.
+    assert report.freshness.as_of_date == report.document_diagnostics["retrieved_at"]
+    assert report.freshness.capture_retrieved_at == report.document_diagnostics["retrieved_at"]
     assert report.freshness.last_update_post == report.parsed_fields["last_update_post"]
 
 
@@ -333,7 +347,78 @@ def test_analyze_capture_freshness_populated_with_explicit_as_of(tmp_path):
     (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
     result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
     assert result["freshness"] is not None
-    assert result["freshness"].retrieved_at == "2026-09-14T00:00:00+00:00"
+    assert result["freshness"].as_of_date == "2026-09-14T00:00:00+00:00"
+    # --as-of is a re-analysis reference date, never a fabricated capture
+    # time -- analyze_capture() has no recorded capture metadata to draw
+    # one from (Phase 3D.3 requirement 2).
+    assert result["freshness"].capture_retrieved_at == UNKNOWN
+
+
+def test_analyze_capture_freshness_capture_retrieved_at_never_changes_with_as_of(tmp_path):
+    """--as-of only ever moves as_of_date; capture_retrieved_at must stay
+    UNKNOWN regardless of what --as-of is passed (Phase 3D.3 requirement 3)."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+
+    first = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-01-01T00:00:00+00:00")
+    second = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+
+    assert first["freshness"].as_of_date != second["freshness"].as_of_date
+    assert first["freshness"].capture_retrieved_at == UNKNOWN
+    assert second["freshness"].capture_retrieved_at == UNKNOWN
+
+
+def test_freshness_to_jsonable_is_a_plain_dict_with_real_types():
+    freshness = live._build_freshness_diagnostics(
+        {"last_update_post": "2026-02-15"}, "2026-09-14T00:00:00+00:00",
+    )
+    jsonable = live.freshness_to_jsonable(freshness)
+    assert isinstance(jsonable, dict)
+    assert jsonable["as_of_date"] == "2026-09-14T00:00:00+00:00"
+    assert jsonable["capture_retrieved_at"] == UNKNOWN
+    assert jsonable["days_since_last_update_post"] == 211
+    assert jsonable["stale_registry_record"] is False
+    # Never stringified -- real Python/JSON bool and int, not "True"/"211".
+    assert isinstance(jsonable["stale_registry_record"], bool)
+    assert isinstance(jsonable["days_since_last_update_post"], int)
+    assert not isinstance(jsonable["days_since_last_update_post"], bool)
+
+
+def test_freshness_to_jsonable_none_stays_none():
+    assert live.freshness_to_jsonable(None) is None
+
+
+def test_analyze_capture_freshness_serializes_as_a_json_object_not_a_repr_string(tmp_path, capsys):
+    """End-to-end: the printed --analyze-capture JSON output must round-trip
+    with freshness as a nested object whose bools/ints keep their real JSON
+    types -- reproduces the exact bug the real Mac re-analysis run
+    surfaced: "freshness": "RegistryFreshnessDiagnostics(...)" as one
+    opaque string (Phase 3D.3 requirement 1)."""
+    import hashlib
+    import json as json_module
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+
+    exit_code = live.main([
+        "--nct-id", fx.NCT_ID, "--analyze-capture", str(tmp_path), "--as-of", "2026-09-14T00:00:00+00:00",
+    ])
+    assert exit_code == 0
+    printed = capsys.readouterr().out
+    parsed_output = json_module.loads(printed)
+
+    freshness_obj = parsed_output["freshness"]
+    assert isinstance(freshness_obj, dict)
+    assert freshness_obj["as_of_date"] == "2026-09-14T00:00:00+00:00"
+    assert freshness_obj["capture_retrieved_at"] == UNKNOWN
+    assert isinstance(freshness_obj["stale_registry_record"], bool)
+    assert isinstance(freshness_obj["days_since_last_update_post"], int)
+    # The dataclass repr must never leak through as an opaque string.
+    assert "RegistryFreshnessDiagnostics" not in printed
 
 
 # --- Phase 3D.2 item 4: a report-shaped capture re-analyzes fully offline ---

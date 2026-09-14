@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -119,15 +119,32 @@ def _days_since(date_str: str, today_date: str) -> int | None:
 @dataclass(frozen=True)
 class RegistryFreshnessDiagnostics:
     """Date-only facts about how current this registry record is -- every
-    field here is a comparison between two dates CT.gov itself supplied
-    (or the retrieval timestamp this script itself recorded), never an
-    inference about trial status, completion, delay, or failure (Phase
-    3D.2 requirement 2). ``retrieved_at`` is kept structurally separate
-    from every study-registered date -- it is never treated as, compared
-    to represent, or substituted for a study date.
+    field here is a comparison between two dates CT.gov itself supplied (or
+    an explicit reference date the caller supplied), never an inference
+    about trial status, completion, delay, or failure (Phase 3D.2
+    requirement 2).
+
+    ``capture_retrieved_at`` and ``as_of_date`` are kept structurally
+    separate from each other and from every study-registered date (Phase
+    3D.3 requirement 2):
+
+    - ``capture_retrieved_at`` is the timestamp the ORIGINAL live HTTP
+      fetch actually recorded, if and only if that is known from capture
+      metadata this run actually has in hand. It is never inferred from a
+      file's mtime and never fabricated from ``as_of``/``--as-of`` -- a
+      re-analysis with no recorded capture metadata reports ``UNKNOWN``
+      here, full stop.
+    - ``as_of_date`` is simply the reference date freshness was computed
+      against (the real capture time for a live run; whatever an offline
+      caller explicitly passed via ``--as-of`` for a re-analysis). It is
+      never written back into ``capture_retrieved_at``, and neither of
+      these is ever treated as, compared to represent, or substituted for
+      a study-registered date (``last_update_post``/``primary_completion``/
+      ``completion_date``).
     """
 
-    retrieved_at: str
+    capture_retrieved_at: str
+    as_of_date: str
     last_update_post: str
     last_update_submit: str
     primary_completion: str
@@ -146,8 +163,10 @@ class RegistryFreshnessDiagnostics:
     estimated_completion_date_passed: bool | None
 
 
-def _build_freshness_diagnostics(parsed: dict[str, Any], retrieved_at: str) -> RegistryFreshnessDiagnostics:
-    today_date = retrieved_at[:10]
+def _build_freshness_diagnostics(
+    parsed: dict[str, Any], as_of_date: str, *, capture_retrieved_at: str = UNKNOWN,
+) -> RegistryFreshnessDiagnostics:
+    today_date = as_of_date[:10]
     last_update_post = parsed.get("last_update_post", UNKNOWN)
     days_since = _days_since(last_update_post, today_date)
     primary_completion = parsed.get("primary_completion", UNKNOWN)
@@ -155,7 +174,8 @@ def _build_freshness_diagnostics(parsed: dict[str, Any], retrieved_at: str) -> R
     completion_date = parsed.get("completion_date", UNKNOWN)
     completion_date_type = parsed.get("completion_date_type", UNKNOWN)
     return RegistryFreshnessDiagnostics(
-        retrieved_at=retrieved_at,
+        capture_retrieved_at=capture_retrieved_at,
+        as_of_date=as_of_date,
         last_update_post=last_update_post,
         last_update_submit=parsed.get("last_update_submit", UNKNOWN),
         primary_completion=primary_completion,
@@ -174,6 +194,16 @@ def _build_freshness_diagnostics(parsed: dict[str, Any], retrieved_at: str) -> R
             if completion_date_type == "ESTIMATED" else None
         ),
     )
+
+
+def freshness_to_jsonable(freshness: RegistryFreshnessDiagnostics | None) -> dict[str, Any] | None:
+    """A plain, JSON-safe ``dict`` for ``freshness`` -- real ``bool``/``int``/
+    ``str`` values, never a dataclass repr string and never a stringified
+    boolean or integer (Phase 3D.3 requirement 1). Any caller that will
+    ``json.dumps()`` a freshness result (rather than consume the dataclass
+    directly in Python) must go through this, not an f-string/``str()`` of
+    the dataclass itself."""
+    return asdict(freshness) if freshness is not None else None
 
 
 def resolve_user_agent(env: dict[str, str] | None = None) -> str:
@@ -403,7 +433,14 @@ def run_live_smoke(
             "retrieved_at": latest.document.retrieved_at,
         }
         if report.parsed_fields:
-            report.freshness = _build_freshness_diagnostics(report.parsed_fields, latest.document.retrieved_at)
+            # A genuine live run: the Document's own retrieved_at IS a real,
+            # actually-recorded capture time (never fabricated), and it is
+            # also the natural as-of point for freshness since the analysis
+            # happens immediately against what was just fetched.
+            report.freshness = _build_freshness_diagnostics(
+                report.parsed_fields, latest.document.retrieved_at,
+                capture_retrieved_at=latest.document.retrieved_at,
+            )
 
     for target_report in execution_report.target_reports:
         if target_report.outcome.value == "ACQUIRED":
@@ -441,7 +478,7 @@ def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> s
         "report either here."
     )
     lines.append(f"parsed_fields: {report.parsed_fields}")
-    lines.append(f"freshness: {report.freshness}")
+    lines.append(f"freshness: {json.dumps(freshness_to_jsonable(report.freshness))}")
     lines.append(
         "  note: freshness fields are date comparisons ONLY -- never read stale_registry_record "
         "or estimated_*_date_passed as completion/delay/failure; they say nothing beyond "
@@ -491,12 +528,18 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
     ``as_of`` (an ISO ``YYYY-MM-DDTHH:MM:SS+00:00`` timestamp, or at least a
     ``YYYY-MM-DD`` date) is the reference point for freshness diagnostics --
     ``_save_response`` never saves a capture timestamp (only the raw body,
-    per Phase 3C requirement 29), so there is no reliable "retrieved_at" to
+    per Phase 3C requirement 29), so there is no reliable capture time to
     recover from the file itself; a caller who wants freshness diagnostics
     from a re-analysis must supply one explicitly (e.g. the date the ORIGINAL
     live run actually happened, from its own printed report). Without it,
     freshness is simply omitted -- never guessed from the file's mtime or
     today's real date.
+
+    ``as_of`` becomes ONLY ``RegistryFreshnessDiagnostics.as_of_date`` here,
+    never ``capture_retrieved_at`` -- a re-analysis has no recorded capture
+    metadata to draw that from, so ``capture_retrieved_at`` is always
+    ``UNKNOWN`` in this path, regardless of what ``as_of`` is (Phase 3D.3
+    requirement 2).
     """
     normalized_nct_id = normalize_nct_id(nct_id)
     if not NCT_ID_RE.match(normalized_nct_id):
@@ -581,7 +624,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.analyze_capture is not None:
         result = analyze_capture(args.analyze_capture, nct_id=normalized_nct_id, as_of=args.as_of)
-        print(json.dumps(result, indent=2, default=str))
+        # freshness is a RegistryFreshnessDiagnostics dataclass in the
+        # Python-level result dict (typed attribute access for callers that
+        # import this module); printed JSON must instead be a real nested
+        # object -- json.dumps(..., default=str) on the dataclass directly
+        # would silently fall back to its repr string (Phase 3D.3
+        # requirement 1), so it is converted explicitly here, at the one
+        # place this result actually becomes JSON text.
+        printable = {**result, "freshness": freshness_to_jsonable(result.get("freshness"))}
+        print(json.dumps(printable, indent=2, default=str))
         return 0 if result.get("found") else 1
 
     repo_root = Path(__file__).resolve().parents[3]

@@ -13,6 +13,15 @@ safe to re-run any number of times):
     python3 scripts/clinicaltrials_live_smoke.py --nct-id NCT01234567 \
         --analyze-capture data/live_smoke/clinicaltrials/<TIMESTAMP>
 
+To also get freshness diagnostics from an offline re-analysis, pass the
+date/time the ORIGINAL live run happened (from that run's own printed
+report) as --as-of; without it, freshness is omitted, never guessed from
+the capture file's mtime or today's real date:
+
+    python3 scripts/clinicaltrials_live_smoke.py --nct-id NCT01234567 \
+        --analyze-capture data/live_smoke/clinicaltrials/<TIMESTAMP> \
+        --as-of 2026-09-14T12:00:00+00:00
+
 See ``python3 scripts/clinicaltrials_live_smoke.py --help`` for every
 option, and ``src/investment_research/research/clinicaltrials_live_smoke.py``'s
 module docstring for exactly what this does and does not do:
