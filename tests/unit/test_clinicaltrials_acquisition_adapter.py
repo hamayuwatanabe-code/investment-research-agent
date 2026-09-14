@@ -35,7 +35,7 @@ from investment_research.research.source_routing import (
     TargetAcquisitionOutcome,
     TargetKind,
 )
-from investment_research.schemas.enums import DocumentAuthority, ResearchDomain, SourceTier
+from investment_research.schemas.enums import UNKNOWN, DocumentAuthority, ResearchDomain, SourceTier
 from investment_research.schemas.fact import Fact, RawFact, Source
 
 from . import _clinicaltrials_fixture_support as fx
@@ -417,3 +417,47 @@ def test_clinicaltrials_alone_never_reported_as_science_or_regulatory_sufficient
 
     assert "evidence_sufficiency" not in module.__dict__
     assert not hasattr(module, "domain_is_sufficient")
+
+
+def test_registry_can_confirm_status_design_and_endpoint_wording_only():
+    """What a successful fetch DOES let a caller confirm -- registered
+    status, phase/design, and the verbatim endpoint wording -- versus what
+    it never can: FDA acceptance of that endpoint, efficacy, peer review,
+    or independent regulatory confirmation of anything the sponsor
+    registered (Phase 3D.2 requirement 3)."""
+    parsed = parse_study(json.loads(fx.fixture_text("study_recruiting_interventional.json")))
+    # Confirmable from the registry alone:
+    assert parsed["status"] != UNKNOWN
+    assert parsed["phase"] != UNKNOWN
+    assert parsed["allocation"] != UNKNOWN
+    assert parsed["primary_endpoint"] != UNKNOWN
+    # Never present anywhere in the parsed record or in the RawFact claims:
+    forbidden_substrings = (
+        "fda", "regulator_agree", "regulator agrees", "endpoint accepted",
+        "accepted by", "peer review", "peer-reviewed", "independently confirmed",
+    )
+    parsed_text = " ".join(str(v).lower() for v in parsed.values() if isinstance(v, (str, int, float, bool)))
+    for forbidden in forbidden_substrings:
+        assert forbidden not in parsed_text
+
+    raw_facts = raw_facts_from_study(
+        "TEST", parsed, Source(source_id="s1", url=fx.study_url(fx.NCT_ID), title="t", tier=SourceTier.TIER_1),
+    )
+    claims_text = " ".join(f.claim.lower() for f in raw_facts)
+    for forbidden in forbidden_substrings:
+        assert forbidden not in claims_text
+
+
+# --- Phase 3D.2: physical vs. logical request classification (regression) --
+def test_direct_api_requests_reflects_the_actual_direct_api_call():
+    """Regression for the bug the real Mac run surfaced: FETCH's own
+    acquisition_method is EXISTING_DIRECT_API (CT.gov's API v2 single-study
+    endpoint IS the direct/structured API), so its one physical GET must be
+    counted via direct_api_requests, never direct_http_requests -- the
+    original bug reported the exact opposite split (0/1 instead of 1/0)."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report, store, target = _run(fx.NCT_ID, http)
+    diag = report.diagnostics
+    assert diag.direct_api_requests == 1
+    assert diag.direct_http_requests == 0
+    assert diag.direct_api_requests + diag.direct_http_requests == len(http.requested_urls)

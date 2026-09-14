@@ -554,3 +554,38 @@ def test_sec_user_agent_requirement_is_satisfied_via_settings_and_httpclient():
     exhibit = SecExhibitAdapter(http)
     assert primary.http is http
     assert exhibit.http is http
+
+
+# --- Phase 3D.1: physical vs. logical request classification (regression) --
+def test_direct_api_and_http_request_split_matches_submissions_vs_generic_fetches():
+    """Locks down SEC's existing, correct split so it is never silently
+    disturbed by a future change elsewhere (e.g. the ClinicalTrials fix
+    that corrected a step reporting a direct-API call as a generic HTTP
+    fetch instead). Primary LOCATE's own submissions.json lookup is the
+    ONE genuinely direct-API-classified call (EXISTING_DIRECT_API);
+    everything else this combined run touches (the accession directory
+    listing, the primary body, the filing detail HTML, the exhibit body)
+    is a generic HTTP fetch of a known/resolved URL, never itself "the
+    direct API" -- direct_api_requests + direct_http_requests must equal
+    the number of distinct physical GETs actually made, never merely
+    approximate it."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    store = DocumentStore()
+    executor = AcquisitionExecutor(
+        adapters={
+            "sec_primary_document_adapter": SecPrimaryDocumentAdapter(http),
+            "sec_exhibit_enumeration": SecExhibitAdapter(http),
+        },
+        document_store=store,
+    )
+    graph, primary_target, exhibit_target = _combined()
+    report = executor.run(
+        graph, filing_references={primary_target.target_id: _ref()},
+        exhibit_selectors={exhibit_target.target_id: _selection()},
+    )
+    assert report.diagnostics.direct_api_requests == 1  # submissions.json only
+    assert report.diagnostics.direct_http_requests == 4  # directory + primary body + filing detail + exhibit body
+    assert (
+        report.diagnostics.direct_api_requests + report.diagnostics.direct_http_requests
+        == len(http.requested_urls)
+    )

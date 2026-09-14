@@ -191,6 +191,19 @@ class ClinicalTrialsStudyAdapter:
                 payload=cached.payload, cache_hit=True, failure_reason=cached.failure_reason,
             )
 
+        # Phase 3D.1 fix: this step's own acquisition_method is
+        # EXISTING_DIRECT_API (the CT.gov API v2 single-study endpoint IS
+        # the direct/structured API, not a generic HTTP fetch of an
+        # arbitrary resolved URL) -- so every physical GET this method
+        # attempts, success or failure alike, is reported via
+        # api_requests_made, never http_requests_made. Reporting it as
+        # http_requests_made (the original bug) made
+        # ExecutionDiagnostics.direct_api_requests silently read 0 for a
+        # run that made a real direct-API call, conflating the LOGICAL
+        # acquisition-method classification with the raw physical request
+        # count -- see acquisition_executor.py's _tally(), which now sums
+        # both counters unconditionally but still trusts each adapter to
+        # classify its OWN requests correctly in the first place.
         fetch = self.http.get(url)
         if not fetch.ok:
             # A 404 means "no such study" -- a definitive negative, never
@@ -201,7 +214,7 @@ class ClinicalTrialsStudyAdapter:
             # StepStatus value per HTTP status (Phase 3D requirement 6).
             status = StepStatus.NOT_FOUND if fetch.outcome is FetchOutcome.NOT_FOUND else StepStatus.FAILED
             result = StepExecutionResult(
-                step_id=step.step_id, status=status, http_requests_made=1,
+                step_id=step.step_id, status=status, api_requests_made=1,
                 failure_reason=f"GET {url} failed: {fetch.outcome} {fetch.error}",
             )
             context.request_cache[cache_key] = result
@@ -210,14 +223,14 @@ class ClinicalTrialsStudyAdapter:
         payload = fetch.json()
         if payload is None:
             result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
+                step_id=step.step_id, status=StepStatus.FAILED, api_requests_made=1,
                 failure_reason=f"response body was not valid JSON: {fetch.error}",
             )
             context.request_cache[cache_key] = result
             return result
         if not isinstance(payload, dict) or "protocolSection" not in payload:
             result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
+                step_id=step.step_id, status=StepStatus.FAILED, api_requests_made=1,
                 failure_reason="response did not match the expected CT.gov API v2 study shape (no protocolSection)",
             )
             context.request_cache[cache_key] = result
@@ -226,7 +239,7 @@ class ClinicalTrialsStudyAdapter:
         text = json.dumps(payload, sort_keys=True)
         if len(text.strip()) < MIN_BODY_CHARS:
             result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
+                step_id=step.step_id, status=StepStatus.FAILED, api_requests_made=1,
                 failure_reason="response body too short to be a real study record",
             )
             context.request_cache[cache_key] = result
@@ -283,7 +296,7 @@ class ClinicalTrialsStudyAdapter:
         result_payload = {"url": url, "nct_id": nct_id, "document_id": stored.document_id, "study": payload}
         result = StepExecutionResult(
             step_id=step.step_id, status=StepStatus.STRUCTURED_RECORD_RETRIEVED,
-            document_id=stored.document_id, http_requests_made=1, payload=result_payload,
+            document_id=stored.document_id, api_requests_made=1, payload=result_payload,
         )
         context.request_cache[cache_key] = result
         return result

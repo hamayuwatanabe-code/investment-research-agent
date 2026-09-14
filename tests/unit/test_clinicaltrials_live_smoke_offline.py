@@ -8,9 +8,11 @@ real-API-v2-format fixtures) in place of ``AllowlistedHttpClient``.
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 from investment_research.research import clinicaltrials_live_smoke as live
+from investment_research.schemas.enums import UNKNOWN
 
 from . import _clinicaltrials_fixture_support as fx
 from ._clinicaltrials_fixture_support import FakeHttpClient
@@ -212,3 +214,188 @@ def test_no_nct_id_is_hardcoded_as_a_default_anywhere():
     assert inspect.signature(live.run_live_smoke).parameters["nct_id"].default is inspect.Parameter.empty
     assert inspect.signature(live.build_plan).parameters["nct_id"].default is inspect.Parameter.empty
     assert live.main([]) == 1  # no --nct-id supplied -> refuses, never guesses one
+
+
+# --- Phase 3D.2: registry freshness diagnostics -----------------------------
+def test_stale_after_days_threshold_matches_config_settings():
+    """One staleness threshold for the whole system -- never a second,
+    independently-chosen number living only in this module."""
+    from investment_research.config import Settings
+
+    assert Settings.__dataclass_fields__["stale_after_days"].default == live.REGISTRY_STALE_AFTER_DAYS
+
+
+def test_retrieved_at_is_never_confused_with_a_study_date():
+    parsed = {
+        "last_update_post": "2026-02-15", "last_update_submit": "2026-02-10",
+        "primary_completion": "2026-06-30", "primary_completion_type": "ESTIMATED",
+        "completion_date": "2026-12-31", "completion_date_type": "ESTIMATED",
+    }
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    assert freshness.retrieved_at == "2026-09-14T00:00:00+00:00"
+    assert freshness.last_update_post == "2026-02-15"
+    assert freshness.primary_completion == "2026-06-30"
+    assert freshness.completion_date == "2026-12-31"
+    # All four kept as four distinct values -- never collapsed into one.
+    assert len({freshness.retrieved_at[:10], freshness.last_update_post,
+                freshness.primary_completion, freshness.completion_date}) == 4
+
+
+def test_estimated_date_in_the_past_is_flagged_factually_never_interpreted():
+    parsed = {
+        "last_update_post": "2026-02-15", "last_update_submit": "2026-02-10",
+        "primary_completion": "2026-06-30", "primary_completion_type": "ESTIMATED",
+        "completion_date": "2027-01-01", "completion_date_type": "ESTIMATED",
+    }
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    assert freshness.estimated_primary_completion_date_passed is True  # 2026-06-30 < 2026-09-14
+    assert freshness.estimated_completion_date_passed is False  # 2027-01-01 is still in the future
+    # The dataclass carries no field named anything like "delayed"/"failed"/"completed".
+    field_names = {f.name for f in fields(freshness)}
+    assert field_names.isdisjoint({"delayed", "failed", "trial_completed", "success"})
+
+
+def test_actual_typed_date_is_never_flagged_as_passed():
+    """An ACTUAL-typed date having "passed" is not an informative fact (it
+    already happened by definition) -- only ESTIMATED dates are flagged."""
+    parsed = {
+        "last_update_post": "2026-02-15",
+        "primary_completion": "2020-01-01", "primary_completion_type": "ACTUAL",
+        "completion_date": UNKNOWN, "completion_date_type": UNKNOWN,
+    }
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    assert freshness.estimated_primary_completion_date_passed is None
+    assert freshness.estimated_completion_date_passed is None
+
+
+def test_partial_dates_never_padded_before_comparison():
+    parsed = {
+        "last_update_post": "2026-02-15",
+        "primary_completion": "2026", "primary_completion_type": "ESTIMATED",
+        "completion_date": "2026-03", "completion_date_type": "ESTIMATED",
+    }
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    # "2026" compared only at year precision against "2026" (today's year) -- equal, not "passed".
+    assert freshness.estimated_primary_completion_date_passed is False
+    # "2026-03" compared at month precision against "2026-09" -- March < September -> passed.
+    assert freshness.estimated_completion_date_passed is True
+
+
+def test_missing_dates_never_guessed():
+    parsed = {"last_update_post": UNKNOWN, "primary_completion": UNKNOWN,
+              "primary_completion_type": UNKNOWN, "completion_date": UNKNOWN,
+              "completion_date_type": UNKNOWN}
+    freshness = live._build_freshness_diagnostics(parsed, "2026-09-14T00:00:00+00:00")
+    assert freshness.days_since_last_update_post is None
+    assert freshness.stale_registry_record is None
+    assert freshness.estimated_primary_completion_date_passed is None
+    assert freshness.estimated_completion_date_passed is None
+
+
+def test_stale_registry_record_flag_is_purely_a_day_count():
+    fresh = live._build_freshness_diagnostics(
+        {"last_update_post": "2026-08-01"}, "2026-09-14T00:00:00+00:00",
+    )
+    assert fresh.days_since_last_update_post == 44
+    assert fresh.stale_registry_record is False
+
+    old = live._build_freshness_diagnostics(
+        {"last_update_post": "2024-01-01"}, "2026-09-14T00:00:00+00:00",
+    )
+    assert old.days_since_last_update_post is not None
+    assert old.days_since_last_update_post > live.REGISTRY_STALE_AFTER_DAYS
+    assert old.stale_registry_record is True
+
+
+def test_full_orchestration_populates_freshness_from_the_real_document():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(fx.NCT_ID, http_client=http)
+    assert report.freshness is not None
+    assert report.freshness.retrieved_at == report.document_diagnostics["retrieved_at"]
+    assert report.freshness.last_update_post == report.parsed_fields["last_update_post"]
+
+
+def test_analyze_capture_freshness_omitted_without_as_of(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID)
+    assert result["freshness"] is None  # never guessed from file mtime or today's real date
+
+
+def test_analyze_capture_freshness_populated_with_explicit_as_of(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["freshness"] is not None
+    assert result["freshness"].retrieved_at == "2026-09-14T00:00:00+00:00"
+
+
+# --- Phase 3D.2 item 4: a report-shaped capture re-analyzes fully offline ---
+#
+# study_recruiting_interventional_v2.json is structurally the same shape a
+# real ACTIVE_NOT_RECRUITING / ACTUAL-enrollment / has_results=False study
+# report takes (see MANIFEST.md) -- it is a synthetic, neutral fixture, not
+# any real issuer's data. analyze_capture() itself never accepts an
+# http_client parameter at all, so there is no live-transport code path it
+# could reach even in error; this test locks that structural guarantee down
+# against a capture shaped like a real Live Smoke run's own output.
+def test_analyze_capture_reanalyzes_a_report_shaped_capture_fully_offline(tmp_path):
+    import hashlib
+    import inspect
+
+    assert "http_client" not in inspect.signature(live.analyze_capture).parameters
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(
+        fx.fixture_text("study_recruiting_interventional_v2.json"), encoding="utf-8",
+    )
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+
+    assert result["found"] is True
+    assert result["schema_ok"] is True
+    assert result["parsed_fields"]["status"] == "ACTIVE_NOT_RECRUITING"
+    assert result["parsed_fields"]["enrollment"] == 150
+    assert result["parsed_fields"]["enrollment_type"] == "ACTUAL"
+    assert result["parsed_fields"]["has_results"] is False
+    assert result["freshness"] is not None
+    # A later lastUpdatePost than the offline as_of would be a fixture-data
+    # bug, not something this test should silently tolerate.
+    assert result["freshness"].days_since_last_update_post is not None
+    assert result["freshness"].days_since_last_update_post >= 0
+
+
+# --- Phase 3D.2 item 5: LIVE_VERIFIED is scoped per target, never global ---
+def test_live_verified_candidates_are_diagnostic_only_never_a_code_change():
+    """Mirrors sec_live_smoke's own regression: running this smoke test must
+    never touch source_routing_catalog.py or promote any step's
+    ImplementationStatus in code -- confirmed by the fact that the real
+    catalog's build function is never even imported by this module."""
+    import investment_research.research.clinicaltrials_live_smoke as module
+
+    assert "source_routing_catalog" not in module.__dict__
+    assert not hasattr(module, "build_source_routing_graph")
+
+
+def test_live_verified_candidates_scoped_to_this_one_targets_own_steps():
+    """A single-NCT-ID smoke run's live_verified_candidates must never imply
+    success of the broader ClinicalTrials.gov schema or of any other
+    Evidence Requirement -- only the LOCATE/FETCH/PARSE steps of THIS one
+    target, for THIS one study, actually ran."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(fx.NCT_ID, http_client=http)
+
+    assert report.live_verified_candidates
+    for candidate in report.live_verified_candidates:
+        target_id, _, step_id = candidate.partition(":")
+        assert target_id == "target_ct_smoke"
+        assert step_id in {"l1", "f", "p"}
+    # Confirms this diagnostic never widens beyond the one target this run
+    # actually executed.
+    assert len({c.partition(":")[0] for c in report.live_verified_candidates}) == 1

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from ..collectors.clinicaltrials import STUDY_DETAIL_URL, parse_study
-from ..schemas.enums import ResearchDomain
+from ..schemas.enums import UNKNOWN, ResearchDomain
 from .acquisition_executor import AcquisitionExecutor, ExecutionReport
 from .acquisition_planning import AcquisitionMethod
 from .checks import SubjectScope
@@ -75,6 +75,105 @@ CT_USER_AGENT_ENV_VAR = "IRA_CLINICALTRIALS_USER_AGENT"
 #: identifies the tool without embedding anyone's contact information, and
 #: is used whenever the optional env var above is unset.
 DEFAULT_CT_USER_AGENT = "investment-research-agent-clinicaltrials-live-smoke/1.0"
+
+
+#: Kept equal to config.Settings.stale_after_days's own default by a
+#: dedicated test (test_placeholder_matches_config_default's sibling for
+#: this constant) -- one staleness threshold for the whole system, never a
+#: second independently-chosen number.
+REGISTRY_STALE_AFTER_DAYS = 400
+
+
+def _partial_date_passed(candidate: str, today_date: str) -> bool | None:
+    """Whether ``candidate`` (an ISO date, possibly PARTIAL -- ``"2026"``,
+    ``"2026-03"``, or ``"2026-03-15"``) is entirely before ``today_date``
+    (a full ``YYYY-MM-DD``), compared ONLY at candidate's own precision --
+    never padded or completed into a fuller date than CT.gov itself
+    asserted. Returns ``None`` (never a guess) if candidate is UNKNOWN/empty.
+
+    Purely a date-ordering fact -- callers must never read a ``True`` here
+    as "the trial is late/failed/delayed"; it says nothing beyond "the
+    calendar period CT.gov registered has elapsed" (Phase 3D.2 requirement 2).
+    """
+    if not candidate or candidate == UNKNOWN:
+        return None
+    length = min(len(candidate), len(today_date))
+    return candidate[:length] < today_date[:length]
+
+
+def _days_since(date_str: str, today_date: str) -> int | None:
+    """Whole days between a FULL ``YYYY-MM-DD`` date and ``today_date`` --
+    ``None`` for a partial or UNKNOWN date rather than guessing a day count
+    from incomplete precision."""
+    import re as _re
+    from datetime import date as _date
+
+    if not date_str or date_str == UNKNOWN or not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+        return None
+    try:
+        return (_date.fromisoformat(today_date) - _date.fromisoformat(date_str)).days
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class RegistryFreshnessDiagnostics:
+    """Date-only facts about how current this registry record is -- every
+    field here is a comparison between two dates CT.gov itself supplied
+    (or the retrieval timestamp this script itself recorded), never an
+    inference about trial status, completion, delay, or failure (Phase
+    3D.2 requirement 2). ``retrieved_at`` is kept structurally separate
+    from every study-registered date -- it is never treated as, compared
+    to represent, or substituted for a study date.
+    """
+
+    retrieved_at: str
+    last_update_post: str
+    last_update_submit: str
+    primary_completion: str
+    primary_completion_type: str
+    completion_date: str
+    completion_date_type: str
+    #: None when last_update_post is absent/partial (never guessed).
+    days_since_last_update_post: int | None
+    stale_after_days_threshold: int
+    #: None when days_since_last_update_post is None.
+    stale_registry_record: bool | None
+    #: None unless primary_completion_type == "ESTIMATED" AND the date is
+    #: present -- an ACTUAL-typed date having "passed" is not an
+    #: informative fact (it already happened by definition).
+    estimated_primary_completion_date_passed: bool | None
+    estimated_completion_date_passed: bool | None
+
+
+def _build_freshness_diagnostics(parsed: dict[str, Any], retrieved_at: str) -> RegistryFreshnessDiagnostics:
+    today_date = retrieved_at[:10]
+    last_update_post = parsed.get("last_update_post", UNKNOWN)
+    days_since = _days_since(last_update_post, today_date)
+    primary_completion = parsed.get("primary_completion", UNKNOWN)
+    primary_completion_type = parsed.get("primary_completion_type", UNKNOWN)
+    completion_date = parsed.get("completion_date", UNKNOWN)
+    completion_date_type = parsed.get("completion_date_type", UNKNOWN)
+    return RegistryFreshnessDiagnostics(
+        retrieved_at=retrieved_at,
+        last_update_post=last_update_post,
+        last_update_submit=parsed.get("last_update_submit", UNKNOWN),
+        primary_completion=primary_completion,
+        primary_completion_type=primary_completion_type,
+        completion_date=completion_date,
+        completion_date_type=completion_date_type,
+        days_since_last_update_post=days_since,
+        stale_after_days_threshold=REGISTRY_STALE_AFTER_DAYS,
+        stale_registry_record=(days_since > REGISTRY_STALE_AFTER_DAYS) if days_since is not None else None,
+        estimated_primary_completion_date_passed=(
+            _partial_date_passed(primary_completion, today_date)
+            if primary_completion_type == "ESTIMATED" else None
+        ),
+        estimated_completion_date_passed=(
+            _partial_date_passed(completion_date, today_date)
+            if completion_date_type == "ESTIMATED" else None
+        ),
+    )
 
 
 def resolve_user_agent(env: dict[str, str] | None = None) -> str:
@@ -119,6 +218,7 @@ class LiveSmokeReport:
     parsed_fields: dict[str, Any] = field(default_factory=dict)
     fixture_diff: dict[str, Any] = field(default_factory=dict)
     document_diagnostics: dict[str, Any] = field(default_factory=dict)
+    freshness: RegistryFreshnessDiagnostics | None = None
     live_verified_candidates: list[str] = field(default_factory=list)
     anthropic_api_calls: int = 0
     web_search_calls: int = 0
@@ -300,7 +400,10 @@ def run_live_smoke(
             "is_company_ir": latest.document.is_company_ir,
             "content_kind": latest.document.content_kind.value,
             "content_hash": latest.content_hash(),
+            "retrieved_at": latest.document.retrieved_at,
         }
+        if report.parsed_fields:
+            report.freshness = _build_freshness_diagnostics(report.parsed_fields, latest.document.retrieved_at)
 
     for target_report in execution_report.target_reports:
         if target_report.outcome.value == "ACQUIRED":
@@ -338,6 +441,12 @@ def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> s
         "report either here."
     )
     lines.append(f"parsed_fields: {report.parsed_fields}")
+    lines.append(f"freshness: {report.freshness}")
+    lines.append(
+        "  note: freshness fields are date comparisons ONLY -- never read stale_registry_record "
+        "or estimated_*_date_passed as completion/delay/failure; they say nothing beyond "
+        "'this much calendar time has elapsed since CT.gov's own registered dates'."
+    )
     lines.append(f"fixture_diff: {report.fixture_diff}")
     lines.append(f"live_verified_candidates (diagnostic only, no code was changed): {report.live_verified_candidates}")
     lines.append(f"anthropic_api_calls: {report.anthropic_api_calls}")
@@ -374,10 +483,21 @@ def _load_captured_body(capture_dir: Path, url: str) -> str | None:
     return None
 
 
-def analyze_capture(capture_dir: Path, *, nct_id: str) -> dict[str, Any]:
+def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None) -> dict[str, Any]:
     """Re-analyze an already-saved response body from a prior live run,
     entirely offline. Makes ZERO network calls, touches NO marker file, and
-    is safe to run any number of times."""
+    is safe to run any number of times.
+
+    ``as_of`` (an ISO ``YYYY-MM-DDTHH:MM:SS+00:00`` timestamp, or at least a
+    ``YYYY-MM-DD`` date) is the reference point for freshness diagnostics --
+    ``_save_response`` never saves a capture timestamp (only the raw body,
+    per Phase 3C requirement 29), so there is no reliable "retrieved_at" to
+    recover from the file itself; a caller who wants freshness diagnostics
+    from a re-analysis must supply one explicitly (e.g. the date the ORIGINAL
+    live run actually happened, from its own printed report). Without it,
+    freshness is simply omitted -- never guessed from the file's mtime or
+    today's real date.
+    """
     normalized_nct_id = normalize_nct_id(nct_id)
     if not NCT_ID_RE.match(normalized_nct_id):
         return {
@@ -393,12 +513,14 @@ def analyze_capture(capture_dir: Path, *, nct_id: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         return {"capture_dir": str(capture_dir), "url": url, "found": True, "error": f"invalid JSON: {exc}"}
     parsed = parse_study(payload) if isinstance(payload, dict) and "protocolSection" in payload else None
+    freshness = _build_freshness_diagnostics(parsed, as_of) if parsed is not None and as_of else None
     return {
         "capture_dir": str(capture_dir),
         "url": url,
         "found": True,
         "schema_ok": parsed is not None,
         "parsed_fields": parsed,
+        "freshness": freshness,
         "fixture_diff": _diff_against_fixture(payload) if isinstance(payload, dict) else {"error": "not a JSON object"},
     }
 
@@ -443,6 +565,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Offline-only mode: re-analyze an already-saved response body under DIR. Makes NO "
         "network call and does not touch the one-time marker. Requires --nct-id.",
     )
+    parser.add_argument(
+        "--as-of", type=str, default=None,
+        help="ISO date/timestamp to use as the freshness reference point for --analyze-capture "
+        "(e.g. the date the ORIGINAL live run happened, from its own printed report). Freshness "
+        "diagnostics are omitted, never guessed from the file's mtime or today's date, if this "
+        "is not given.",
+    )
     args = parser.parse_args(argv)
 
     if not args.nct_id:
@@ -451,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     normalized_nct_id = normalize_nct_id(args.nct_id)
 
     if args.analyze_capture is not None:
-        result = analyze_capture(args.analyze_capture, nct_id=normalized_nct_id)
+        result = analyze_capture(args.analyze_capture, nct_id=normalized_nct_id, as_of=args.as_of)
         print(json.dumps(result, indent=2, default=str))
         return 0 if result.get("found") else 1
 
