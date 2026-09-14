@@ -99,6 +99,43 @@ def test_full_chain_executes_in_dependency_order_and_completes_the_target():
     assert report.diagnostics.incomplete_targets == 0
 
 
+def test_a_step_reporting_both_api_and_http_requests_tallies_both():
+    """Regression: a real SEC LOCATE step can make BOTH an authoritative
+    API-shaped request (submissions) AND a plain HTTP request (the
+    accession directory listing) within the SAME StepExecutionResult.
+    _tally() used to pick exactly one bucket based on the step's declared
+    acquisition_method (EXISTING_DIRECT_API -> only api_requests_made
+    counted, anything else -> only http_requests_made counted), silently
+    discarding whichever counter did not match -- undercounting real
+    physical requests. Both must be tallied regardless of the step's own
+    acquisition_method label."""
+    requirement, target, steps = _document_target("b", locate_method=AcquisitionMethod.EXISTING_DIRECT_API)
+
+    locate = FakeAdapter({
+        "l1_b": StepExecutionResult(
+            step_id="l1_b", status=StepStatus.URL_RESOLVED, payload={"url": "https://example.test/doc"},
+            api_requests_made=1, http_requests_made=1,
+        )
+    })
+    fetch = FakeAdapter({"f_b": StepExecutionResult(step_id="f_b", status=StepStatus.BODY_FETCHED, document_id="doc_1", http_requests_made=1)})
+    parse = FakeAdapter({"p_b": StepExecutionResult(step_id="p_b", status=StepStatus.PARSED, document_id="doc_1")})
+
+    graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=tuple(steps))
+    executor = AcquisitionExecutor(
+        adapters={"fake_locate": locate, "fake_fetch": fetch, "fake_parse": parse},
+        document_store=DocumentStore(),
+    )
+    report = executor.run(graph)
+
+    # l1_b (EXISTING_DIRECT_API) contributes 1 to EACH bucket; f_b
+    # (KNOWN_URL_HTTP) contributes 1 more to direct_http_requests.
+    assert report.diagnostics.direct_api_requests == 1
+    assert report.diagnostics.direct_http_requests == 2
+    # The physical-request total this step actually made must never be
+    # silently smaller than what it reported.
+    assert report.diagnostics.direct_api_requests + report.diagnostics.direct_http_requests == 3
+
+
 def test_metadata_only_never_completes_a_target_via_the_executor():
     requirement, target, steps = _document_target("b")
     graph = SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=tuple(steps))

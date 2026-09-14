@@ -348,10 +348,16 @@ class AcquisitionExecutor:
         if result.cache_hit:
             diagnostics.cache_hits += 1
             diagnostics.duplicate_acquisition_avoided += 1
-        if step.acquisition_method is AcquisitionMethod.EXISTING_DIRECT_API:
-            diagnostics.direct_api_requests += result.api_requests_made
-        else:
-            diagnostics.direct_http_requests += result.http_requests_made
+        # A single step can make BOTH kinds of physical request in one call
+        # (e.g. a LOCATE step whose adapter fetches an authoritative API
+        # payload AND a plain HTTP directory listing before resolving a
+        # URL) -- both counters are independent facts about what this one
+        # StepExecutionResult actually did, never a choice gated on the
+        # step's own declared acquisition_method. Discarding one because
+        # the step "is" the other kind silently drops a real physical
+        # request from every diagnostic downstream of ExecutionDiagnostics.
+        diagnostics.direct_api_requests += result.api_requests_made
+        diagnostics.direct_http_requests += result.http_requests_made
 
         succeeded = result.status == step.completion_condition
         if step.step_kind is StepKind.FETCH:

@@ -7,6 +7,14 @@ tool never creates or requires a ``.env`` file, and never prints the value):
     python3 scripts/sec_live_smoke.py --cik 320193 --out-dir /tmp/sec_smoke
     python3 scripts/sec_live_smoke.py --force-rerun
 
+To re-analyze an already-saved capture directory OFFLINE (no network,
+no marker, safe to re-run any number of times):
+
+    python3 scripts/sec_live_smoke.py --analyze-capture data/live_smoke/sec_edgar/<TIMESTAMP> \
+        --cik 320193 --accession 0000320193-25-000079 \
+        --primary-document aapl-20250927.htm \
+        --exhibit-filename a10-kexhibit31109272025.htm --exhibit-type EX-31.1
+
 See ``python3 scripts/sec_live_smoke.py --help`` for every option, and
 ``src/investment_research/research/sec_live_smoke.py``'s module docstring
 for exactly what this does and does not do:

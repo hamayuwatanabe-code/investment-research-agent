@@ -11,7 +11,9 @@ loopback server, never the internet.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 from investment_research.config import Settings
 from investment_research.research import sec_live_smoke as live
@@ -303,6 +305,248 @@ def test_live_verified_candidates_are_diagnostic_only_never_a_code_change():
 
     assert "source_routing_catalog" not in module.__dict__
     assert not hasattr(module, "build_source_routing_graph")
+
+
+# --- Phase 3C.1: post-live reconciliation regressions ------------------------
+#
+# Reproduces the real Mac live run's own finding: this script's OWN
+# DEFAULT_EXHIBIT_PRIORITY_KEYWORDS (smoke-only, ranks certification/EX-31/
+# EX-32 above EX-99/material agreement so the exhibit FETCH/PARSE/
+# DocumentStore path gets exercised against a real control filing that only
+# carries SOX certifications) picked a CERTIFICATION exhibit -- never a
+# production adapter fallback: sec_acquisition_adapters.DEFAULT_EXHIBIT_
+# PRIORITY does not include certification keywords at all.
+def _without_ex99_and_ex10(directory_json_text: str, filing_detail_html_text: str) -> tuple[str, str]:
+    """A variant of Phase 3B's fixture set with NO EX-99/EX-10 candidate
+    anywhere in the accession -- proves the "genuinely absent" case, not
+    merely "present but outranked by this script's own priority order"."""
+    payload = json.loads(directory_json_text)
+    payload["directory"]["item"] = [
+        item for item in payload["directory"]["item"]
+        if "ex99-1" not in item["name"] and "ex10-1" not in item["name"]
+    ]
+    directory_json_text = json.dumps(payload)
+    filing_detail_html_text = re.sub(
+        r"<tr>\s*<td>\d+</td>.*?(ex99-1|ex10-1).*?</tr>", "", filing_detail_html_text, flags=re.S,
+    )
+    return directory_json_text, filing_detail_html_text
+
+
+def test_ex99_and_ex10_absent_certification_never_satisfies_the_requirement():
+    directory_text, detail_text = _without_ex99_and_ex10(
+        fx.fixture_text("directory_index_10k.json"), fx.fixture_text("filing_detail_10k.htm"),
+    )
+    responses = dict(fx.default_responses())
+    responses[fx.directory_index_url()] = fx.ok(directory_text)
+    responses[fx.filing_detail_url()] = fx.ok(detail_text)
+    del responses[fx.document_url("testco-20251231_ex99-1.htm")]
+    del responses[fx.document_url("testco-20251231_ex10-1.htm")]
+    http = FakeHttpClient(responses=responses)
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    assert not report.refused
+    audit = report.exhibit_selection_audit
+    assert audit["selected_category"] == "CERTIFICATION"
+    assert audit["would_production_default_select_this_category"] is False
+    # No EX-99/EX-10 candidate matched even this script's own (broader)
+    # priority list either -- confirms genuine absence, not merely a lost
+    # priority race (other certifications, e.g. EX-31.2/EX-32.1, are still
+    # deferred here since fetch_limit=1, which is expected and fine).
+    assert not any(
+        "ex99" in name or "ex10-1" in name for name in audit["not_yet_fetched_other_matches"]
+    )
+    assert not any(c.startswith("target_exhibit:") for c in report.live_verified_candidates)
+    assert "target_exhibit:ep" in report.structurally_completed_not_requirement_relevant
+
+
+def test_smoke_priority_still_selects_certification_when_ex99_and_ex10_are_present():
+    """The default fixture set DOES carry EX-99/EX-10 candidates -- this
+    reproduces exactly what the real Mac run observed: certification is
+    still selected, because THIS script's own priority list (not
+    production's) ranks it first."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    audit = report.exhibit_selection_audit
+    assert audit["selected_category"] == "CERTIFICATION"
+    assert audit["would_production_default_select_this_category"] is False
+    # EX-99 (and other certifications) genuinely exist in this accession,
+    # just outranked by this script's own priority order.
+    assert any("ex99" in name for name in audit["not_yet_fetched_other_matches"])
+
+
+def test_certification_fetch_success_is_distinct_from_target_completion_relevance():
+    """A CERTIFICATION exhibit fetching and parsing successfully is a real,
+    confirmed transport/parser fact -- but it must never be reported as
+    though it satisfies EX-99/EX-10 selection or a real EvidenceRequirement."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    by_name = {c["capability"]: c for c in report.capability_confirmations}
+    assert by_name["certification body parser"]["confirmed"] is True
+    assert by_name["generic exhibit body fetch"]["confirmed"] is True
+    assert by_name["EX-99 selection"]["confirmed"] is False
+    assert by_name["EX-10 selection"]["confirmed"] is False
+    assert by_name["Requirement適合判定 (acquired evidence satisfies a real investment-research EvidenceRequirement)"]["confirmed"] is False
+
+
+def test_live_verified_candidate_requires_completion_condition_not_just_any_progress():
+    """A target whose required steps never all reached their completion
+    condition must never appear in live_verified_candidates -- confirmed
+    here on the SAME failed-primary-fetch scenario already used to prove
+    outcome_for() is not ACQUIRED."""
+    responses = dict(fx.default_responses())
+    responses[fx.document_url(PRIMARY_DOCUMENT)] = fx.not_found("503")
+    http = FakeHttpClient(responses=responses)
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    assert not any(c.startswith("target_primary:") for c in report.live_verified_candidates)
+    assert not any(c.startswith("target_primary:") for c in report.structurally_completed_not_requirement_relevant)
+
+
+def test_physical_request_categories_sum_to_physical_http_requests():
+    """Invariant (Phase 3C.1 section 2): the physical request breakdown's
+    4 categories must always sum to physical_http_requests exactly -- never
+    approximately, never adjusted after the fact."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    rb = report.request_breakdown
+    assert rb is not None
+    assert rb.categorized_total == rb.physical_http_requests
+    assert rb.physical_http_requests == len(report.requested_urls)
+    # Every physical GET in this graph is also reported by exactly one
+    # step's own StepExecutionResult -- the two independent measurements
+    # agree, now that acquisition_executor._tally() no longer discards one
+    # counter based on the step's acquisition_method.
+    assert rb.logical_direct_api_steps + rb.logical_direct_http_steps == rb.physical_http_requests
+
+
+def test_request_breakdown_categorizes_submissions_directory_detail_and_bodies():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    rb = report.request_breakdown
+    assert rb.submissions_requests == 1
+    assert rb.directory_index_requests == 1
+    assert rb.filing_detail_requests == 1
+    assert rb.document_body_requests == 2  # primary body + exhibit body
+
+
+def test_fixture_comparisons_report_five_artifacts_separately():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    assert set(report.fixture_comparisons.keys()) == {
+        "submissions_json", "directory_index_json", "filing_detail_html",
+        "primary_ixbrl_document", "exhibit_document",
+    }
+    allowed_statuses = {"MATCH", "COMPATIBLE_VARIATION", "INCOMPATIBLE", "NOT_OBSERVED"}
+    for artifact, comparison in report.fixture_comparisons.items():
+        assert comparison["status"] in allowed_statuses, artifact
+
+
+def test_fixture_comparisons_report_not_observed_when_never_fetched():
+    """A refused run (zero network) must report every artifact as
+    NOT_OBSERVED, never guess a status for something never fetched."""
+    comparisons = live._run_all_artifact_comparisons({})
+    assert {c.status for c in comparisons} == {"NOT_OBSERVED"}
+
+
+def test_document_diagnostics_report_authority_and_is_company_ir():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+
+    assert report.document_diagnostics
+    for doc in report.document_diagnostics:
+        assert doc["authority"] == "STATUTORY_FILING"
+        assert doc["is_company_ir"] is True
+        assert doc["content_kind"] == "FULL_DOCUMENT"
+        assert doc["url"].startswith("https://www.sec.gov/")
+
+
+def test_printed_report_documents_independent_confirmation_is_a_fact_level_field():
+    """Never fabricate a company_claim/independent_confirmation field on a
+    Document -- the printed report must say plainly that this script never
+    constructs a Fact, so it cannot report either value directly."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+    printed = live.format_report_for_print(report, secrets=[])
+    assert "independent_confirmation" in printed
+    assert "company_claim" in printed
+
+
+def test_no_user_agent_leak_in_new_phase3c1_diagnostics_fields():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(CIK, user_agent=_REAL_SECRET_LOOKING_AGENT, http_client=http)
+    printed = live.format_report_for_print(report, secrets=[_REAL_SECRET_LOOKING_AGENT])
+    assert _REAL_SECRET_LOOKING_AGENT not in printed
+    assert "contact@example.test" not in printed
+
+
+# --- analyze_capture: offline re-analysis of already-saved bodies -----------
+# analyze_capture() never accepts an HTTP client at all -- there is no
+# injection point for one, so "makes no network access" is true by
+# construction rather than something to mock and assert on.
+def test_analyze_capture_makes_no_network_access_and_reads_only_local_files(tmp_path):
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    directory_text = fx.fixture_text("directory_index_10k.json")
+    detail_text = fx.fixture_text("filing_detail_10k.htm")
+    primary_text = fx.fixture_text("primary_10k_ixbrl.htm")
+    exhibit_text = fx.fixture_text("exhibit_31_1_certification.htm")
+
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, "testco-20251231_ex31-1.htm")
+    for category, text, suffix in (
+        ("submissions", submissions_text, ".json"),
+        ("directory_index", directory_text, ".json"),
+        ("filing_detail", detail_text, ".htm"),
+        ("primary_document", primary_text, ".htm"),
+        ("exhibit_document", exhibit_text, ".htm"),
+    ):
+        digest = hashlib.sha256(urls[category].encode()).hexdigest()[:24]
+        (tmp_path / f"{digest}{suffix}").write_text(text, encoding="utf-8")
+
+    result = live.analyze_capture(
+        tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT,
+        exhibit_filename="testco-20251231_ex31-1.htm", exhibit_type="EX-31.1",
+    )
+    assert result["categories_missing"] == []
+    assert set(result["categories_found"]) == {
+        "submissions", "directory_index", "filing_detail", "primary_document", "exhibit_document",
+    }
+    statuses = {c["artifact"]: c["status"] for c in result["comparisons"]}
+    assert statuses["submissions_json"] == "MATCH"
+    assert statuses["exhibit_document"] in {"MATCH", "COMPATIBLE_VARIATION"}
+    assert result["exhibit_category_guess"] == "CERTIFICATION"
+
+
+def test_analyze_capture_reports_missing_categories_never_guesses(tmp_path):
+    result = live.analyze_capture(
+        tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT,
+    )
+    assert set(result["categories_missing"]) == {"submissions", "directory_index", "filing_detail", "primary_document"}
+    assert result["categories_found"] == []
+    statuses = {c["artifact"]: c["status"] for c in result["comparisons"]}
+    assert statuses["submissions_json"] == "NOT_OBSERVED"
+    assert statuses["primary_ixbrl_document"] == "NOT_OBSERVED"
+
+
+def test_analyze_capture_never_touches_the_one_time_marker(tmp_path):
+    marker = tmp_path / "marker.json"
+    assert not marker.exists()
+    live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    assert not marker.exists()
+
+
+def test_main_analyze_capture_mode_requires_no_user_agent(tmp_path, monkeypatch):
+    """--analyze-capture must work even with IRA_SEC_USER_AGENT completely
+    unset -- it is a pure local file re-analysis mode, never a live
+    acquisition attempt."""
+    monkeypatch.delenv("IRA_SEC_USER_AGENT", raising=False)
+    exit_code = live.main([
+        "--analyze-capture", str(tmp_path), "--accession", ACCESSION, "--primary-document", PRIMARY_DOCUMENT,
+    ])
+    assert exit_code == 1  # nothing captured in an empty tmp_path -- reported, not a crash
 
 
 # --- one-time marker guard (main()) -----------------------------------------
