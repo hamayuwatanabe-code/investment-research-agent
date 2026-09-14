@@ -8,8 +8,9 @@ No real network call anywhere in this file -- every test injects
 from __future__ import annotations
 
 import json
+from dataclasses import MISSING, fields
 
-from investment_research.collectors.clinicaltrials import parse_study
+from investment_research.collectors.clinicaltrials import parse_study, raw_facts_from_study
 from investment_research.research.acquisition_executor import (
     AcquisitionExecutor,
     ExecutionContext,
@@ -34,7 +35,8 @@ from investment_research.research.source_routing import (
     TargetAcquisitionOutcome,
     TargetKind,
 )
-from investment_research.schemas.enums import DocumentAuthority, ResearchDomain
+from investment_research.schemas.enums import DocumentAuthority, ResearchDomain, SourceTier
+from investment_research.schemas.fact import Fact, RawFact, Source
 
 from . import _clinicaltrials_fixture_support as fx
 from ._clinicaltrials_fixture_support import FakeHttpClient
@@ -140,7 +142,12 @@ def test_fetch_stores_document_and_returns_structured_record_retrieved():
     stored_docs = store.resolve_by_accession(fx.NCT_ID)
     assert len(stored_docs) == 1
     assert stored_docs[0].document.authority is DocumentAuthority.REGISTRY
-    assert stored_docs[0].document.is_company_ir is True
+    # ClinicalTrials.gov is a government-operated REGISTRY, never a
+    # company IR channel -- is_company_ir specifically asserts "the
+    # issuing company controls this host". Separate from RawFact.
+    # company_claim=True (the record's CONTENT is sponsor-submitted),
+    # asserted below via raw_facts_from_study.
+    assert stored_docs[0].document.is_company_ir is False
     assert stored_docs[0].document_role is DocumentRole.STRUCTURED_API_RECORD
     assert stored_docs[0].canonical_url == fx.study_url(fx.NCT_ID)
     assert stored_docs[0].content_hash() != "UNKNOWN"
@@ -343,3 +350,70 @@ def test_no_web_search_adapter_needed_when_nct_id_is_known():
     assert report.diagnostics.external_llm_tokens == 0
     assert report.diagnostics.web_search_steps_not_executed == 0
     assert report.outcome_for(target.target_id) is TargetAcquisitionOutcome.ACQUIRED
+
+
+# --- Phase 3D.1: authority semantics (REGISTRY != company IR channel) ------
+def test_document_host_authority_and_company_channel_are_kept_separate():
+    """Four distinct concerns, never collapsed into one boolean or one
+    enum value: (1) document host/authority = REGISTRY -- a government-
+    operated registry, (2) is_company_ir = False -- the company does not
+    control clinicaltrials.gov, (3) the CLAIM's submitter is the sponsor,
+    captured at the RawFact level as company_claim=True, (4) independent
+    confirmation of anything the sponsor asserted = False, since nothing
+    here has independently verified it."""
+    http = FakeHttpClient(responses=fx.default_responses())
+    report, store, target = _run(fx.NCT_ID, http)
+    stored = store.resolve_by_accession(fx.NCT_ID)[0]
+
+    assert stored.document.authority is DocumentAuthority.REGISTRY
+    assert stored.document.is_company_ir is False
+
+    raw_facts = raw_facts_from_study(
+        "TEST", parse_study(json.loads(fx.fixture_text("study_recruiting_interventional.json"))),
+        Source(source_id="s1", url=fx.study_url(fx.NCT_ID), title="t", tier=SourceTier.TIER_1),
+        document_id=stored.document_id,
+    )
+    assert raw_facts
+    assert all(f.company_claim is True for f in raw_facts)
+    # RawFact carries no independent-confirmation or evidence-class field at
+    # all -- the Fact Collector cannot assert either, by construction (see
+    # schemas/fact.py's RawFact docstring: "evaluation-free by construction").
+    raw_fact_fields = {f.name for f in fields(RawFact)}
+    assert "independent_confirmation" not in raw_fact_fields
+    assert "evidence_class" not in raw_fact_fields
+    # And Fact's OWN dataclass defaults, if one were ever built from this
+    # RawFact downstream, never default to an upgraded/confirmed state.
+    assert Fact.__dataclass_fields__["independent_confirmation"].default is False
+    assert Fact.__dataclass_fields__["evidence_class"].default is MISSING  # required -- never silently defaulted
+
+
+def test_completed_never_upgrades_to_efficacy_success_or_independent_evidence():
+    """A COMPLETED study with a resultsSection present is still only a
+    REGISTRY-authority, sponsor-submitted record -- neither the completion
+    status nor the presence of results implies peer review or independent
+    verification of anything."""
+    http = FakeHttpClient(
+        responses={fx.study_url(fx.NCT_ID_COMPLETED): fx.ok(fx.fixture_text("study_completed_with_results.json"))}
+    )
+    report, store, target = _run(fx.NCT_ID_COMPLETED, http)
+    stored = store.resolve_by_accession(fx.NCT_ID_COMPLETED)[0]
+    assert stored.document.authority is DocumentAuthority.REGISTRY  # never REGULATOR/INDEPENDENT
+    assert stored.document.is_company_ir is False
+
+    parsed = parse_study(json.loads(fx.fixture_text("study_completed_with_results.json")))
+    assert parsed["has_results"] is True
+    assert parsed["status"] == "COMPLETED"
+    # No field anywhere claims efficacy, independence, or peer review.
+    forbidden = {"efficacy", "peer_reviewed", "independent", "verified", "success"}
+    assert forbidden.isdisjoint({k.lower() for k in parsed})
+
+
+def test_clinicaltrials_alone_never_reported_as_science_or_regulatory_sufficient():
+    """This module never imports evidence_sufficiency.py at all -- it
+    cannot, structurally, mark any domain SUFFICIENT; that determination
+    belongs entirely to scoring/evidence_sufficiency.py, operating on a
+    full evidence set this adapter never sees."""
+    import investment_research.research.clinicaltrials_acquisition_adapter as module
+
+    assert "evidence_sufficiency" not in module.__dict__
+    assert not hasattr(module, "domain_is_sufficient")

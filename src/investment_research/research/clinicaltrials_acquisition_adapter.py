@@ -49,7 +49,6 @@ SUFFICIENT, or interprets registered data as a judgment.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -61,7 +60,7 @@ from ..collectors.documents import Document
 from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, FetchOutcome, Provenance
 from ..schemas.fact import utc_now_iso
 from .acquisition_executor import ExecutionContext, StepExecutionResult
-from .document_store import DocumentRole
+from .document_store import DocumentRole, derive_document_id
 from .source_routing import AcquisitionStep, StepKind, StepStatus
 
 log = logging.getLogger(__name__)
@@ -234,29 +233,31 @@ class ClinicalTrialsStudyAdapter:
             return result
 
         ident = (payload.get("protocolSection") or {}).get("identificationModule") or {}
-        # Content-derived, not URL-derived: a URL-only id would collide
-        # across two fetches of the SAME NCT ID whose content actually
-        # changed (a real re-fetch after the registry record was updated),
-        # since DocumentStore.put() creates a NEW version with
-        # previous_version_id pointing at the OLD document_id -- an
-        # id that depends only on the (unchanged) URL would then point a
-        # document's previous_version_id AT ITSELF, an infinite chain
-        # version_history() would loop on forever. Content dependence
-        # means unchanged content naturally reuses the same id (harmless:
-        # DocumentStore.put() already short-circuits identical-content
-        # re-puts by content hash before this id is even consulted) while
-        # changed content gets a genuinely different one.
-        doc_id = f"doc_ctgov_{hashlib.sha256((url + text).encode()).hexdigest()[:24]}"
+        # Content-dependent, not URL-only -- see document_store.
+        # derive_document_id()'s docstring (Phase 3D.1) for why a URL-only
+        # id risks a self-referencing version-chain cycle when this NCT
+        # ID's record is re-fetched with changed content.
+        doc_id = derive_document_id("clinicaltrials", url, text)
         document = Document(
             doc_id=doc_id,
             url=url,
             title=ident.get("briefTitle", UNKNOWN) or nct_id,
             publisher="ClinicalTrials.gov",
             doc_type="clinical_trial_registry_record",
-            # A registry record is sponsor-submitted content -- matching
-            # the RawFact-level company_claim=True convention this module's
-            # docstring and collectors/clinicaltrials.py both apply.
-            is_company_ir=True,
+            # ClinicalTrials.gov is a GOVERNMENT-OPERATED REGISTRY, never a
+            # company IR channel -- is_company_ir specifically means "the
+            # issuing company controls this host/channel" (see
+            # collectors/tiering.py's classify_authority/classify_tier,
+            # which is exactly the distinction DocumentAuthority.REGISTRY
+            # vs. DocumentAuthority.COMPANY_IR exists to keep separate).
+            # That the registry's CONTENT is sponsor-submitted is a
+            # SEPARATE fact, already captured correctly at the RawFact
+            # level (company_claim=True, in raw_facts_from_study()) --
+            # conflating "who submitted the claim" with "who controls the
+            # channel" would misclassify a NIH-operated registry page as
+            # company-controlled content, which it is not (Phase 3D.1
+            # requirement 1).
+            is_company_ir=False,
             text=text,
             # A complete, single-study JSON record was retrieved whole --
             # never merely because HTTP returned 200 (the shape/length

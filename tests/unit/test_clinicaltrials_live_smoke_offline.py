@@ -8,6 +8,7 @@ real-API-v2-format fixtures) in place of ``AllowlistedHttpClient``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from investment_research.research import clinicaltrials_live_smoke as live
 
@@ -43,6 +44,42 @@ def test_main_refuses_without_nct_id():
     assert live.main([]) == 1
 
 
+# --- NCT ID normalization: only whitespace/case, still strictly validated --
+def test_normalize_nct_id_trims_and_uppercases():
+    assert live.normalize_nct_id(f"  {fx.NCT_ID.lower()}  \n") == fx.NCT_ID
+
+
+def test_run_live_smoke_accepts_lowercase_and_whitespace_after_normalization():
+    http = FakeHttpClient(responses=fx.default_responses())
+    report = live.run_live_smoke(f"  {fx.NCT_ID.lower()}\n", http_client=http)
+    assert not report.refused
+    assert report.plan.nct_id == fx.NCT_ID  # displayed plan shows the NORMALIZED value
+
+
+def test_normalization_never_widens_what_counts_as_valid():
+    """Normalizing a genuinely malformed id must still refuse -- trimming/
+    uppercasing never turns garbage into a valid-looking NCT ID."""
+    report = live.run_live_smoke("  not-an-nct-id  ", http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+
+
+def test_analyze_capture_normalizes_nct_id_too(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    result = live.analyze_capture(tmp_path, nct_id=f"  {fx.NCT_ID.lower()}  ")
+    assert result["found"] is True
+
+
+def test_analyze_capture_refuses_malformed_nct_id_never_guesses_a_file():
+    result = live.analyze_capture(Path("/tmp"), nct_id="not-an-nct-id")
+    assert result["found"] is False
+    assert "error" in result
+
+
 # --- full offline orchestration (FakeHttpClient, real-format fixtures) -----
 def test_full_orchestration_against_fake_transport():
     http = FakeHttpClient(responses=fx.default_responses())
@@ -54,7 +91,9 @@ def test_full_orchestration_against_fake_transport():
     assert report.document_id is not None
     assert report.parsed_fields.get("status") == "RECRUITING"
     assert report.document_diagnostics["authority"] == "REGISTRY"
-    assert report.document_diagnostics["is_company_ir"] is True
+    # ClinicalTrials.gov is a government-operated REGISTRY, not a
+    # company IR channel.
+    assert report.document_diagnostics["is_company_ir"] is False
     # zero external LLM/AI activity, always
     assert report.external_llm_tokens == 0
     assert report.anthropic_api_calls == 0

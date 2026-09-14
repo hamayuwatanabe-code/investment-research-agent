@@ -130,6 +130,16 @@ class LiveSmokeReport:
         return self.refused_reason is not None
 
 
+def normalize_nct_id(nct_id: str) -> str:
+    """The ONLY normalization ever applied to a caller-supplied NCT ID:
+    whitespace-trimmed, uppercased. Never partial, never a guess -- every
+    caller (run_live_smoke, main(), analyze_capture) must still validate
+    the RESULT against NCT_ID_RE afterward; normalizing never widens what
+    counts as a valid id, it only tolerates harmless human input variance
+    (a trailing newline from copy-paste, lowercase letters)."""
+    return (nct_id or "").strip().upper()
+
+
 def build_plan(nct_id: str) -> LiveSmokePlan:
     return LiveSmokePlan(
         allowed_hosts=tuple(sorted(ALLOWED_HOSTS)),
@@ -238,12 +248,17 @@ def run_live_smoke(
     Never called from Pipeline.run(); never makes an Anthropic/LLM/Web
     Search call.
     """
-    plan = build_plan(nct_id)
+    normalized_nct_id = normalize_nct_id(nct_id)
+    plan = build_plan(normalized_nct_id)
     report = LiveSmokeReport(plan=plan)
 
-    if not NCT_ID_RE.match(nct_id or ""):
-        report.refused_reason = f"malformed NCT ID: {nct_id!r} -- refusing to make any request"
+    if not NCT_ID_RE.match(normalized_nct_id):
+        report.refused_reason = (
+            f"malformed NCT ID: {nct_id!r} (normalized: {normalized_nct_id!r}) -- "
+            "refusing to make any request"
+        )
         return report
+    nct_id = normalized_nct_id
 
     resolved_user_agent = user_agent if user_agent is not None else resolve_user_agent()
     client = http_client if http_client is not None else AllowlistedHttpClient(
@@ -363,7 +378,13 @@ def analyze_capture(capture_dir: Path, *, nct_id: str) -> dict[str, Any]:
     """Re-analyze an already-saved response body from a prior live run,
     entirely offline. Makes ZERO network calls, touches NO marker file, and
     is safe to run any number of times."""
-    url = STUDY_DETAIL_URL.format(nct_id=nct_id)
+    normalized_nct_id = normalize_nct_id(nct_id)
+    if not NCT_ID_RE.match(normalized_nct_id):
+        return {
+            "capture_dir": str(capture_dir), "found": False,
+            "error": f"malformed NCT ID: {nct_id!r} (normalized: {normalized_nct_id!r})",
+        }
+    url = STUDY_DETAIL_URL.format(nct_id=normalized_nct_id)
     body = _load_captured_body(capture_dir, url)
     if body is None:
         return {"capture_dir": str(capture_dir), "url": url, "found": False}
@@ -427,9 +448,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.nct_id:
         print("REFUSED: --nct-id is required.")
         return 1
+    normalized_nct_id = normalize_nct_id(args.nct_id)
 
     if args.analyze_capture is not None:
-        result = analyze_capture(args.analyze_capture, nct_id=args.nct_id)
+        result = analyze_capture(args.analyze_capture, nct_id=normalized_nct_id)
         print(json.dumps(result, indent=2, default=str))
         return 0 if result.get("found") else 1
 
@@ -439,7 +461,10 @@ def main(argv: list[str] | None = None) -> int:
         repo_root / "data" / "live_smoke" / "clinicaltrials" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     )
 
-    plan = build_plan(args.nct_id)
+    # Displayed BEFORE any network call, using the SAME normalized value
+    # run_live_smoke() will actually use -- the plan shown must never
+    # silently differ from what gets executed.
+    plan = build_plan(normalized_nct_id)
     print(format_plan_for_print(plan))
 
     previous = _marker_state(marker_path)
@@ -452,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
 
     user_agent = resolve_user_agent()
     secrets = [user_agent] if user_agent and user_agent != DEFAULT_CT_USER_AGENT else []
-    report = run_live_smoke(args.nct_id, out_dir=out_dir)
+    report = run_live_smoke(normalized_nct_id, out_dir=out_dir)
     print()
     print(format_report_for_print(report, secrets=secrets))
     if report.refused:

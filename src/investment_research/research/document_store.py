@@ -34,11 +34,59 @@ canonical place authority lives.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import Enum
 
 from ..collectors.documents import Document
 from ..schemas.enums import DocumentAuthority
+
+
+def derive_document_id(prefix: str, url: str, text: str) -> str:
+    """The single source of truth for computing a ``document_id`` from a
+    document's identity (URL) AND its content. Every adapter that stores a
+    ``Document`` here -- SEC primary/exhibit, ClinicalTrials, and any future
+    one -- must call this rather than hand-rolling its own hash, so the
+    content-dependence invariant below can never be silently dropped by a
+    new adapter (Phase 3D.1 requirement 2/5: no adapter-specific id rule).
+
+    URL-only derivation is what caused a real bug during Phase 3D: two
+    fetches of the SAME URL whose CONTENT differs -- a genuine registry
+    update -- produced the SAME id, since the id depended only on the
+    unchanged URL. :meth:`DocumentStore.put` then tried to create a "new
+    version" whose ``previous_version_id`` pointed at that SAME id: the old
+    and new ``StoredDocument`` shared one ``document_id``, an immediate
+    self-reference that made :meth:`DocumentStore.version_history` loop
+    forever. Content dependence fixes this at the source: identical content
+    naturally reproduces the identical id, which ``put()`` already treats
+    as idempotent (harmless, no version is created), while different
+    content always produces a different one, which ``put()`` can now also
+    verify is not already anywhere in the URL's own version chain (see
+    ``put()``'s ``DocumentIdentityError`` checks).
+
+    ``prefix`` is a short, adapter-chosen label purely for human
+    readability when an id shows up in logs/tests (e.g. ``"sec_primary"``,
+    ``"clinicaltrials"``) -- it carries no semantic weight and is never
+    used for lookup, comparison, or versioning logic.
+    """
+    digest = hashlib.sha256(f"{url}\x00{text}".encode()).hexdigest()[:24]
+    return f"doc_{prefix}_{digest}"
+
+
+class DocumentIdentityError(Exception):
+    """Raised when a caller-supplied ``document_id`` would corrupt
+    ``DocumentStore``'s version-chain invariants -- a self-referencing or
+    cyclic ``previous_version_id`` chain is never silently allowed through
+    (Phase 3D.1 requirement 3). The fix is almost always to derive
+    ``document_id`` from content as well as URL -- see
+    :func:`derive_document_id`."""
+
+
+class CorruptVersionChainError(Exception):
+    """Raised by :meth:`DocumentStore.version_history` if a document's
+    ``previous_version_id`` chain contains a cycle -- never silently
+    truncated or treated as a complete, valid history, and never read as
+    if the chain's target were ACQUIRED (Phase 3D.1 requirement 3)."""
 
 
 class DocumentRole(str, Enum):
@@ -187,6 +235,24 @@ class DocumentStore:
             existing = self._by_id[existing_id]
             if existing.content_hash() == new_hash:
                 return existing
+            if document_id == existing.document_id:
+                raise DocumentIdentityError(
+                    f"refusing to create a new version of {url_key!r}: the supplied "
+                    f"document_id ({document_id!r}) is identical to the version it would "
+                    "replace, which would make previous_version_id self-reference the same "
+                    "document. Derive document_id from CONTENT as well as URL -- see "
+                    "derive_document_id()."
+                )
+            # Defense in depth: the new id must not already appear anywhere
+            # in the existing version chain, not merely differ from the
+            # immediate predecessor -- a non-adjacent collision would still
+            # eventually create a cycle.
+            ancestor_ids = {v.document_id for v in self.version_history(existing.document_id)}
+            if document_id in ancestor_ids:
+                raise DocumentIdentityError(
+                    f"document_id {document_id!r} already exists earlier in {url_key!r}'s "
+                    "own version chain -- refusing to create a cycle."
+                )
             stored = StoredDocument(
                 document_id=document_id,
                 document=document,
@@ -270,10 +336,24 @@ class DocumentStore:
         ``document_id`` need not be the latest version -- a superseded
         version is still fully retrievable and still produces its own
         correct (shorter) history.
+
+        Raises :class:`CorruptVersionChainError` if the chain ever revisits
+        a ``document_id`` already seen -- ``put()``'s own checks should
+        make this impossible to construct through this store's public API,
+        but this walk never silently truncates or treats a corrupt chain as
+        complete (Phase 3D.1 requirement 3): a broken chain is reported as
+        broken, never quietly read as if its target were valid/ACQUIRED.
         """
         chain: list[StoredDocument] = []
+        seen: set[str] = set()
         current = self._by_id.get(document_id)
         while current is not None:
+            if current.document_id in seen:
+                raise CorruptVersionChainError(
+                    f"version chain for {document_id!r} revisits {current.document_id!r} -- "
+                    "a cycle exists in previous_version_id links; never silently truncated."
+                )
+            seen.add(current.document_id)
             chain.append(current)
             current = (
                 self._by_id.get(current.previous_version_id)

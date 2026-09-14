@@ -50,7 +50,6 @@ re-fetch.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ from ..collectors.sec_edgar import FILING_INDEX_URL, SUBMISSIONS_URL
 from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, Provenance
 from ..schemas.fact import utc_now_iso
 from .acquisition_executor import ExecutionContext, StepExecutionResult
-from .document_store import DocumentRole
+from .document_store import DocumentRole, derive_document_id
 from .source_routing import AcquisitionStep, StepKind, StepStatus
 
 log = logging.getLogger(__name__)
@@ -748,7 +747,11 @@ class SecPrimaryDocumentAdapter:
             context.request_cache[cache_key] = result
             return result
 
-        doc_id = f"doc_sec_primary_{hashlib.sha256(url.encode()).hexdigest()[:24]}"
+        # Content-dependent, not URL-only (Phase 3D.1): see
+        # document_store.derive_document_id()'s docstring for why a
+        # URL-only id risks a self-referencing version-chain cycle when
+        # this URL is re-fetched with changed content.
+        doc_id = derive_document_id("sec_primary", url, text)
         document = Document(
             doc_id=doc_id,
             url=url,
@@ -1000,7 +1003,9 @@ class SecExhibitAdapter:
             context.request_cache[cache_key] = result
             return result
 
-        doc_id = f"doc_sec_exhibit_{hashlib.sha256(url.encode()).hexdigest()[:24]}"
+        # Content-dependent, not URL-only -- see derive_document_id()'s
+        # docstring (document_store.py, Phase 3D.1).
+        doc_id = derive_document_id("sec_exhibit", url, text)
         document = Document(
             doc_id=doc_id,
             url=url,
