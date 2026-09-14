@@ -39,6 +39,7 @@ from ..collectors.clinicaltrials import STUDY_DETAIL_URL, parse_study
 from ..schemas.enums import UNKNOWN, ResearchDomain
 from .acquisition_executor import AcquisitionExecutor, ExecutionReport
 from .acquisition_planning import AcquisitionMethod
+from .capture_manifest import read_manifest, verify_manifest_against_body
 from .checks import SubjectScope
 from .clinicaltrials_acquisition_adapter import (
     CLINICALTRIALS_ADAPTER_ID,
@@ -394,7 +395,7 @@ def run_live_smoke(
     client = http_client if http_client is not None else AllowlistedHttpClient(
         user_agent=resolved_user_agent, allowed_hosts=ALLOWED_HOSTS, timeout=DEFAULT_TIMEOUT_SECONDS,
         rate_limit_rps=DEFAULT_RATE_LIMIT_RPS, max_retries=MAX_RETRIES, max_requests=MAX_LIVE_GETS,
-        out_dir=out_dir,
+        out_dir=out_dir, source="clinicaltrials",
     )
 
     graph = _build_graph()
@@ -509,15 +510,27 @@ def format_plan_for_print(plan: LiveSmokePlan) -> str:
     )
 
 
-def _load_captured_body(capture_dir: Path, url: str) -> str | None:
+def _find_captured_file(capture_dir: Path, url: str) -> tuple[str, Path] | None:
+    """Recomputes ``AllowlistedHttpClient._save_response``'s exact naming
+    convention (``sha256(url)[:24] + suffix``) -- returns the digest (the
+    manifest's own key) alongside the body file's path, or ``None`` if
+    nothing was ever saved for this URL."""
     import hashlib
 
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
     for suffix in (".json", ".htm", ".bin"):
         candidate = capture_dir / f"{digest}{suffix}"
         if candidate.is_file():
-            return candidate.read_bytes().decode("utf-8", errors="replace")
+            return digest, candidate
     return None
+
+
+def _load_captured_body(capture_dir: Path, url: str) -> str | None:
+    found = _find_captured_file(capture_dir, url)
+    if found is None:
+        return None
+    _, path = found
+    return path.read_bytes().decode("utf-8", errors="replace")
 
 
 def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None) -> dict[str, Any]:
@@ -525,21 +538,25 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
     entirely offline. Makes ZERO network calls, touches NO marker file, and
     is safe to run any number of times.
 
-    ``as_of`` (an ISO ``YYYY-MM-DDTHH:MM:SS+00:00`` timestamp, or at least a
-    ``YYYY-MM-DD`` date) is the reference point for freshness diagnostics --
-    ``_save_response`` never saves a capture timestamp (only the raw body,
-    per Phase 3C requirement 29), so there is no reliable capture time to
-    recover from the file itself; a caller who wants freshness diagnostics
-    from a re-analysis must supply one explicitly (e.g. the date the ORIGINAL
-    live run actually happened, from its own printed report). Without it,
-    freshness is simply omitted -- never guessed from the file's mtime or
-    today's real date.
+    Since Phase 3D.4, each saved body also has its own Capture Manifest
+    (``<digest>.manifest.json``) recording the REAL UTC
+    ``capture_retrieved_at`` this body was actually fetched at. When one is
+    present AND its own ``content_hash`` still matches the body actually on
+    disk, THAT value -- never ``as_of``, never the file's mtime, never the
+    capture directory's name -- becomes
+    ``RegistryFreshnessDiagnostics.capture_retrieved_at`` (Phase 3D.4
+    requirement 5). A capture saved before Phase 3D.4 (no manifest at all)
+    or a manifest whose hash no longer matches the body on disk (edited,
+    truncated, or swapped after capture -- never trusted as a normal,
+    verified capture, Phase 3D.4 requirement 9) both leave
+    ``capture_retrieved_at`` at ``UNKNOWN``, exactly as it always has been.
 
-    ``as_of`` becomes ONLY ``RegistryFreshnessDiagnostics.as_of_date`` here,
-    never ``capture_retrieved_at`` -- a re-analysis has no recorded capture
-    metadata to draw that from, so ``capture_retrieved_at`` is always
-    ``UNKNOWN`` in this path, regardless of what ``as_of`` is (Phase 3D.3
-    requirement 2).
+    ``as_of`` (an ISO ``YYYY-MM-DDTHH:MM:SS+00:00`` timestamp, or at least a
+    ``YYYY-MM-DD`` date) is used ONLY as the freshness reference point
+    (``RegistryFreshnessDiagnostics.as_of_date``) -- never as
+    ``capture_retrieved_at`` (Phase 3D.3 requirement 2 / Phase 3D.4
+    requirement 8). Without ``as_of``, freshness is simply omitted -- never
+    guessed from the file's mtime or today's real date.
     """
     normalized_nct_id = normalize_nct_id(nct_id)
     if not NCT_ID_RE.match(normalized_nct_id):
@@ -548,15 +565,30 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
             "error": f"malformed NCT ID: {nct_id!r} (normalized: {normalized_nct_id!r})",
         }
     url = STUDY_DETAIL_URL.format(nct_id=normalized_nct_id)
-    body = _load_captured_body(capture_dir, url)
-    if body is None:
+    found = _find_captured_file(capture_dir, url)
+    if found is None:
         return {"capture_dir": str(capture_dir), "url": url, "found": False}
+    digest, path = found
+    raw_body = path.read_bytes()
+    body = raw_body.decode("utf-8", errors="replace")
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         return {"capture_dir": str(capture_dir), "url": url, "found": True, "error": f"invalid JSON: {exc}"}
     parsed = parse_study(payload) if isinstance(payload, dict) and "protocolSection" in payload else None
-    freshness = _build_freshness_diagnostics(parsed, as_of) if parsed is not None and as_of else None
+
+    manifest = read_manifest(capture_dir, digest)
+    manifest_hash_verified: bool | None = None
+    capture_retrieved_at = UNKNOWN
+    if manifest is not None:
+        manifest_hash_verified = verify_manifest_against_body(manifest, raw_body)
+        if manifest_hash_verified:
+            capture_retrieved_at = manifest.capture_retrieved_at
+
+    freshness = (
+        _build_freshness_diagnostics(parsed, as_of, capture_retrieved_at=capture_retrieved_at)
+        if parsed is not None and as_of else None
+    )
     return {
         "capture_dir": str(capture_dir),
         "url": url,
@@ -564,6 +596,8 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
         "schema_ok": parsed is not None,
         "parsed_fields": parsed,
         "freshness": freshness,
+        "manifest_present": manifest is not None,
+        "manifest_hash_verified": manifest_hash_verified,
         "fixture_diff": _diff_against_fixture(payload) if isinstance(payload, dict) else {"error": "not a JSON object"},
     }
 

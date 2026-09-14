@@ -12,6 +12,12 @@ from dataclasses import fields
 from pathlib import Path
 
 from investment_research.research import clinicaltrials_live_smoke as live
+from investment_research.research.capture_manifest import (
+    CAPTURE_MANIFEST_SCHEMA_VERSION,
+    CaptureManifest,
+    compute_content_hash,
+    write_manifest,
+)
 from investment_research.schemas.enums import UNKNOWN
 
 from . import _clinicaltrials_fixture_support as fx
@@ -484,3 +490,97 @@ def test_live_verified_candidates_scoped_to_this_one_targets_own_steps():
     # Confirms this diagnostic never widens beyond the one target this run
     # actually executed.
     assert len({c.partition(":")[0] for c in report.live_verified_candidates}) == 1
+
+
+# --- Phase 3D.4: analyze_capture() consumes the shared Capture Manifest ----
+def _write_ct_manifest(tmp_path: Path, *, capture_retrieved_at: str, content: bytes) -> str:
+    """Writes a manifest matching a study_recruiting_interventional.json
+    capture already saved at tmp_path -- returns the digest used, purely a
+    test helper, never a production code path."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="clinicaltrials",
+        requested_url=url,
+        final_url=url,
+        http_status=200,
+        capture_retrieved_at=capture_retrieved_at,
+        content_hash=compute_content_hash(content),
+        content_length=len(content),
+    )
+    write_manifest(tmp_path, digest, manifest)
+    return digest
+
+
+def test_analyze_capture_uses_manifest_capture_retrieved_at_when_hash_verified(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    content = fx.fixture_text("study_recruiting_interventional.json").encode("utf-8")
+    (tmp_path / f"{digest}.json").write_bytes(content)
+    _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=content)
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["manifest_present"] is True
+    assert result["manifest_hash_verified"] is True
+    assert result["freshness"] is not None
+    # capture_retrieved_at comes from the manifest, never from --as-of.
+    assert result["freshness"].capture_retrieved_at == "2026-08-01T00:00:00Z"
+    assert result["freshness"].as_of_date == "2026-09-14T00:00:00+00:00"
+    assert result["freshness"].capture_retrieved_at != result["freshness"].as_of_date
+
+
+def test_analyze_capture_manifest_hash_mismatch_never_treated_as_verified(tmp_path):
+    """The manifest's content_hash was computed against DIFFERENT bytes than
+    what's on disk now (e.g. the saved body was edited after capture) --
+    must never be trusted as a normal, verified capture (Phase 3D.4
+    requirement 9): capture_retrieved_at stays UNKNOWN even though a
+    manifest is present."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    actual_content = fx.fixture_text("study_recruiting_interventional.json").encode("utf-8")
+    (tmp_path / f"{digest}.json").write_bytes(actual_content)
+    # Manifest describes DIFFERENT bytes than what is actually on disk.
+    _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=b"not the real body")
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["manifest_present"] is True
+    assert result["manifest_hash_verified"] is False
+    assert result["freshness"] is not None
+    assert result["freshness"].capture_retrieved_at == UNKNOWN
+
+
+def test_analyze_capture_manifest_absent_is_backward_compatible(tmp_path):
+    """A capture directory with no manifest at all (e.g. from before Phase
+    3D.4) must never crash and must report capture_retrieved_at UNKNOWN,
+    never guessed from mtime or --as-of (Phase 3D.4 requirements 6/7)."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["manifest_present"] is False
+    assert result["manifest_hash_verified"] is None
+    assert result["freshness"] is not None
+    assert result["freshness"].capture_retrieved_at == UNKNOWN
+
+
+def test_analyze_capture_manifest_never_referenced_via_mtime_or_directory_name(tmp_path):
+    """No code path in analyze_capture() ever reads the capture file's
+    mtime or the capture_dir's own name for a timestamp -- capture_
+    retrieved_at is sourced exclusively from the manifest object (Phase
+    3D.4 requirement 7). Checked against the compiled code object's own
+    referenced names, not the source text, so a docstring that merely
+    explains this guarantee never causes a false failure."""
+    code = live.analyze_capture.__code__
+    referenced_names = set(code.co_names) | set(code.co_varnames)
+    assert "mtime" not in referenced_names
+    assert "st_mtime" not in referenced_names

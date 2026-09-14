@@ -17,12 +17,19 @@ import re
 
 from investment_research.config import Settings
 from investment_research.research import sec_live_smoke as live
+from investment_research.research.capture_manifest import (
+    CAPTURE_MANIFEST_SCHEMA_VERSION,
+    CaptureManifest,
+    compute_content_hash,
+    write_manifest,
+)
 from investment_research.research.document_store import DocumentRole
 from investment_research.research.source_routing import (
     ImplementationStatus,
     SourceRoutingGraph,
     TargetAcquisitionOutcome,
 )
+from investment_research.schemas.enums import UNKNOWN
 
 from . import _sec_fixture_support as fx
 from ._sec_fixture_support import ACCESSION, CIK, PRIMARY_DOCUMENT, FakeHttpClient
@@ -518,6 +525,70 @@ def test_analyze_capture_makes_no_network_access_and_reads_only_local_files(tmp_
     assert statuses["submissions_json"] == "MATCH"
     assert statuses["exhibit_document"] in {"MATCH", "COMPATIBLE_VARIATION"}
     assert result["exhibit_category_guess"] == "CERTIFICATION"
+    # --- Phase 3D.4 backward compatibility: none of these bodies has a
+    # manifest (they were written directly by this test, mirroring a
+    # capture from before Phase 3D.4) -- never a crash, never a guessed
+    # capture_retrieved_at.
+    assert set(result["capture_manifests"]) == set(result["categories_found"])
+    for diag in result["capture_manifests"].values():
+        assert diag["present"] is False
+        assert diag["hash_verified"] is None
+        assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+# --- Phase 3D.4: Capture Manifest consumption by analyze_capture() ----------
+def test_analyze_capture_reports_manifest_capture_retrieved_at_when_hash_verified(tmp_path):
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    content = submissions_text.encode("utf-8")
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_bytes(content)
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="sec",
+        requested_url=urls["submissions"],
+        final_url=urls["submissions"],
+        http_status=200,
+        capture_retrieved_at="2026-08-01T00:00:00Z",
+        content_hash=compute_content_hash(content),
+        content_length=len(content),
+    )
+    write_manifest(tmp_path, digest, manifest)
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["present"] is True
+    assert diag["hash_verified"] is True
+    assert diag["capture_retrieved_at"] == "2026-08-01T00:00:00Z"
+
+
+def test_analyze_capture_manifest_hash_mismatch_withholds_capture_retrieved_at(tmp_path):
+    """A manifest whose content_hash no longer matches the body actually on
+    disk must never be treated as a normal, verified capture (Phase 3D.4
+    requirement 9) -- capture_retrieved_at is withheld (UNKNOWN), not
+    reported from an untrustworthy manifest."""
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    actual_content = submissions_text.encode("utf-8")
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_bytes(actual_content)
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="sec",
+        requested_url=urls["submissions"],
+        final_url=urls["submissions"],
+        http_status=200,
+        capture_retrieved_at="2026-08-01T00:00:00Z",
+        content_hash=compute_content_hash(b"not the real body"),
+        content_length=len(b"not the real body"),
+    )
+    write_manifest(tmp_path, digest, manifest)
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["present"] is True
+    assert diag["hash_verified"] is False
+    assert diag["capture_retrieved_at"] == UNKNOWN
 
 
 def test_analyze_capture_reports_missing_categories_never_guesses(tmp_path):

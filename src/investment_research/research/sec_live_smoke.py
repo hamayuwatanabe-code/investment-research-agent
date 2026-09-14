@@ -67,6 +67,15 @@ from ..logging_setup import SecretRedactingFilter
 from ..schemas.enums import UNKNOWN, FetchOutcome, ResearchDomain
 from .acquisition_executor import AcquisitionExecutor, ExecutionReport
 from .acquisition_planning import AcquisitionMethod
+from .capture_manifest import (
+    CAPTURE_MANIFEST_SCHEMA_VERSION,
+    CaptureManifest,
+    compute_content_hash,
+    read_manifest,
+    utc_now_iso,
+    verify_manifest_against_body,
+    write_manifest,
+)
 from .checks import SubjectScope
 from .document_store import DocumentStore
 from .sec_acquisition_adapters import (
@@ -229,6 +238,11 @@ class AllowlistedHttpClient:
     max_retries: int = MAX_RETRIES
     max_requests: int = MAX_LIVE_GETS
     out_dir: Path | None = None
+    #: Which live-smoke module this client belongs to ("sec" /
+    #: "clinicaltrials") -- recorded in each capture's manifest so a shared
+    #: capture directory's manifests stay attributable (Phase 3D.4
+    #: requirement 4: one manifest type, one save rule, for every source).
+    source: str = "unknown"
     #: Every URL passed to ``.get()``, in order, duplicates included -- the
     #: same public convention ``FakeHttpClient`` (the offline test double)
     #: exposes, so diagnostics code can read this one attribute generically
@@ -241,6 +255,11 @@ class AllowlistedHttpClient:
         self._cache: dict[str, FetchResult] = {}
         self._requests_made = 0
         self._opener = urllib.request.build_opener(_AllowlistedRedirectHandler(self.allowed_hosts))
+        #: requested URL -> the URL the response actually came from (after
+        #: any allowed redirect) -- FetchResult itself carries no field for
+        #: this (it is shared with production collectors.http.FetchResult),
+        #: so it is tracked here instead, purely for manifest purposes.
+        self._final_urls: dict[str, str] = {}
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -319,6 +338,7 @@ class AllowlistedHttpClient:
                         url=url, outcome=FetchOutcome.BLOCKED, attempts=attempt,
                         error=f"final response host {final_host!r} not allowlisted",
                     )
+                self._final_urls[url] = response.geturl()
                 return FetchResult(
                     url=url, outcome=FetchOutcome.OK, status=int(response.status), body=body,
                     headers=dict(response.headers), attempts=attempt,
@@ -341,14 +361,31 @@ class AllowlistedHttpClient:
             return FetchResult(url=url, outcome=FetchOutcome.ERROR, attempts=attempt, error=f"{type(exc).__name__}: {exc}")
 
     def _save_response(self, url: str, result: FetchResult) -> None:
-        """Body bytes only -- never headers (which could echo request
-        metadata) and never the User-Agent (Phase 3C requirement 29)."""
+        """Body bytes, plus a Capture Manifest recording the real UTC
+        retrieval time -- never headers (which could echo request metadata)
+        and never the User-Agent/API key/email (Phase 3C requirement 29,
+        Phase 3D.4 requirement 3)."""
         assert self.out_dir is not None
         digest = hashlib.sha256(url.encode()).hexdigest()[:24]
         suffix = ".json" if url.endswith(".json") else (".htm" if url.endswith((".htm", ".html")) or "index.htm" in url else ".bin")
         path = self.out_dir / f"{digest}{suffix}"
         with contextlib.suppress(OSError):
             path.write_bytes(result.body)
+        with contextlib.suppress(OSError):
+            manifest = CaptureManifest(
+                schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+                source=self.source,
+                requested_url=url,
+                final_url=self._final_urls.get(url, url),
+                http_status=result.status,
+                # Recorded NOW, at the moment of capture -- never from the
+                # out_dir's name, a file's mtime, or anything the caller
+                # supplies later (Phase 3D.4 requirements 1/7).
+                capture_retrieved_at=utc_now_iso(),
+                content_hash=compute_content_hash(result.body),
+                content_length=len(result.body),
+            )
+            write_manifest(self.out_dir, digest, manifest)
 
 
 @dataclass(frozen=True)
@@ -1088,7 +1125,7 @@ def run_live_smoke(
         return report
 
     client = http_client if http_client is not None else AllowlistedHttpClient(
-        user_agent=resolved_user_agent, out_dir=out_dir,
+        user_agent=resolved_user_agent, out_dir=out_dir, source="sec",
     )
 
     submissions_result = client.get(plan.submissions_url)
@@ -1275,22 +1312,52 @@ def format_plan_for_print(plan: LiveSmokePlan) -> str:
     )
 
 
-def _load_captured_bodies(capture_dir: Path, category_urls: dict[str, str]) -> dict[str, str]:
-    """Read already-saved response BODIES back off disk by recomputing
-    ``AllowlistedHttpClient._save_response``'s exact naming convention
-    (``sha256(url)[:24] + suffix``) for each expected URL -- never makes a
-    network call, and never requires a manifest file (``_save_response``
-    intentionally saves nothing beyond the body itself, per Phase 3C
-    requirement 29)."""
+def _find_captured_file(capture_dir: Path, url: str) -> tuple[str, Path] | None:
+    """Recomputes ``AllowlistedHttpClient._save_response``'s exact naming
+    convention (``sha256(url)[:24] + suffix``) -- returns the digest (the
+    manifest's own key) alongside the body file's path, or ``None`` if
+    nothing was ever saved for this URL."""
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    for suffix in (".json", ".htm", ".bin"):
+        candidate = capture_dir / f"{digest}{suffix}"
+        if candidate.is_file():
+            return digest, candidate
+    return None
+
+
+def _load_captured_bodies_and_manifests(
+    capture_dir: Path, category_urls: dict[str, str],
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """Read already-saved response BODIES back off disk, never making a
+    network call, and read each capture's manifest alongside it (Phase
+    3D.4). A capture directory from before manifests existed -- or one
+    written by a version of this tool that never wrote one -- simply has
+    none: reported as ``capture_retrieved_at: UNKNOWN``, never a crash
+    (Phase 3D.4 requirement 11, backward compatibility). A manifest whose
+    own ``content_hash`` no longer matches the body actually on disk is
+    reported as ``hash_verified: False`` with ``capture_retrieved_at``
+    withheld (UNKNOWN) -- never treated as a normal, verified capture
+    (Phase 3D.4 requirement 9)."""
     bodies: dict[str, str] = {}
+    manifests: dict[str, dict[str, Any]] = {}
     for category, url in category_urls.items():
-        digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-        for suffix in (".json", ".htm", ".bin"):
-            candidate = capture_dir / f"{digest}{suffix}"
-            if candidate.is_file():
-                bodies[category] = candidate.read_bytes().decode("utf-8", errors="replace")
-                break
-    return bodies
+        found = _find_captured_file(capture_dir, url)
+        if found is None:
+            continue
+        digest, path = found
+        raw = path.read_bytes()
+        bodies[category] = raw.decode("utf-8", errors="replace")
+        manifest = read_manifest(capture_dir, digest)
+        if manifest is None:
+            manifests[category] = {"present": False, "hash_verified": None, "capture_retrieved_at": UNKNOWN}
+        else:
+            verified = verify_manifest_against_body(manifest, raw)
+            manifests[category] = {
+                "present": True,
+                "hash_verified": verified,
+                "capture_retrieved_at": manifest.capture_retrieved_at if verified else UNKNOWN,
+            }
+    return bodies, manifests
 
 
 def analyze_capture(
@@ -1311,13 +1378,19 @@ def analyze_capture(
     Requires the caller to already know the accession/primary_document
     (and, to also compare the exhibit body, the exhibit's filename/type)
     -- normally exactly what the ORIGINAL run's own printed diagnostics
-    already reported. This is necessary because ``_save_response`` never
-    writes a URL-to-filename manifest alongside the bodies it saves (only
-    the raw body itself, per Phase 3C requirement 29 -- nothing else is
-    persisted).
+    already reported; URL-to-category mapping is still recomputed by this
+    caller, never read back from disk.
+
+    Since Phase 3D.4, each saved body also has its own Capture Manifest
+    (``<digest>.manifest.json``) recording the real UTC
+    ``capture_retrieved_at``, a content hash, and where it came from --
+    included here per-category as ``capture_manifests``. A capture
+    directory written before Phase 3D.4 (or by anything else that only
+    ever saved the raw body) simply has none, and is reported with
+    ``capture_retrieved_at: UNKNOWN`` rather than failing.
     """
     urls = _category_urls(cik, accession, primary_document, exhibit_filename)
-    bodies = _load_captured_bodies(capture_dir, urls)
+    bodies, manifests = _load_captured_bodies_and_manifests(capture_dir, urls)
     exhibit_category = None
     if exhibit_filename:
         exhibit_category = classify_exhibit_entry(
@@ -1333,6 +1406,7 @@ def analyze_capture(
         "comparisons": [
             {"artifact": c.artifact, "status": c.status, "detail": c.detail} for c in comparisons
         ],
+        "capture_manifests": manifests,
     }
 
 

@@ -13,12 +13,14 @@ prove.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from investment_research.research.capture_manifest import read_manifest
 from investment_research.research.sec_live_smoke import (
     AllowlistedHttpClient,
     HostAllowlistError,
@@ -157,3 +159,91 @@ def test_cache_hits_do_not_count_against_the_request_cap(base_url):
     assert second.from_cache
     assert client.requests_made == 1
     assert client.cache_hits == 1
+
+
+# --- Phase 3D.4: Capture Manifest, written against a REAL HTTP round trip ---
+def test_capture_manifest_is_written_with_expected_fields(base_url, tmp_path):
+    client = _client(out_dir=tmp_path, source="sec")
+    url = f"{base_url}/ok"
+    result = client.get(url)
+    assert result.ok
+
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest = read_manifest(tmp_path, digest)
+    assert manifest is not None
+    assert manifest.schema_version >= 1
+    assert manifest.source == "sec"
+    assert manifest.requested_url == url
+    assert manifest.final_url == url  # no redirect on this path
+    assert manifest.http_status == 200
+    assert manifest.content_hash == hashlib.sha256(result.body).hexdigest()
+    assert manifest.content_length == len(result.body)
+    # A real UTC timestamp, not a placeholder -- format-checked, never
+    # compared to a hardcoded value (the test has no control over wall time).
+    assert manifest.capture_retrieved_at.endswith("Z")
+    assert len(manifest.capture_retrieved_at) == len("2026-09-14T00:00:00Z")
+
+
+def test_capture_manifest_final_url_reflects_the_redirect_target(base_url, tmp_path):
+    client = _client(out_dir=tmp_path, source="sec")
+    url = f"{base_url}/redirect-to-allowed-host"
+    result = client.get(url)
+    assert result.ok
+
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest = read_manifest(tmp_path, digest)
+    assert manifest is not None
+    assert manifest.requested_url == url
+    assert manifest.final_url == f"{base_url}/ok"
+    assert manifest.final_url != manifest.requested_url
+
+
+def test_capture_manifest_never_contains_the_user_agent_or_other_secrets(base_url, tmp_path):
+    secret_agent = "investment-research-agent-test secret-contact@example.test"
+    client = _client(out_dir=tmp_path, source="sec", user_agent=secret_agent)
+    url = f"{base_url}/ok"
+    client.get(url)
+
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest_path = tmp_path / f"{digest}.manifest.json"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert secret_agent not in manifest_text
+    assert "user_agent" not in manifest_text
+    assert "user-agent" not in manifest_text.lower()
+    assert "header" not in manifest_text.lower()
+    assert "api_key" not in manifest_text.lower()
+    assert "email" not in manifest_text.lower()
+
+
+def test_capture_manifest_write_leaves_no_temp_file_behind(base_url, tmp_path):
+    """Atomic write via a temp file + os.replace -- confirms the temp file
+    used mid-write is never left lying around after a successful write
+    (Phase 3D.4 requirement 10)."""
+    client = _client(out_dir=tmp_path, source="sec")
+    client.get(f"{base_url}/ok")
+    tmp_files = list(tmp_path.glob("*.tmp"))
+    assert tmp_files == []
+
+
+def test_capture_manifest_source_field_reflects_the_caller_e_g_clinicaltrials(base_url, tmp_path):
+    """The SAME AllowlistedHttpClient class and _save_response path is used
+    by BOTH sec_live_smoke.py and clinicaltrials_live_smoke.py -- source is
+    caller-supplied, never inferred from the URL or hardcoded to "sec"
+    (Phase 3D.4 requirement 4: one manifest type, one save rule, for both)."""
+    client = _client(out_dir=tmp_path, source="clinicaltrials")
+    url = f"{base_url}/ok"
+    client.get(url)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest = read_manifest(tmp_path, digest)
+    assert manifest is not None
+    assert manifest.source == "clinicaltrials"
+
+
+def test_capture_manifest_read_manifest_is_none_for_a_pre_manifest_capture(base_url, tmp_path):
+    """A body saved with NO manifest (e.g. from before Phase 3D.4, or any
+    tool that only ever wrote the raw body) must read back as None, not
+    raise -- backward compatibility (Phase 3D.4 requirement 11)."""
+    url = f"{base_url}/ok"
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text('{"ok": true}', encoding="utf-8")
+    assert read_manifest(tmp_path, digest) is None
