@@ -1,0 +1,28 @@
+{
+  "protocolSection": {
+    "identificationModule": {
+      "nctId": "NCT09990005",
+      "organization": {"fullName": "Example Research Institute", "class": "OTHER"},
+      "briefTitle": "A Study of Drug S With Incomplete Registry Metadata",
+      "officialTitle": "A Study of Drug S (Incomplete Registry Metadata Example)"
+    },
+    "statusModule": {},
+    "sponsorCollaboratorsModule": {
+      "leadSponsor": {"name": "Example Biopharma Holdings, Inc.", "class": "INDUSTRY"}
+    },
+    "conditionsModule": {"conditions": ["Condition T"]},
+    "designModule": {
+      "studyType": "INTERVENTIONAL",
+      "phases": ["PHASE1", "PHASE2"],
+      "designInfo": {"allocation": "RANDOMIZED"}
+    },
+    "armsInterventionsModule": {},
+    "outcomesModule": {
+      "primaryOutcomes": [{"measure": "Safety and tolerability"}]
+    },
+    "eligibilityModule": {},
+    "contactsLocationsModule": {},
+    "referencesModule": {}
+  },
+  "hasResults": false
+}

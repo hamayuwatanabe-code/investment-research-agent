@@ -1,0 +1,71 @@
+{
+  "protocolSection": {
+    "identificationModule": {
+      "nctId": "NCT09990001",
+      "orgStudyIdInfo": {"id": "PROTO-CT-001"},
+      "organization": {"fullName": "Example Research Institute", "class": "OTHER"},
+      "briefTitle": "A Study of Drug X in Adults With Condition Y",
+      "officialTitle": "A Phase 2, Randomized, Double-Blind, Placebo-Controlled Study of Drug X in Adults With Condition Y"
+    },
+    "statusModule": {
+      "overallStatus": "ACTIVE_NOT_RECRUITING",
+      "startDateStruct": {"date": "2025-01-15", "type": "ACTUAL"},
+      "primaryCompletionDateStruct": {"date": "2026-06-30", "type": "ESTIMATED"},
+      "completionDateStruct": {"date": "2026-12-31", "type": "ESTIMATED"},
+      "studyFirstSubmitDate": "2024-11-01",
+      "lastUpdateSubmitDate": "2026-05-01",
+      "lastUpdatePostDateStruct": {"date": "2026-05-05", "type": "ACTUAL"}
+    },
+    "sponsorCollaboratorsModule": {
+      "leadSponsor": {"name": "Example Biopharma Holdings, Inc.", "class": "INDUSTRY"},
+      "collaborators": [{"name": "Example Academic Medical Center", "class": "OTHER"}],
+      "responsibleParty": {"type": "SPONSOR"}
+    },
+    "conditionsModule": {
+      "conditions": ["Condition Y"],
+      "keywords": ["biomarker-driven"]
+    },
+    "designModule": {
+      "studyType": "INTERVENTIONAL",
+      "phases": ["PHASE2"],
+      "designInfo": {
+        "allocation": "RANDOMIZED",
+        "interventionModel": "PARALLEL",
+        "primaryPurpose": "TREATMENT",
+        "maskingInfo": {"masking": "DOUBLE", "whoMasked": ["PARTICIPANT", "INVESTIGATOR"]}
+      },
+      "enrollmentInfo": {"count": 150, "type": "ACTUAL"}
+    },
+    "armsInterventionsModule": {
+      "armGroups": [
+        {"label": "Drug X High Dose", "type": "EXPERIMENTAL"},
+        {"label": "Placebo", "type": "PLACEBO_COMPARATOR"}
+      ],
+      "interventions": [
+        {"type": "DRUG", "name": "Drug X"},
+        {"type": "DRUG", "name": "Placebo"}
+      ]
+    },
+    "outcomesModule": {
+      "primaryOutcomes": [
+        {"measure": "Change from baseline in Y-Score at Week 24", "timeFrame": "Baseline to Week 24"}
+      ],
+      "secondaryOutcomes": [
+        {"measure": "Proportion of participants achieving Y-Score remission", "timeFrame": "Week 24"}
+      ]
+    },
+    "eligibilityModule": {
+      "eligibilityCriteria": "Inclusion: adults 18-75 with confirmed diagnosis of Condition Y. Exclusion: prior treatment with a Drug X class agent.",
+      "sex": "ALL",
+      "minimumAge": "18 Years",
+      "maximumAge": "75 Years"
+    },
+    "contactsLocationsModule": {
+      "locations": [
+        {"facility": "Example Clinical Research Center", "city": "Springfield", "country": "United States", "status": "ACTIVE_NOT_RECRUITING"}
+      ]
+    },
+    "referencesModule": {"references": []}
+  },
+  "hasResults": false
+}

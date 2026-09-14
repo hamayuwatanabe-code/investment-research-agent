@@ -1,0 +1,56 @@
+{
+  "protocolSection": {
+    "identificationModule": {
+      "nctId": "NCT09990003",
+      "organization": {"fullName": "Example Research Institute", "class": "OTHER"},
+      "briefTitle": "A Terminated Study of Drug Q in Adults With Condition V",
+      "officialTitle": "A Phase 2 Study of Drug Q in Adults With Condition V (Terminated)"
+    },
+    "statusModule": {
+      "overallStatus": "TERMINATED",
+      "whyStopped": "Business decision unrelated to safety or efficacy findings",
+      "startDateStruct": {"date": "2024-02-01", "type": "ACTUAL"},
+      "primaryCompletionDateStruct": {"date": "2025-03-01", "type": "ACTUAL"},
+      "completionDateStruct": {"date": "2025-03-01", "type": "ACTUAL"},
+      "studyFirstSubmitDate": "2023-12-01",
+      "lastUpdateSubmitDate": "2025-04-01",
+      "lastUpdatePostDateStruct": {"date": "2025-04-05", "type": "ACTUAL"}
+    },
+    "sponsorCollaboratorsModule": {
+      "leadSponsor": {"name": "Example Biopharma Holdings, Inc.", "class": "INDUSTRY"},
+      "collaborators": [],
+      "responsibleParty": {"type": "SPONSOR"}
+    },
+    "conditionsModule": {"conditions": ["Condition V"], "keywords": []},
+    "designModule": {
+      "studyType": "INTERVENTIONAL",
+      "phases": ["PHASE2"],
+      "designInfo": {
+        "allocation": "RANDOMIZED",
+        "interventionModel": "PARALLEL",
+        "primaryPurpose": "TREATMENT",
+        "maskingInfo": {"masking": "NONE"}
+      },
+      "enrollmentInfo": {"count": 12, "type": "ACTUAL"}
+    },
+    "armsInterventionsModule": {
+      "armGroups": [{"label": "Drug Q", "type": "EXPERIMENTAL"}],
+      "interventions": [{"type": "DRUG", "name": "Drug Q"}]
+    },
+    "outcomesModule": {
+      "primaryOutcomes": [{"measure": "Change from baseline in V-Score at Week 12", "timeFrame": "Week 12"}],
+      "secondaryOutcomes": []
+    },
+    "eligibilityModule": {
+      "eligibilityCriteria": "Inclusion: adults with confirmed Condition V.",
+      "sex": "ALL",
+      "minimumAge": "18 Years",
+      "maximumAge": "N/A"
+    },
+    "contactsLocationsModule": {
+      "locations": [{"facility": "Example Site A", "city": "Millbrook", "country": "United States", "status": "TERMINATED"}]
+    },
+    "referencesModule": {"references": []}
+  },
+  "hasResults": false
+}

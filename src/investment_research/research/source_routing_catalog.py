@@ -419,9 +419,18 @@ def _fda_dual(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph
 def _clinicaltrials_web(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     tag = f"{index:03d}a"
     req_id, target_id = f"req_{tag}", f"target_{tag}"
+    # Phase 3D: research/clinicaltrials_acquisition_adapter.py's
+    # ClinicalTrialsStudyAdapter now exists as code and is proven, in this
+    # repository's own test suite, against an injected fake HTTP double --
+    # genuinely OFFLINE_VERIFIED, never LIVE_VERIFIED (no real network call
+    # was ever made). This is an earned promotion for the STRUCTURED path
+    # only (a known NCT ID, direct fetch); the web-search fallback path
+    # below stays untouched at DISABLED/PRIMITIVE_AVAILABLE, exactly as
+    # every other still-unimplemented source in this catalog does.
     steps, required, alt_groups = _structured_or_web_chain(
         tag, target_id, direct_method=AcquisitionMethod.EXISTING_DIRECT_API,
         direct_adapter="clinicaltrials_api", direct_authority=DocumentAuthority.REGISTRY,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,

@@ -235,18 +235,29 @@ def test_form4_and_pubmed_adapters_are_declared_not_yet_coded():
     assert declared_adapters == {"form4_xml_parser", "pubmed_europepmc"}
 
 
-def test_only_the_sec_primary_and_exhibit_adapters_are_offline_verified():
-    """Phase 3A requirement 1/5/6: AcquisitionExecutor plus the two SEC
-    adapters are built and proven against a FakeHttpClient this phase, so
-    (and only so) their steps earn OFFLINE_VERIFIED. Every other step
-    (ClinicalTrials, web search, Form 4, PubMed) is untouched and stays
-    below is_executor_ready -- OFFLINE_VERIFIED/EXECUTOR_WIRED/PIPELINE_
-    WIRED/LIVE_VERIFIED must never appear anywhere else in this catalog."""
+def test_only_sec_and_clinicaltrials_direct_adapters_are_offline_verified():
+    """Phase 3A requirement 1/5/6, extended by Phase 3D: AcquisitionExecutor
+    plus the SEC primary/exhibit adapters AND (Phase 3D)
+    ClinicalTrialsStudyAdapter's structured (known-NCT-ID) path are built
+    and proven against a fake HTTP double, so (and only so) their steps
+    earn OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
+    structured-or-web archetype's PARSE step for ANY direct source (SEC
+    uses its own dedicated adapter id for PARSE too, but ClinicalTrials'
+    structured chain reuses the generic "local_parser" id for its PARSE
+    step) shares that id with every other still-unimplemented structured
+    archetype's PARSE step -- this set only ever contains the ids of steps
+    actually AT OFFLINE_VERIFIED, never steps at a lower rung that happen
+    to share the same generic id. Web search, Form 4, and PubMed/Europe
+    PMC are untouched and stay below is_executor_ready -- EXECUTOR_WIRED/
+    PIPELINE_WIRED/LIVE_VERIFIED must never appear anywhere in this
+    catalog at all."""
     graph = build_source_routing_graph()
     offline_verified_adapters = {
         s.adapter_id for s in graph.steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
     }
-    assert offline_verified_adapters == {"sec_primary_document_adapter", "sec_exhibit_enumeration"}
+    assert offline_verified_adapters == {
+        "sec_primary_document_adapter", "sec_exhibit_enumeration", "clinicaltrials_api", "local_parser",
+    }
     executor_ready_ids = {s.adapter_id for s in graph.steps if s.implementation_status.is_executor_ready}
     assert executor_ready_ids == offline_verified_adapters
     assert not any(s.implementation_status is ImplementationStatus.EXECUTOR_WIRED for s in graph.steps)
@@ -279,18 +290,35 @@ def test_sec_primary_and_exhibit_targets_are_now_individually_executable():
         assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.EXECUTABLE_COMPLETE
 
 
-def test_non_sec_targets_remain_not_executable():
-    """ClinicalTrials/web-only/Form4/literature targets were never touched
-    this phase -- they must still read NOT_EXECUTABLE, never silently
-    upgraded by association with the SEC promotion."""
+def test_untouched_targets_remain_not_executable():
+    """Web-only/Form4/literature targets were never touched this phase (or
+    Phase 3D) -- they must still read NOT_EXECUTABLE, never silently
+    upgraded by association with the SEC/ClinicalTrials promotions."""
     graph = build_source_routing_graph()
-    non_sec_kinds = {TargetKind.CLINICALTRIALS_RECORD, TargetKind.LITERATURE_ARTICLE, TargetKind.FORM4_FILING, TargetKind.GENERIC_WEB_DOCUMENT}
+    non_promoted_kinds = {TargetKind.LITERATURE_ARTICLE, TargetKind.FORM4_FILING, TargetKind.GENERIC_WEB_DOCUMENT}
     checked = 0
     for target in graph.targets:
-        if target.target_kind not in non_sec_kinds:
+        if target.target_kind not in non_promoted_kinds:
             continue
         checked += 1
         assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.NOT_EXECUTABLE
+    assert checked > 0
+
+
+def test_clinicaltrials_targets_are_now_individually_executable():
+    """Phase 3D: with ClinicalTrialsStudyAdapter's structured path
+    genuinely executor-ready (OFFLINE_VERIFIED), every ClinicalTrials
+    target's structured-fetch alternative group is usable, so the whole
+    target reads EXECUTABLE_COMPLETE -- even though its web-search
+    fallback path remains untouched (DISABLED), because only ONE member of
+    each alternative group needs to be usable."""
+    graph = build_source_routing_graph()
+    checked = 0
+    for target in graph.targets:
+        if target.target_kind is not TargetKind.CLINICALTRIALS_RECORD:
+            continue
+        checked += 1
+        assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.EXECUTABLE_COMPLETE
     assert checked > 0
 
 
@@ -309,10 +337,17 @@ def test_routing_coverage_counts_reports_implementation_ladder_split():
     counts = routing_coverage_counts()
     assert counts.declared_steps > 0  # Form 4 / PubMed -- untouched this phase
     assert counts.primitive_available_steps > 0  # generic web-fallback fetch/parse
-    assert counts.adapter_implemented_steps > 0  # ClinicalTrials direct fetch/parse
+    # Phase 3D promoted ClinicalTrials' structured direct fetch/parse from
+    # ADAPTER_IMPLEMENTED to OFFLINE_VERIFIED (a real adapter now exists AND
+    # is proven against a fake transport) -- nothing else in this catalog
+    # still sits at ADAPTER_IMPLEMENTED (every other archetype's direct
+    # path is either OFFLINE_VERIFIED (SEC, ClinicalTrials) or explicitly
+    # DECLARED (Form 4, PubMed/Europe PMC)), so this rung is legitimately
+    # empty now.
+    assert counts.adapter_implemented_steps == 0
     assert counts.executor_wired_steps == 0  # no step is wired-but-unverified
     assert counts.pipeline_wired_steps == 0  # Pipeline.run() connection forbidden this phase
-    assert counts.offline_verified_steps > 0  # the SEC primary/exhibit chain, proven this phase
+    assert counts.offline_verified_steps > 0  # the SEC + ClinicalTrials direct chains, proven this phase
     assert counts.live_verified_steps == 0  # no real network call was ever made
     ladder_total = (
         counts.declared_steps + counts.primitive_available_steps + counts.adapter_implemented_steps

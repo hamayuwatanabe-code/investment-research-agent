@@ -1,0 +1,51 @@
+{
+  "protocolSection": {
+    "identificationModule": {
+      "nctId": "NCT09990004",
+      "organization": {"fullName": "Example Research Institute", "class": "OTHER"},
+      "briefTitle": "A Withdrawn Study of Drug R in Adults With Condition U",
+      "officialTitle": "A Phase 1 Study of Drug R in Adults With Condition U (Withdrawn Prior to Enrollment)"
+    },
+    "statusModule": {
+      "overallStatus": "WITHDRAWN",
+      "whyStopped": "Withdrawn prior to enrollment due to a change in sponsor development priorities",
+      "studyFirstSubmitDate": "2025-06-01",
+      "lastUpdateSubmitDate": "2025-07-01",
+      "lastUpdatePostDateStruct": {"date": "2025-07-05", "type": "ACTUAL"}
+    },
+    "sponsorCollaboratorsModule": {
+      "leadSponsor": {"name": "Example Biopharma Holdings, Inc.", "class": "INDUSTRY"},
+      "collaborators": [],
+      "responsibleParty": {"type": "SPONSOR"}
+    },
+    "conditionsModule": {"conditions": ["Condition U"], "keywords": []},
+    "designModule": {
+      "studyType": "INTERVENTIONAL",
+      "phases": ["PHASE1"],
+      "designInfo": {
+        "allocation": "NA",
+        "interventionModel": "SINGLE_GROUP",
+        "primaryPurpose": "TREATMENT",
+        "maskingInfo": {"masking": "NONE"}
+      },
+      "enrollmentInfo": {"count": 0, "type": "ACTUAL"}
+    },
+    "armsInterventionsModule": {
+      "armGroups": [{"label": "Drug R", "type": "EXPERIMENTAL"}],
+      "interventions": [{"type": "DRUG", "name": "Drug R"}]
+    },
+    "outcomesModule": {
+      "primaryOutcomes": [{"measure": "Incidence of dose-limiting toxicity", "timeFrame": "28 days"}],
+      "secondaryOutcomes": []
+    },
+    "eligibilityModule": {
+      "eligibilityCriteria": "Inclusion: adults with confirmed Condition U.",
+      "sex": "ALL",
+      "minimumAge": "18 Years",
+      "maximumAge": "N/A"
+    },
+    "contactsLocationsModule": {"locations": []},
+    "referencesModule": {"references": []}
+  },
+  "hasResults": false
+}

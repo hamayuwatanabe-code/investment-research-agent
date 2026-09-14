@@ -142,6 +142,12 @@ class ExecutionContext:
     #: driving a real filing populates these before calling ``run()``.
     filing_references: Mapping[str, Any] = field(default_factory=dict)
     exhibit_selectors: Mapping[str, Any] = field(default_factory=dict)
+    #: Phase 3D: the same per-target-input pattern as ``filing_references``/
+    #: ``exhibit_selectors``, generalized to a non-SEC source -- a caller
+    #: driving a known-NCT-ID ClinicalTrials.gov fetch populates this before
+    #: calling ``run()``. Never resolved by this module itself (no Web
+    #: Search, no sponsor-name guessing lives here).
+    study_references: Mapping[str, Any] = field(default_factory=dict)
 
     def payload_for(self, step_id: str) -> Mapping[str, Any]:
         return self.payloads.get(step_id, {})
@@ -151,6 +157,9 @@ class ExecutionContext:
 
     def exhibit_selector_for(self, target_id: str) -> Any:
         return self.exhibit_selectors.get(target_id)
+
+    def study_reference_for(self, target_id: str) -> Any:
+        return self.study_references.get(target_id)
 
 
 @dataclass
@@ -226,6 +235,7 @@ class AcquisitionExecutor:
         *,
         filing_references: Mapping[str, Any] | None = None,
         exhibit_selectors: Mapping[str, Any] | None = None,
+        study_references: Mapping[str, Any] | None = None,
     ) -> ExecutionReport:
         outcomes: dict[str, StepStatus] = {}
         request_cache: dict[str, StepExecutionResult] = {}
@@ -242,6 +252,7 @@ class AcquisitionExecutor:
                 request_cache=request_cache,
                 filing_references=filing_references or {},
                 exhibit_selectors=exhibit_selectors or {},
+                study_references=study_references or {},
             )
             step_results: list[StepExecutionResult] = []
 

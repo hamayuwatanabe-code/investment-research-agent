@@ -1,0 +1,1 @@
+{"protocolSection": {"identificationModule": {"nctId": "NCT09990007", "briefTitle": "Truncated

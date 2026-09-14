@@ -1,0 +1,38 @@
+{
+  "protocolSection": {
+    "identificationModule": {
+      "nctId": "NCT09990006",
+      "organization": {"fullName": "Example Research Institute", "class": "OTHER"},
+      "briefTitle": "A Study of Drug P With Only Partial Registered Dates",
+      "officialTitle": "A Study of Drug P (Partial Date Precision Example)"
+    },
+    "statusModule": {
+      "overallStatus": "ACTIVE_NOT_RECRUITING",
+      "startDateStruct": {"date": "2025", "type": "ACTUAL"},
+      "primaryCompletionDateStruct": {"date": "2026-03", "type": "ESTIMATED"},
+      "completionDateStruct": {"date": "2026-09", "type": "ESTIMATED"},
+      "lastUpdateSubmitDate": "2026-01",
+      "lastUpdatePostDateStruct": {"date": "2026-01", "type": "ACTUAL"}
+    },
+    "sponsorCollaboratorsModule": {
+      "leadSponsor": {"name": "Example Biopharma Holdings, Inc.", "class": "INDUSTRY"}
+    },
+    "conditionsModule": {"conditions": ["Condition S"]},
+    "designModule": {
+      "studyType": "INTERVENTIONAL",
+      "phases": ["PHASE2"],
+      "designInfo": {"allocation": "RANDOMIZED", "interventionModel": "PARALLEL", "maskingInfo": {"masking": "SINGLE"}},
+      "enrollmentInfo": {"count": 60, "type": "ESTIMATED"}
+    },
+    "armsInterventionsModule": {
+      "armGroups": [{"label": "Drug P", "type": "EXPERIMENTAL"}]
+    },
+    "outcomesModule": {
+      "primaryOutcomes": [{"measure": "Change from baseline in S-Score", "timeFrame": "Week 16"}]
+    },
+    "eligibilityModule": {"sex": "ALL", "minimumAge": "18 Years", "maximumAge": "N/A"},
+    "contactsLocationsModule": {"locations": []},
+    "referencesModule": {"references": []}
+  },
+  "hasResults": false
+}
