@@ -56,6 +56,7 @@ rather than duplicated here as dozens of near-identical static JSON files
 | `cik_mismatch.xml` | `issuerCik` disagrees with the requested issuer | `0009998887` instead of `0001112223` -- excluded at FETCH, never stored as ACQUIRED evidence (Phase 3E.1) |
 | `reconciled_amendment.xml` | A Form 4/A whose remarks explicitly reference `normal_market_purchase`'s own accession | `documentType=4/A`; reconciliation resolves to RECONCILED (Phase 3E.1) |
 | `older_filing_on_continuation_page.xml` | A filing reachable ONLY via a `filings.files` continuation page, never `filings.recent` | Proves pagination is followed, not just the first ~1000 filings (Phase 3E.1) |
+| `checkbox_and_date_present.xml` | A document-level Rule 10b5-1 checkbox (`aff10b5One=1`) AND a `dateOfOriginalSubmission` element, both genuinely present | Used ONLY by `tests/unit/test_form4_live_smoke_offline.py`'s raw-XML diagnostic scanner tests (Phase 3E.2) -- deliberately NOT added to `_form4_fixture_support.py`'s shared `_SCENARIOS`/`CLEANLY_ACQUIRABLE_SCENARIOS`, since several Phase 3E.1 tests assert that no shared fixture has this checkbox present |
 
 (The `metadata_says_form3` scenario -- SEC's own submissions metadata
 records the accession as Form 3, not Form 4/4-A -- and the
