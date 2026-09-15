@@ -531,8 +531,9 @@ def test_analyze_capture_makes_no_network_access_and_reads_only_local_files(tmp_
     # capture_retrieved_at.
     assert set(result["capture_manifests"]) == set(result["categories_found"])
     for diag in result["capture_manifests"].values():
-        assert diag["present"] is False
-        assert diag["hash_verified"] is None
+        assert diag["capture_manifest_status"] == "MISSING"
+        assert diag["capture_manifest_schema_version"] is None
+        assert diag["capture_manifest_error"] is None
         assert diag["capture_retrieved_at"] == UNKNOWN
 
 
@@ -557,16 +558,46 @@ def test_analyze_capture_reports_manifest_capture_retrieved_at_when_hash_verifie
 
     result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
     diag = result["capture_manifests"]["submissions"]
-    assert diag["present"] is True
-    assert diag["hash_verified"] is True
+    assert diag["capture_manifest_status"] == "VERIFIED"
+    assert diag["capture_manifest_schema_version"] == CAPTURE_MANIFEST_SCHEMA_VERSION
+    assert diag["capture_manifest_error"] is None
     assert diag["capture_retrieved_at"] == "2026-08-01T00:00:00Z"
 
 
 def test_analyze_capture_manifest_hash_mismatch_withholds_capture_retrieved_at(tmp_path):
     """A manifest whose content_hash no longer matches the body actually on
-    disk must never be treated as a normal, verified capture (Phase 3D.4
-    requirement 9) -- capture_retrieved_at is withheld (UNKNOWN), not
-    reported from an untrustworthy manifest."""
+    disk -- but whose content_length still happens to agree (a same-size
+    corruption) -- must never be treated as a normal, verified capture
+    (Phase 3D.4 requirement 9): capture_retrieved_at is withheld (UNKNOWN),
+    not reported from an untrustworthy manifest."""
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    actual_content = submissions_text.encode("utf-8")
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_bytes(actual_content)
+    corrupted_same_length = actual_content[:-1] + (b"X" if actual_content[-1:] != b"X" else b"Y")
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="sec",
+        requested_url=urls["submissions"],
+        final_url=urls["submissions"],
+        http_status=200,
+        capture_retrieved_at="2026-08-01T00:00:00Z",
+        content_hash=compute_content_hash(corrupted_same_length),
+        content_length=len(corrupted_same_length),
+    )
+    write_manifest(tmp_path, digest, manifest)
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["capture_manifest_status"] == "HASH_MISMATCH"
+    assert diag["capture_manifest_error"] is not None
+    assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_content_length_mismatch_takes_priority(tmp_path):
+    """When BOTH content_length and content_hash disagree, content_length
+    is reported (Phase 3D.4.1 requirement 3's explicit priority)."""
     submissions_text = fx.fixture_text("submissions_testco.json")
     urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
     actual_content = submissions_text.encode("utf-8")
@@ -586,9 +617,99 @@ def test_analyze_capture_manifest_hash_mismatch_withholds_capture_retrieved_at(t
 
     result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
     diag = result["capture_manifests"]["submissions"]
-    assert diag["present"] is True
-    assert diag["hash_verified"] is False
+    assert diag["capture_manifest_status"] == "CONTENT_LENGTH_MISMATCH"
     assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_malformed_json_is_an_integrity_failure_not_missing(tmp_path):
+    """Corrupt manifest JSON must never be treated the same as MISSING
+    (Phase 3D.4.1 requirement 6)."""
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(submissions_text, encoding="utf-8")
+    (tmp_path / f"{digest}.manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["capture_manifest_status"] == "MALFORMED"
+    assert diag["capture_manifest_status"] != "MISSING"
+    assert diag["capture_manifest_error"] is not None
+    assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_unsupported_schema_is_an_integrity_failure(tmp_path):
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(submissions_text, encoding="utf-8")
+    (tmp_path / f"{digest}.manifest.json").write_text(
+        json.dumps({"totally": "unrecognized", "fields": True}), encoding="utf-8",
+    )
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["capture_manifest_status"] == "UNSUPPORTED_SCHEMA"
+    assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_io_error_is_an_integrity_failure(tmp_path, monkeypatch):
+    from pathlib import Path as _Path
+
+    submissions_text = fx.fixture_text("submissions_testco.json")
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(submissions_text, encoding="utf-8")
+    manifest_path = tmp_path / f"{digest}.manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    original_read_text = _Path.read_text
+
+    def boom(self, *args, **kwargs):
+        if self == manifest_path:
+            raise OSError("simulated IO error")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "read_text", boom)
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["capture_manifest_status"] == "IO_ERROR"
+    assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path):
+    """A manifest exists but its body file does not -- distinct from
+    MISSING (no manifest at all) (Phase 3D.4.1 requirement 7)."""
+    urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
+    digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="sec",
+        requested_url=urls["submissions"],
+        final_url=urls["submissions"],
+        http_status=200,
+        capture_retrieved_at="2026-08-01T00:00:00Z",
+        content_hash=compute_content_hash(b"whatever was captured"),
+        content_length=len(b"whatever was captured"),
+    )
+    write_manifest(tmp_path, digest, manifest)
+    # No body file written at all for "submissions".
+
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    assert "submissions" not in result["categories_found"]
+    diag = result["capture_manifests"]["submissions"]
+    assert diag["capture_manifest_status"] == "BODY_MISSING"
+    assert diag["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_never_included_in_live_verified_candidates(tmp_path):
+    """analyze_capture() never sets/returns a live_verified_candidates key
+    at all, regardless of manifest status -- offline re-analysis must never
+    be conflated with a live run's own LIVE_VERIFIED diagnostic (Phase
+    3D.4.1 requirement 5)."""
+    result = live.analyze_capture(tmp_path, cik=CIK, accession=ACCESSION, primary_document=PRIMARY_DOCUMENT)
+    assert "live_verified_candidates" not in result
 
 
 def test_analyze_capture_reports_missing_categories_never_guesses(tmp_path):

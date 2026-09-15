@@ -525,8 +525,10 @@ def test_analyze_capture_uses_manifest_capture_retrieved_at_when_hash_verified(t
     _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=content)
 
     result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
-    assert result["manifest_present"] is True
-    assert result["manifest_hash_verified"] is True
+    assert result["capture_manifest_status"] == "VERIFIED"
+    assert result["capture_manifest_schema_version"] == CAPTURE_MANIFEST_SCHEMA_VERSION
+    assert result["capture_manifest_error"] is None
+    assert result["capture_retrieved_at"] == "2026-08-01T00:00:00Z"
     assert result["freshness"] is not None
     # capture_retrieved_at comes from the manifest, never from --as-of.
     assert result["freshness"].capture_retrieved_at == "2026-08-01T00:00:00Z"
@@ -535,10 +537,11 @@ def test_analyze_capture_uses_manifest_capture_retrieved_at_when_hash_verified(t
 
 
 def test_analyze_capture_manifest_hash_mismatch_never_treated_as_verified(tmp_path):
-    """The manifest's content_hash was computed against DIFFERENT bytes than
-    what's on disk now (e.g. the saved body was edited after capture) --
-    must never be trusted as a normal, verified capture (Phase 3D.4
-    requirement 9): capture_retrieved_at stays UNKNOWN even though a
+    """The manifest's content_hash was computed against DIFFERENT bytes of
+    the SAME length as what's on disk now (a same-size corruption, so
+    content_length alone cannot catch it and the hash comparison is what
+    matters) -- must never be trusted as a normal, verified capture (Phase
+    3D.4 requirement 9): capture_retrieved_at stays UNKNOWN even though a
     manifest is present."""
     import hashlib
 
@@ -546,14 +549,36 @@ def test_analyze_capture_manifest_hash_mismatch_never_treated_as_verified(tmp_pa
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
     actual_content = fx.fixture_text("study_recruiting_interventional.json").encode("utf-8")
     (tmp_path / f"{digest}.json").write_bytes(actual_content)
-    # Manifest describes DIFFERENT bytes than what is actually on disk.
+    # Manifest describes DIFFERENT bytes of the SAME length as what is
+    # actually on disk -- isolates the hash check from the length check.
+    corrupted_same_length = actual_content[:-1] + (b"X" if actual_content[-1:] != b"X" else b"Y")
+    _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=corrupted_same_length)
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["capture_manifest_status"] == "HASH_MISMATCH"
+    assert result["capture_manifest_error"] is not None
+    assert result["capture_retrieved_at"] == UNKNOWN
+    assert result["freshness"] is not None
+    assert result["freshness"].capture_retrieved_at == UNKNOWN
+
+
+def test_analyze_capture_manifest_content_length_mismatch_takes_priority(tmp_path):
+    """When BOTH content_length and content_hash disagree, content_length
+    is reported (Phase 3D.4.1 requirement 3's explicit priority) -- never
+    treated as verified either way."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    actual_content = fx.fixture_text("study_recruiting_interventional.json").encode("utf-8")
+    (tmp_path / f"{digest}.json").write_bytes(actual_content)
+    # Manifest describes bytes of a DIFFERENT length AND different content.
     _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=b"not the real body")
 
     result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
-    assert result["manifest_present"] is True
-    assert result["manifest_hash_verified"] is False
-    assert result["freshness"] is not None
-    assert result["freshness"].capture_retrieved_at == UNKNOWN
+    assert result["capture_manifest_status"] == "CONTENT_LENGTH_MISMATCH"
+    assert result["capture_manifest_error"] is not None
+    assert result["capture_retrieved_at"] == UNKNOWN
 
 
 def test_analyze_capture_manifest_absent_is_backward_compatible(tmp_path):
@@ -567,8 +592,10 @@ def test_analyze_capture_manifest_absent_is_backward_compatible(tmp_path):
     (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
 
     result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
-    assert result["manifest_present"] is False
-    assert result["manifest_hash_verified"] is None
+    assert result["capture_manifest_status"] == "MISSING"
+    assert result["capture_manifest_schema_version"] is None
+    assert result["capture_manifest_error"] is None
+    assert result["capture_retrieved_at"] == UNKNOWN
     assert result["freshness"] is not None
     assert result["freshness"].capture_retrieved_at == UNKNOWN
 
@@ -584,3 +611,116 @@ def test_analyze_capture_manifest_never_referenced_via_mtime_or_directory_name(t
     referenced_names = set(code.co_names) | set(code.co_varnames)
     assert "mtime" not in referenced_names
     assert "st_mtime" not in referenced_names
+
+
+def test_analyze_capture_manifest_malformed_json_is_an_integrity_failure_not_missing(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    (tmp_path / f"{digest}.manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["capture_manifest_status"] == "MALFORMED"
+    assert result["capture_manifest_status"] != "MISSING"
+    assert result["capture_manifest_error"] is not None
+    assert result["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_unsupported_schema_is_an_integrity_failure(tmp_path):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    (tmp_path / f"{digest}.manifest.json").write_text(
+        json.dumps({"totally": "unrecognized", "shape": True}), encoding="utf-8",
+    )
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["capture_manifest_status"] == "UNSUPPORTED_SCHEMA"
+    assert result["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_io_error_is_an_integrity_failure(tmp_path, monkeypatch):
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    (tmp_path / f"{digest}.json").write_text(fx.fixture_text("study_recruiting_interventional.json"), encoding="utf-8")
+    manifest_path = tmp_path / f"{digest}.manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def boom(self, *args, **kwargs):
+        if self == manifest_path:
+            raise OSError("simulated IO error")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["capture_manifest_status"] == "IO_ERROR"
+    assert result["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path):
+    """A manifest exists but no body file was ever saved for this NCT ID --
+    distinct from MISSING (no manifest at all) (Phase 3D.4.1 requirement
+    7)."""
+    import hashlib
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest = CaptureManifest(
+        schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
+        source="clinicaltrials",
+        requested_url=url,
+        final_url=url,
+        http_status=200,
+        capture_retrieved_at="2026-08-01T00:00:00Z",
+        content_hash=compute_content_hash(b"whatever was captured"),
+        content_length=len(b"whatever was captured"),
+    )
+    write_manifest(tmp_path, digest, manifest)
+    # No body file written at all.
+
+    result = live.analyze_capture(tmp_path, nct_id=fx.NCT_ID, as_of="2026-09-14T00:00:00+00:00")
+    assert result["found"] is False
+    assert result["capture_manifest_status"] == "BODY_MISSING"
+    assert result["capture_manifest_status"] != "MISSING"
+    assert result["capture_retrieved_at"] == UNKNOWN
+
+
+def test_analyze_capture_manifest_status_serializes_as_a_plain_json_string(tmp_path, capsys):
+    """End-to-end through main()'s printed --analyze-capture JSON output --
+    capture_manifest_status must round-trip as a plain JSON string, never
+    an Enum repr or anything else opaque (Phase 3D.4.1 requirement 12)."""
+    import hashlib
+    import json as json_module
+
+    url = fx.study_url(fx.NCT_ID)
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    content = fx.fixture_text("study_recruiting_interventional.json").encode("utf-8")
+    (tmp_path / f"{digest}.json").write_bytes(content)
+    _write_ct_manifest(tmp_path, capture_retrieved_at="2026-08-01T00:00:00Z", content=content)
+
+    exit_code = live.main(["--nct-id", fx.NCT_ID, "--analyze-capture", str(tmp_path)])
+    assert exit_code == 0
+    printed = capsys.readouterr().out
+    parsed_output = json_module.loads(printed)
+
+    assert parsed_output["capture_manifest_status"] == "VERIFIED"
+    assert isinstance(parsed_output["capture_manifest_status"], str)
+    assert "ManifestReadStatus" not in printed
+
+
+def test_analyze_capture_never_returns_live_verified_candidates():
+    """analyze_capture() never sets/returns a live_verified_candidates key
+    at all -- offline re-analysis must never be conflated with a live
+    run's own LIVE_VERIFIED diagnostic, regardless of manifest status
+    (Phase 3D.4.1 requirement 5)."""
+    result = live.analyze_capture(Path("/nonexistent"), nct_id=fx.NCT_ID)
+    assert "live_verified_candidates" not in result

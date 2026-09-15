@@ -70,10 +70,11 @@ from .acquisition_planning import AcquisitionMethod
 from .capture_manifest import (
     CAPTURE_MANIFEST_SCHEMA_VERSION,
     CaptureManifest,
+    ManifestReadStatus,
     compute_content_hash,
+    manifest_path_for,
     read_manifest,
     utc_now_iso,
-    verify_manifest_against_body,
     write_manifest,
 )
 from .checks import SubjectScope
@@ -1329,34 +1330,44 @@ def _load_captured_bodies_and_manifests(
     capture_dir: Path, category_urls: dict[str, str],
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     """Read already-saved response BODIES back off disk, never making a
-    network call, and read each capture's manifest alongside it (Phase
-    3D.4). A capture directory from before manifests existed -- or one
-    written by a version of this tool that never wrote one -- simply has
-    none: reported as ``capture_retrieved_at: UNKNOWN``, never a crash
-    (Phase 3D.4 requirement 11, backward compatibility). A manifest whose
-    own ``content_hash`` no longer matches the body actually on disk is
-    reported as ``hash_verified: False`` with ``capture_retrieved_at``
-    withheld (UNKNOWN) -- never treated as a normal, verified capture
-    (Phase 3D.4 requirement 9)."""
+    network call, and resolve each capture's Capture Manifest status
+    alongside it (Phase 3D.4 / Phase 3D.4.1).
+
+    A category with NEITHER a body NOR a manifest is simply omitted from
+    ``manifests`` (unchanged pre-3D.4 behavior -- ``categories_missing``
+    already reports this). Otherwise every category gets one
+    ``capture_manifest_status`` naming exactly which case applies:
+    ``VERIFIED`` (manifest present, schema recognized, hash/length agree
+    with the body), ``MISSING`` (no manifest -- an unremarkable pre-3D.4
+    capture, NOT an Evidence Integrity failure, as long as the body is
+    present), ``BODY_MISSING`` (a manifest exists but the body file does
+    not -- nothing to verify it against), or one of the Evidence Integrity
+    failure statuses (``MALFORMED``/``UNSUPPORTED_SCHEMA``/
+    ``HASH_MISMATCH``/``CONTENT_LENGTH_MISMATCH``/``IO_ERROR``) -- never
+    conflated with ``MISSING`` (Phase 3D.4.1 requirement 6). Only
+    ``VERIFIED`` ever populates ``capture_retrieved_at``; every other
+    status reports ``UNKNOWN``."""
     bodies: dict[str, str] = {}
     manifests: dict[str, dict[str, Any]] = {}
     for category, url in category_urls.items():
+        digest = hashlib.sha256(url.encode()).hexdigest()[:24]
         found = _find_captured_file(capture_dir, url)
-        if found is None:
-            continue
-        digest, path = found
-        raw = path.read_bytes()
-        bodies[category] = raw.decode("utf-8", errors="replace")
-        manifest = read_manifest(capture_dir, digest)
-        if manifest is None:
-            manifests[category] = {"present": False, "hash_verified": None, "capture_retrieved_at": UNKNOWN}
-        else:
-            verified = verify_manifest_against_body(manifest, raw)
-            manifests[category] = {
-                "present": True,
-                "hash_verified": verified,
-                "capture_retrieved_at": manifest.capture_retrieved_at if verified else UNKNOWN,
-            }
+        raw: bytes | None = None
+        if found is not None:
+            _, path = found
+            raw = path.read_bytes()
+            bodies[category] = raw.decode("utf-8", errors="replace")
+        manifest_exists = manifest_path_for(capture_dir, digest).is_file()
+        if raw is None and not manifest_exists:
+            continue  # nothing captured for this category at all
+        result = read_manifest(capture_dir, digest, body=raw)
+        verified_manifest = result.manifest if result.status is ManifestReadStatus.VERIFIED else None
+        manifests[category] = {
+            "capture_manifest_status": result.status.value,
+            "capture_manifest_schema_version": result.manifest.schema_version if result.manifest is not None else None,
+            "capture_manifest_error": result.error_reason,
+            "capture_retrieved_at": verified_manifest.capture_retrieved_at if verified_manifest is not None else UNKNOWN,
+        }
     return bodies, manifests
 
 
@@ -1384,10 +1395,15 @@ def analyze_capture(
     Since Phase 3D.4, each saved body also has its own Capture Manifest
     (``<digest>.manifest.json``) recording the real UTC
     ``capture_retrieved_at``, a content hash, and where it came from --
-    included here per-category as ``capture_manifests``. A capture
-    directory written before Phase 3D.4 (or by anything else that only
-    ever saved the raw body) simply has none, and is reported with
-    ``capture_retrieved_at: UNKNOWN`` rather than failing.
+    included here per-category as ``capture_manifests``, each entry naming
+    one ``capture_manifest_status`` (Phase 3D.4.1's ``ManifestReadStatus``:
+    ``VERIFIED``/``MISSING``/``BODY_MISSING``/``MALFORMED``/
+    ``UNSUPPORTED_SCHEMA``/``HASH_MISMATCH``/``CONTENT_LENGTH_MISMATCH``/
+    ``IO_ERROR``) rather than a bare ``True``/``False``/``None`` -- a
+    missing manifest (an ordinary pre-3D.4 capture) is never conflated with
+    a corrupt or disagreeing one (a genuine Evidence Integrity failure).
+    Only ``VERIFIED`` ever populates ``capture_retrieved_at``; every other
+    status reports ``UNKNOWN``.
     """
     urls = _category_urls(cik, accession, primary_document, exhibit_filename)
     bodies, manifests = _load_captured_bodies_and_manifests(capture_dir, urls)

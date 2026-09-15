@@ -39,7 +39,7 @@ from ..collectors.clinicaltrials import STUDY_DETAIL_URL, parse_study
 from ..schemas.enums import UNKNOWN, ResearchDomain
 from .acquisition_executor import AcquisitionExecutor, ExecutionReport
 from .acquisition_planning import AcquisitionMethod
-from .capture_manifest import read_manifest, verify_manifest_against_body
+from .capture_manifest import ManifestReadStatus, read_manifest
 from .checks import SubjectScope
 from .clinicaltrials_acquisition_adapter import (
     CLINICALTRIALS_ADAPTER_ID,
@@ -510,14 +510,18 @@ def format_plan_for_print(plan: LiveSmokePlan) -> str:
     )
 
 
+def _digest_for_url(url: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(url.encode()).hexdigest()[:24]
+
+
 def _find_captured_file(capture_dir: Path, url: str) -> tuple[str, Path] | None:
     """Recomputes ``AllowlistedHttpClient._save_response``'s exact naming
     convention (``sha256(url)[:24] + suffix``) -- returns the digest (the
     manifest's own key) alongside the body file's path, or ``None`` if
     nothing was ever saved for this URL."""
-    import hashlib
-
-    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    digest = _digest_for_url(url)
     for suffix in (".json", ".htm", ".bin"):
         candidate = capture_dir / f"{digest}{suffix}"
         if candidate.is_file():
@@ -540,16 +544,22 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
 
     Since Phase 3D.4, each saved body also has its own Capture Manifest
     (``<digest>.manifest.json``) recording the REAL UTC
-    ``capture_retrieved_at`` this body was actually fetched at. When one is
-    present AND its own ``content_hash`` still matches the body actually on
-    disk, THAT value -- never ``as_of``, never the file's mtime, never the
-    capture directory's name -- becomes
-    ``RegistryFreshnessDiagnostics.capture_retrieved_at`` (Phase 3D.4
-    requirement 5). A capture saved before Phase 3D.4 (no manifest at all)
-    or a manifest whose hash no longer matches the body on disk (edited,
-    truncated, or swapped after capture -- never trusted as a normal,
-    verified capture, Phase 3D.4 requirement 9) both leave
-    ``capture_retrieved_at`` at ``UNKNOWN``, exactly as it always has been.
+    ``capture_retrieved_at`` this body was actually fetched at. Phase
+    3D.4.1 resolves this via ``capture_manifest.read_manifest``'s typed
+    ``ManifestReadStatus`` (``VERIFIED``/``MISSING``/``BODY_MISSING``/
+    ``MALFORMED``/``UNSUPPORTED_SCHEMA``/``HASH_MISMATCH``/
+    ``CONTENT_LENGTH_MISMATCH``/``IO_ERROR``) instead of a bare
+    ``True``/``False``/``None`` -- reported here as
+    ``capture_manifest_status``/``capture_manifest_schema_version``/
+    ``capture_manifest_error``. Only ``VERIFIED`` (manifest present,
+    schema recognized, hash/length agree with the body actually on disk)
+    ever populates ``capture_retrieved_at`` -- never ``as_of``, never the
+    file's mtime, never the capture directory's name. ``MISSING`` (no
+    manifest at all -- an unremarkable pre-3D.4 capture) is explicitly NOT
+    an Evidence Integrity failure; every other non-``VERIFIED`` status IS
+    one (Phase 3D.4.1 requirement 5), and none of them is ever treated as
+    a normal, verified capture (Phase 3D.4 requirement 9). Either way
+    ``capture_retrieved_at`` stays ``UNKNOWN``.
 
     ``as_of`` (an ISO ``YYYY-MM-DDTHH:MM:SS+00:00`` timestamp, or at least a
     ``YYYY-MM-DD`` date) is used ONLY as the freshness reference point
@@ -565,11 +575,32 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
             "error": f"malformed NCT ID: {nct_id!r} (normalized: {normalized_nct_id!r})",
         }
     url = STUDY_DETAIL_URL.format(nct_id=normalized_nct_id)
+    digest = _digest_for_url(url)
     found = _find_captured_file(capture_dir, url)
-    if found is None:
-        return {"capture_dir": str(capture_dir), "url": url, "found": False}
-    digest, path = found
-    raw_body = path.read_bytes()
+    raw_body: bytes | None = None
+    if found is not None:
+        _, path = found
+        raw_body = path.read_bytes()
+
+    manifest_result = read_manifest(capture_dir, digest, body=raw_body)
+    if raw_body is None:
+        if manifest_result.status is ManifestReadStatus.MISSING:
+            # Nothing captured for this NCT ID at all -- unchanged from
+            # before Phase 3D.4.
+            return {"capture_dir": str(capture_dir), "url": url, "found": False}
+        # A manifest exists (BODY_MISSING) but there is nothing to parse or
+        # verify it against (Phase 3D.4.1 requirement 7) -- explicitly
+        # distinct from the "nothing at all" case above.
+        return {
+            "capture_dir": str(capture_dir), "url": url, "found": False,
+            "capture_manifest_status": manifest_result.status.value,
+            "capture_manifest_schema_version": (
+                manifest_result.manifest.schema_version if manifest_result.manifest is not None else None
+            ),
+            "capture_manifest_error": manifest_result.error_reason,
+            "capture_retrieved_at": UNKNOWN,
+        }
+
     body = raw_body.decode("utf-8", errors="replace")
     try:
         payload = json.loads(body)
@@ -577,13 +608,8 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
         return {"capture_dir": str(capture_dir), "url": url, "found": True, "error": f"invalid JSON: {exc}"}
     parsed = parse_study(payload) if isinstance(payload, dict) and "protocolSection" in payload else None
 
-    manifest = read_manifest(capture_dir, digest)
-    manifest_hash_verified: bool | None = None
-    capture_retrieved_at = UNKNOWN
-    if manifest is not None:
-        manifest_hash_verified = verify_manifest_against_body(manifest, raw_body)
-        if manifest_hash_verified:
-            capture_retrieved_at = manifest.capture_retrieved_at
+    verified_manifest = manifest_result.manifest if manifest_result.status is ManifestReadStatus.VERIFIED else None
+    capture_retrieved_at = verified_manifest.capture_retrieved_at if verified_manifest is not None else UNKNOWN
 
     freshness = (
         _build_freshness_diagnostics(parsed, as_of, capture_retrieved_at=capture_retrieved_at)
@@ -596,8 +622,12 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
         "schema_ok": parsed is not None,
         "parsed_fields": parsed,
         "freshness": freshness,
-        "manifest_present": manifest is not None,
-        "manifest_hash_verified": manifest_hash_verified,
+        "capture_manifest_status": manifest_result.status.value,
+        "capture_manifest_schema_version": (
+            manifest_result.manifest.schema_version if manifest_result.manifest is not None else None
+        ),
+        "capture_manifest_error": manifest_result.error_reason,
+        "capture_retrieved_at": capture_retrieved_at,
         "fixture_diff": _diff_against_fixture(payload) if isinstance(payload, dict) else {"error": "not a JSON object"},
     }
 

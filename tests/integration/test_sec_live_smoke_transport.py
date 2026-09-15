@@ -169,7 +169,9 @@ def test_capture_manifest_is_written_with_expected_fields(base_url, tmp_path):
     assert result.ok
 
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-    manifest = read_manifest(tmp_path, digest)
+    read_result = read_manifest(tmp_path, digest, body=result.body)
+    assert read_result.status.value == "VERIFIED"
+    manifest = read_result.manifest
     assert manifest is not None
     assert manifest.schema_version >= 1
     assert manifest.source == "sec"
@@ -191,7 +193,8 @@ def test_capture_manifest_final_url_reflects_the_redirect_target(base_url, tmp_p
     assert result.ok
 
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-    manifest = read_manifest(tmp_path, digest)
+    read_result = read_manifest(tmp_path, digest, body=result.body)
+    manifest = read_result.manifest
     assert manifest is not None
     assert manifest.requested_url == url
     assert manifest.final_url == f"{base_url}/ok"
@@ -232,18 +235,22 @@ def test_capture_manifest_source_field_reflects_the_caller_e_g_clinicaltrials(ba
     (Phase 3D.4 requirement 4: one manifest type, one save rule, for both)."""
     client = _client(out_dir=tmp_path, source="clinicaltrials")
     url = f"{base_url}/ok"
-    client.get(url)
+    result = client.get(url)
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-    manifest = read_manifest(tmp_path, digest)
-    assert manifest is not None
-    assert manifest.source == "clinicaltrials"
+    read_result = read_manifest(tmp_path, digest, body=result.body)
+    assert read_result.manifest is not None
+    assert read_result.manifest.source == "clinicaltrials"
 
 
-def test_capture_manifest_read_manifest_is_none_for_a_pre_manifest_capture(base_url, tmp_path):
+def test_capture_manifest_read_manifest_missing_for_a_pre_manifest_capture(base_url, tmp_path):
     """A body saved with NO manifest (e.g. from before Phase 3D.4, or any
-    tool that only ever wrote the raw body) must read back as None, not
-    raise -- backward compatibility (Phase 3D.4 requirement 11)."""
+    tool that only ever wrote the raw body) must read back as MISSING, not
+    raise and never crash -- backward compatibility (Phase 3D.4 requirement
+    11 / Phase 3D.4.1 requirement 6: MISSING, not MALFORMED or anything
+    else)."""
     url = f"{base_url}/ok"
     digest = hashlib.sha256(url.encode()).hexdigest()[:24]
     (tmp_path / f"{digest}.json").write_text('{"ok": true}', encoding="utf-8")
-    assert read_manifest(tmp_path, digest) is None
+    result = read_manifest(tmp_path, digest, body=b'{"ok": true}')
+    assert result.status.value == "MISSING"
+    assert result.manifest is None
