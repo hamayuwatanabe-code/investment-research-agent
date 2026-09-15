@@ -1,7 +1,13 @@
 """Phase 3E.2: Form4 Live Smoke, entirely offline -- every test drives
 ``form4_live_smoke.run_live_smoke``/``analyze_capture`` against
-``FakeHttpClient`` (never a real socket) or a temp directory of
-already-saved captures. No real network call anywhere in this file.
+``FakeHttpClient``/``_PoisonHttpClient`` (never a real socket) or a temp
+directory of already-saved captures. No real network call anywhere in
+this file -- enforced structurally by ``forbid_external_network_autouse``
+(Phase 3E.2.1), not merely by test authoring discipline: every test in
+this module runs with real socket connections to any non-loopback host
+blocked, so a test that (by a future bug) let a real ``AllowlistedHttpClient``
+reach the real network would fail loudly with ``AssertionError`` instead
+of silently making a real SEC request.
 """
 
 from __future__ import annotations
@@ -16,8 +22,31 @@ from investment_research.research.capture_manifest import (
 )
 
 from . import _form4_fixture_support as fx
+from ._network_guard import forbid_external_network_autouse  # noqa: F401
 
 USER_AGENT = "test-agent contact@example.com"
+
+
+class _PoisonHttpClient:
+    """A fake transport whose ``.get()`` must never be called -- proves a
+    refused/pre-network-failure run makes ZERO requests, not merely
+    "few" (mirrors ``sec_live_smoke_offline``'s own ``_PoisonHttpClient``)."""
+
+    def get(self, url: str, **kwargs: object) -> object:
+        raise AssertionError(f"must never be called -- attempted GET {url}")
+
+
+class _PoisonHttpClientFactory:
+    """A ``main()``-level ``http_client_factory`` whose construction must
+    never even be INVOKED when a run refuses before reaching the client-
+    construction step (e.g. missing user agent, marker guard)."""
+
+    def __init__(self) -> None:
+        self.called = False
+
+    def __call__(self, user_agent: str, out_dir, max_requests: int) -> object:
+        self.called = True
+        return _PoisonHttpClient()
 
 
 def _run(http, **kwargs):
@@ -328,10 +357,154 @@ def test_analyze_capture_empty_directory_reports_zero_captures(tmp_path):
 
 
 # --- one-time marker semantics ---------------------------------------------
+#
+# Phase 3E.2.1: the ORIGINAL version of this test called main() with no
+# environment isolation at all, implicitly assuming IRA_SEC_USER_AGENT was
+# unset in whatever shell ran the suite. On a Mac where it was genuinely
+# and validly set, main() resolved a REAL user agent, constructed a REAL
+# AllowlistedHttpClient (main() had no client-injection seam), and made a
+# real GET against data.sec.gov for synthetic CIK 1112223 -- which
+# correctly 404'd, and correctly wrote the one-time marker (a real
+# communication attempt DID begin; that marker behavior is production-
+# correct and must never be "fixed" by suppressing the marker write on a
+# 404). The bug was test isolation, not marker semantics: this test now
+# injects env={} (never relies on monkeypatching/ambient os.environ) and a
+# poison http_client_factory (never even invoked, proving refusal happens
+# before any client is constructed) so it is hermetically isolated from
+# whatever the real ambient environment happens to contain.
 def test_marker_not_written_on_missing_user_agent_refusal(tmp_path):
     marker_path = tmp_path / "LAST_RUN.json"
-    exit_code = live_smoke.main([
-        "--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(marker_path),
-    ])
+    poison_factory = _PoisonHttpClientFactory()
+    exit_code = live_smoke.main(
+        ["--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(marker_path)],
+        env={},  # explicitly empty -- never falls through to a real ambient IRA_SEC_USER_AGENT
+        http_client_factory=poison_factory,
+    )
     assert exit_code == 1
     assert not marker_path.is_file()
+    assert poison_factory.called is False  # refusal happens before any client would be constructed
+
+
+def test_marker_not_written_when_run_live_smoke_refuses(monkeypatch):
+    """The same guarantee at the run_live_smoke() level directly -- the
+    Poison client proves zero requests, independent of main()'s own
+    marker-writing code."""
+    report = live_smoke.run_live_smoke(
+        fx.ISSUER_CIK_INT, user_agent=None, http_client=_PoisonHttpClient(),
+    )
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_main_writes_marker_only_after_real_communication_begins(tmp_path):
+    """The positive case: when the user agent genuinely resolves (via
+    injected env, never ambient) and the run proceeds, the marker IS
+    written -- proving this phase did not weaken marker semantics, only
+    isolated the test that exercises the refusal path."""
+    marker_path = tmp_path / "LAST_RUN.json"
+    out_dir = tmp_path / "captures"
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    exit_code = live_smoke.main(
+        [
+            "--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(marker_path),
+            "--out-dir", str(out_dir), "--as-of", "2026-03-15",
+        ],
+        env={"IRA_SEC_USER_AGENT": USER_AGENT},
+        http_client_factory=lambda user_agent, out_dir, max_requests: http,
+    )
+    assert exit_code == 0
+    assert marker_path.is_file()
+    assert http.requested_urls  # real communication (against the fake) genuinely began
+
+
+# --- ambient environment variable isolation (regression) -------------------
+#
+# Mirrors sec_live_smoke_offline.py's own established battery exactly
+# (same sentinel semantics: only OMITTING user_agent/env resolves from the
+# ambient environment; an explicit None/""/whitespace/placeholder value
+# must never silently fall back to it, however valid the ambient value
+# is) -- unified here for form4_live_smoke (Phase 3E.2.1 requirement 2).
+_AMBIENT_VALID_AGENT = "investment-research-agent ambient-mac-contact@example.test"
+
+
+def test_explicit_none_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live_smoke.run_live_smoke(fx.ISSUER_CIK_INT, user_agent=None, http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_placeholder_refuses_even_with_valid_ambient_env(monkeypatch):
+    from investment_research.research.sec_live_smoke import PLACEHOLDER_SEC_USER_AGENT
+
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live_smoke.run_live_smoke(
+        fx.ISSUER_CIK_INT, user_agent=PLACEHOLDER_SEC_USER_AGENT, http_client=_PoisonHttpClient(),
+    )
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_empty_string_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live_smoke.run_live_smoke(fx.ISSUER_CIK_INT, user_agent="", http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_explicit_whitespace_refuses_even_with_valid_ambient_env(monkeypatch):
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    report = live_smoke.run_live_smoke(fx.ISSUER_CIK_INT, user_agent="   ", http_client=_PoisonHttpClient())
+    assert report.refused
+    assert report.request_count == 0
+    assert report.requested_urls == []
+
+
+def test_omitted_user_agent_resolves_from_ambient_env(monkeypatch):
+    """Only omitting the parameter entirely (the shape main() uses after
+    it has already resolved+validated the value itself) may resolve from
+    the real environment."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = live_smoke.run_live_smoke(
+        fx.ISSUER_CIK_INT, as_of_date="2026-03-15", http_client=http,
+    )
+    assert not report.refused
+    assert report.request_count > 0
+
+
+def test_main_env_injection_isolates_from_real_ambient_environment(monkeypatch):
+    """The main()-level analogue: even when the REAL ambient environment
+    (via monkeypatch, standing in for a genuinely-set shell variable) has
+    a valid IRA_SEC_USER_AGENT, an explicitly injected env={} still
+    refuses -- proving main()'s env parameter, not the ambient process
+    environment, is what actually governs resolution when supplied."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    poison_factory = _PoisonHttpClientFactory()
+    exit_code = live_smoke.main(
+        ["--issuer-cik", str(fx.ISSUER_CIK_INT)], env={}, http_client_factory=poison_factory,
+    )
+    assert exit_code == 1
+    assert poison_factory.called is False
+
+
+def test_main_omitted_env_resolves_from_real_ambient_ira_sec_user_agent(monkeypatch, tmp_path):
+    """Confirms main()'s DEFAULT (env omitted -- what the real CLI always
+    does) genuinely reads the real process environment, via monkeypatch
+    rather than trusting whatever the suite's own ambient value is."""
+    monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    marker_path = tmp_path / "LAST_RUN.json"
+    exit_code = live_smoke.main(
+        [
+            "--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(marker_path),
+            "--out-dir", str(tmp_path / "captures"), "--as-of", "2026-03-15",
+        ],
+        http_client_factory=lambda user_agent, out_dir, max_requests: http,
+    )
+    assert exit_code == 0
+    assert http.requested_urls

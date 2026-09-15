@@ -24,6 +24,7 @@ from investment_research.schemas.enums import UNKNOWN
 
 from . import _clinicaltrials_fixture_support as fx
 from ._clinicaltrials_fixture_support import FakeHttpClient
+from ._network_guard import forbid_external_network_autouse  # noqa: F401
 
 _REAL_LOOKING_AGENT = "clinicaltrials-live-smoke-test-agent/9.9"
 

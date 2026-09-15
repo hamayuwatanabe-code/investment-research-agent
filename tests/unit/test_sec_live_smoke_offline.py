@@ -34,6 +34,7 @@ from investment_research.research.source_routing import (
 from investment_research.schemas.enums import UNKNOWN
 
 from . import _sec_fixture_support as fx
+from ._network_guard import forbid_external_network_autouse  # noqa: F401
 from ._sec_fixture_support import ACCESSION, CIK, PRIMARY_DOCUMENT, FakeHttpClient
 
 _REAL_SECRET_LOOKING_AGENT = "investment-research-agent smoke-test-contact@example.test"

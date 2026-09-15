@@ -90,13 +90,13 @@ from __future__ import annotations
 import json
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..collectors.form4 import check_ownership_xml_shape
+from ..collectors.form4 import VALID_FORM4_DOCUMENT_TYPES, check_ownership_xml_shape
 from ..collectors.sec_edgar import SUBMISSIONS_URL, cik_for_archives, normalize_cik
 from ..schemas.enums import UNKNOWN, ResearchDomain
 from ..schemas.fact import parse_iso_date
@@ -321,10 +321,18 @@ class Form4LiveSmokeReport:
     request_count: int = 0
     cache_hit_count: int = 0
     #: Every distinct SEC `form` value seen in the issuer's RAW
-    #: submissions.json (before any Form 3/4/5 filtering) -- proves the
-    #: filter actually excluded something, rather than merely asserting it
-    #: (Phase 3E.2 requirement 2).
+    #: submissions.json (before any Form 3/4/5 filtering) -- a neutral
+    #: count, never phrased as a claim about what it proves (Phase 3E.2.1
+    #: requirement 6: the previous wording asserted "Form 3/5 are present"
+    #: even for an issuer whose raw data has none).
     raw_submissions_forms_seen: dict[str, int] = field(default_factory=dict)
+    #: Subset of ``raw_submissions_forms_seen`` restricted to form values
+    #: OTHER than "4"/"4-A" -- populated (and only ever printed) when at
+    #: least one non-Form-4 filing genuinely appears in the raw data, so a
+    #: reader can see for themselves whether the exclusion filter had
+    #: anything real to exclude for THIS issuer, never asserted generically
+    #: (Phase 3E.2.1 requirement 6).
+    excluded_non_form4_form_counts: dict[str, int] = field(default_factory=dict)
     candidates_found_total: int = 0  # all Form 4/4-A candidates LOCATE discovered, before lookback filtering
     form4_count_total: int = 0
     form4a_count_total: int = 0
@@ -422,6 +430,9 @@ def run_live_smoke(
     for form in recent_forms:
         forms_seen[form] = forms_seen.get(form, 0) + 1
     report.raw_submissions_forms_seen = forms_seen
+    report.excluded_non_form4_form_counts = {
+        form: count for form, count in forms_seen.items() if form not in VALID_FORM4_DOCUMENT_TYPES
+    }
 
     store = DocumentStore()
     adapter = Form4Adapter(client)
@@ -549,7 +560,9 @@ def format_report_for_print(report: Form4LiveSmokeReport, *, secrets: list[str])
 
     lines.append(f"requested_urls ({len(report.requested_urls)}): {report.requested_urls}")
     lines.append(f"request_count: {report.request_count}  cache_hit_count: {report.cache_hit_count}")
-    lines.append(f"raw_submissions_forms_seen (proves Form 3/5 are present in the raw data but excluded): {report.raw_submissions_forms_seen}")
+    lines.append(f"raw_submissions_forms_seen: {report.raw_submissions_forms_seen}")
+    if report.excluded_non_form4_form_counts:
+        lines.append(f"excluded_non_form4_form_counts (genuinely present in this issuer's raw data): {report.excluded_non_form4_form_counts}")
     if report.status == "DISCOVERY_NOT_SUPPORTED":
         lines.append(f"errors: {report.errors}")
         return "\n".join(_safe(line, secrets) for line in lines)
@@ -669,9 +682,32 @@ def analyze_capture(capture_dir: Path) -> dict[str, Any]:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    http_client_factory: Callable[[str, Path, int], Any] | None = None,
+) -> int:
     """CLI entry point -- see ``scripts/form4_live_smoke.py``. Never
-    imported by cli.py/pipeline.py."""
+    imported by cli.py/pipeline.py.
+
+    ``env``/``http_client_factory`` are test-only dependency-injection
+    seams (Phase 3E.2.1 requirement 3) -- production callers (``scripts/
+    form4_live_smoke.py``) never pass either, so the real CLI's behavior
+    is unchanged: ``env=None`` resolves ``IRA_SEC_USER_AGENT`` from the
+    real ``os.environ`` exactly as before (via
+    ``sec_live_smoke.resolve_user_agent``, called here exactly ONCE --
+    never re-read from the environment a second time by ``run_live_smoke``,
+    since the already-resolved string is always passed through explicitly),
+    and ``http_client_factory=None`` lets ``run_live_smoke`` construct its
+    own real ``AllowlistedHttpClient`` exactly as it always has. A test
+    that passes an explicit ``env`` mapping (e.g. ``{}``) is therefore
+    hermetically isolated from whatever ``IRA_SEC_USER_AGENT`` value
+    happens to be set in the real shell running the test suite -- the bug
+    this seam fixes (Phase 3E.2.1) is a test that implicitly depended on
+    the ambient environment being unset and, on a machine where it
+    genuinely was set, made a real SEC request during an "offline" test.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -725,7 +761,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    user_agent = resolve_user_agent()
+    # Resolved exactly once -- env=None reads the real os.environ (unchanged
+    # production behavior); a test-injected env mapping is hermetically
+    # isolated from the real ambient environment. The resolved value is
+    # then passed EXPLICITLY to run_live_smoke below, which never re-reads
+    # the environment itself when given an already-resolved value.
+    user_agent = resolve_user_agent(env)
     secrets = [user_agent] if user_agent else []
     if user_agent is None:
         print(
@@ -736,9 +777,16 @@ def main(argv: list[str] | None = None) -> int:
         # activity occurred (mirrors sec_live_smoke.py exactly).
         return 1
 
+    # None (the production default) lets run_live_smoke construct its own
+    # real AllowlistedHttpClient exactly as before; a test-injected factory
+    # (e.g. a client whose .get() always raises) makes that construction
+    # observable/preventable from the test, without changing what the real
+    # CLI does.
+    client = http_client_factory(user_agent, out_dir, plan.max_requests) if http_client_factory is not None else None
+
     report = run_live_smoke(
         args.issuer_cik, as_of_date=args.as_of, lookback_days=args.lookback_days,
-        max_filings=args.max_filings, user_agent=user_agent, out_dir=out_dir,
+        max_filings=args.max_filings, user_agent=user_agent, http_client=client, out_dir=out_dir,
     )
     print()
     print(format_report_for_print(report, secrets=secrets))
