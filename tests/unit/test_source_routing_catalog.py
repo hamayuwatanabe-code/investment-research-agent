@@ -16,6 +16,7 @@ from investment_research.research.source_routing import (
     ImplementationStatus,
     PlanStatus,
     RequirementCriticality,
+    StepKind,
     StepStatus,
     TargetKind,
     compute_plan_status,
@@ -221,48 +222,69 @@ def test_building_graph_raises_if_a_real_group_is_left_unclassified(monkeypatch)
 
 
 # =========================== Phase 3A: implementation status ===============
-def test_form4_and_pubmed_adapters_are_declared_not_yet_coded():
-    """Only the two adapters Phase 3A actually built (SEC primary document,
-    SEC exhibit) are promoted; Form 4 XML parsing and PubMed/Europe PMC
-    remain honestly DECLARED -- Phase 3A never touched them (requirement 1:
-    never promote to an unearned level)."""
+def test_pubmed_adapter_remains_declared_not_yet_coded():
+    """PubMed/Europe PMC remains honestly DECLARED -- untouched by Phase
+    3A/3D/3E (requirement 1: never promote to an unearned level). Form 4
+    XML parsing was DECLARED through Phase 3D but is promoted to
+    OFFLINE_VERIFIED as of Phase 3E, once its own adapter genuinely
+    existed and was proven against a fake HTTP double -- see
+    ``test_form4_direct_adapter_is_offline_verified``."""
     graph = build_source_routing_graph()
     declared_adapters = {
         s.adapter_id
         for s in graph.steps
         if s.implementation_status is ImplementationStatus.DECLARED and s.adapter_id not in ("local_parser", "none")
     }
-    assert declared_adapters == {"form4_xml_parser", "pubmed_europepmc"}
+    assert declared_adapters == {"pubmed_europepmc"}
 
 
-def test_only_sec_and_clinicaltrials_direct_adapters_are_offline_verified():
-    """Phase 3A requirement 1/5/6, extended by Phase 3D: AcquisitionExecutor
-    plus the SEC primary/exhibit adapters AND (Phase 3D)
-    ClinicalTrialsStudyAdapter's structured (known-NCT-ID) path are built
-    and proven against a fake HTTP double, so (and only so) their steps
-    earn OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
+def test_only_sec_clinicaltrials_and_form4_direct_adapters_are_offline_verified():
+    """Phase 3A requirement 1/5/6, extended by Phase 3D and Phase 3E:
+    AcquisitionExecutor plus the SEC primary/exhibit adapters,
+    ClinicalTrialsStudyAdapter's structured (known-NCT-ID) path, AND
+    (Phase 3E) Form4Adapter's LOCATE/FETCH/PARSE are built and proven
+    against a fake HTTP double, so (and only so) their steps earn
+    OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
     structured-or-web archetype's PARSE step for ANY direct source (SEC
-    uses its own dedicated adapter id for PARSE too, but ClinicalTrials'
-    structured chain reuses the generic "local_parser" id for its PARSE
-    step) shares that id with every other still-unimplemented structured
-    archetype's PARSE step -- this set only ever contains the ids of steps
-    actually AT OFFLINE_VERIFIED, never steps at a lower rung that happen
-    to share the same generic id. Web search, Form 4, and PubMed/Europe
-    PMC are untouched and stay below is_executor_ready -- EXECUTOR_WIRED/
-    PIPELINE_WIRED/LIVE_VERIFIED must never appear anywhere in this
-    catalog at all."""
+    and Form 4 use their own dedicated adapter id for PARSE too, but
+    ClinicalTrials' structured chain reuses the generic "local_parser" id
+    for its PARSE step) shares that id with every other still-
+    unimplemented structured archetype's PARSE step -- this set only ever
+    contains the ids of steps actually AT OFFLINE_VERIFIED, never steps at
+    a lower rung that happen to share the same generic id. Web search and
+    PubMed/Europe PMC are untouched and stay below is_executor_ready --
+    EXECUTOR_WIRED/PIPELINE_WIRED/LIVE_VERIFIED must never appear anywhere
+    in this catalog at all."""
     graph = build_source_routing_graph()
     offline_verified_adapters = {
         s.adapter_id for s in graph.steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
     }
     assert offline_verified_adapters == {
-        "sec_primary_document_adapter", "sec_exhibit_enumeration", "clinicaltrials_api", "local_parser",
+        "sec_primary_document_adapter", "sec_exhibit_enumeration", "clinicaltrials_api",
+        "form4_xml_parser", "local_parser",
     }
     executor_ready_ids = {s.adapter_id for s in graph.steps if s.implementation_status.is_executor_ready}
     assert executor_ready_ids == offline_verified_adapters
     assert not any(s.implementation_status is ImplementationStatus.EXECUTOR_WIRED for s in graph.steps)
     assert not any(s.implementation_status is ImplementationStatus.PIPELINE_WIRED for s in graph.steps)
     assert not any(s.implementation_status is ImplementationStatus.LIVE_VERIFIED for s in graph.steps)
+
+
+def test_form4_direct_adapter_is_offline_verified():
+    """Dedicated Phase 3E check: every step of the form4 archetype's
+    direct chain (LOCATE -> FETCH -> PARSE) is OFFLINE_VERIFIED -- never
+    merely the LOCATE step, which is all Phase 3A's ``_document_chain``
+    defaults would promote without an explicit fetch/parse override."""
+    graph = build_source_routing_graph()
+    form4_targets = [t for t in graph.targets if t.target_kind is TargetKind.FORM4_FILING]
+    assert form4_targets
+    for target in form4_targets:
+        direct_steps = [
+            s for s in graph.steps_for_target(target.target_id)
+            if s.adapter_id == "form4_xml_parser"
+        ]
+        assert {s.step_kind for s in direct_steps} == {StepKind.LOCATE, StepKind.FETCH, StepKind.PARSE}
+        assert all(s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED for s in direct_steps)
 
 
 def test_real_catalog_plan_status_is_executable_bounded_incomplete():
@@ -291,17 +313,36 @@ def test_sec_primary_and_exhibit_targets_are_now_individually_executable():
 
 
 def test_untouched_targets_remain_not_executable():
-    """Web-only/Form4/literature targets were never touched this phase (or
-    Phase 3D) -- they must still read NOT_EXECUTABLE, never silently
-    upgraded by association with the SEC/ClinicalTrials promotions."""
+    """Web-only/literature targets were never touched by Phase 3A/3D/3E --
+    they must still read NOT_EXECUTABLE, never silently upgraded by
+    association with the SEC/ClinicalTrials/Form4 promotions. Form4
+    targets are EXCLUDED from this check as of Phase 3E -- see
+    ``test_form4_targets_are_now_individually_executable``."""
     graph = build_source_routing_graph()
-    non_promoted_kinds = {TargetKind.LITERATURE_ARTICLE, TargetKind.FORM4_FILING, TargetKind.GENERIC_WEB_DOCUMENT}
+    non_promoted_kinds = {TargetKind.LITERATURE_ARTICLE, TargetKind.GENERIC_WEB_DOCUMENT}
     checked = 0
     for target in graph.targets:
         if target.target_kind not in non_promoted_kinds:
             continue
         checked += 1
         assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.NOT_EXECUTABLE
+    assert checked > 0
+
+
+def test_form4_targets_are_now_individually_executable():
+    """Phase 3E: with Form4Adapter's direct path genuinely executor-ready
+    (OFFLINE_VERIFIED), every Form4 target's direct alternative group is
+    usable, so the whole target reads EXECUTABLE_COMPLETE -- even though
+    its web-search fallback path remains untouched (DISABLED), because
+    only ONE member of each alternative group needs to be usable (mirrors
+    ``test_clinicaltrials_targets_are_now_individually_executable``)."""
+    graph = build_source_routing_graph()
+    checked = 0
+    for target in graph.targets:
+        if target.target_kind is not TargetKind.FORM4_FILING:
+            continue
+        checked += 1
+        assert target_plan_status(target, graph.steps_for_target(target.target_id)) is PlanStatus.EXECUTABLE_COMPLETE
     assert checked > 0
 
 

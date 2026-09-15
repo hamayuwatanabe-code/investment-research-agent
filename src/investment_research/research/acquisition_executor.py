@@ -148,6 +148,13 @@ class ExecutionContext:
     #: calling ``run()``. Never resolved by this module itself (no Web
     #: Search, no sponsor-name guessing lives here).
     study_references: Mapping[str, Any] = field(default_factory=dict)
+    #: Phase 3E: the same per-target-input pattern, for a Form 4 ownership
+    #: filing -- a caller driving a known accession/primary-document Form 4
+    #: fetch populates this before calling ``run()``. Never resolved by
+    #: this module itself (no Web Search, no ticker/company-name guessing
+    #: lives here -- see ``form4_acquisition_adapter.py``'s module
+    #: docstring).
+    form4_references: Mapping[str, Any] = field(default_factory=dict)
 
     def payload_for(self, step_id: str) -> Mapping[str, Any]:
         return self.payloads.get(step_id, {})
@@ -160,6 +167,9 @@ class ExecutionContext:
 
     def study_reference_for(self, target_id: str) -> Any:
         return self.study_references.get(target_id)
+
+    def form4_reference_for(self, target_id: str) -> Any:
+        return self.form4_references.get(target_id)
 
 
 @dataclass
@@ -236,6 +246,7 @@ class AcquisitionExecutor:
         filing_references: Mapping[str, Any] | None = None,
         exhibit_selectors: Mapping[str, Any] | None = None,
         study_references: Mapping[str, Any] | None = None,
+        form4_references: Mapping[str, Any] | None = None,
     ) -> ExecutionReport:
         outcomes: dict[str, StepStatus] = {}
         request_cache: dict[str, StepExecutionResult] = {}
@@ -253,6 +264,7 @@ class AcquisitionExecutor:
                 filing_references=filing_references or {},
                 exhibit_selectors=exhibit_selectors or {},
                 study_references=study_references or {},
+                form4_references=form4_references or {},
             )
             step_results: list[StepExecutionResult] = []
 

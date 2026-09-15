@@ -37,7 +37,8 @@ step chains):
   target) is retired: a ClinicalTrials success never completes a
   literature-grounded requirement, and vice versa.
 * ``form4`` -- insider selling is exactly what Form 4 reports
-  (``NEW_DIRECT_ADAPTER``, unimplemented), same fallback shape.
+  (``NEW_DIRECT_ADAPTER``; Phase 3E implemented and proven OFFLINE_VERIFIED
+  against a fake HTTP double), same fallback shape.
 * ``web_only`` -- criticism/short thesis/"is a competitor better" have no
   registry, filing, or structured API that would ever contain them. No
   Direct alternative exists -- but a web-search locate alone STILL never
@@ -470,10 +471,19 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
 def _form4(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     tag = f"{index:03d}a"
     req_id, target_id = f"req_{tag}", f"target_{tag}"
+    # Phase 3E: research/form4_acquisition_adapter.py's Form4Adapter now
+    # exists as code and is proven, in this repository's own test suite,
+    # against an injected fake HTTP double -- genuinely OFFLINE_VERIFIED,
+    # never LIVE_VERIFIED (no real network call was ever made). An earned
+    # promotion for LOCATE/FETCH/PARSE alike, mirroring exactly how Phase
+    # 3A promoted the SEC primary-document/exhibit adapters' own three
+    # steps together.
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
         direct_adapter="form4_xml_parser", direct_authority=DocumentAuthority.STATUTORY_FILING,
-        direct_implementation_status=ImplementationStatus.DECLARED,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id="form4_xml_parser", fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id="form4_xml_parser", parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,

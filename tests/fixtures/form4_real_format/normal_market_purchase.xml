@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0206</schemaVersion>
+    <documentType>4</documentType>
+    <periodOfReport>2026-03-01</periodOfReport>
+    <issuer>
+        <issuerCik>0001112223</issuerCik>
+        <issuerName>Sample Biotech Holdings, Inc.</issuerName>
+        <issuerTradingSymbol>SAMPB</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0005556667</rptOwnerCik>
+            <rptOwnerName>Sample Reporting Person</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isDirector>0</isDirector>
+            <isOfficer>0</isOfficer>
+            
+            <isTenPercentOwner>0</isTenPercentOwner>
+            <isOther>0</isOther>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle><value>Common Stock</value></securityTitle>
+            <transactionDate><value>2026-02-27</value></transactionDate>
+            <transactionCoding>
+                <transactionFormType>4</transactionFormType>
+                <transactionCode>P</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares><value>1000</value></transactionShares>
+                <transactionPricePerShare><value>12.34</value></transactionPricePerShare>
+                <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction><value>50000</value></sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+            <ownershipNature>
+                <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+                
+            </ownershipNature>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+
+
+    <remarks>None</remarks>
+    <ownerSignature>
+        <signatureName>/s/ Sample Reporting Person</signatureName>
+        <signatureDate>2026-03-01</signatureDate>
+    </ownerSignature>
+</ownershipDocument>
