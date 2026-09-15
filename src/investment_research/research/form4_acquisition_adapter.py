@@ -87,6 +87,7 @@ from ..collectors.documents import Document
 from ..collectors.form4 import (
     VALID_FORM4_DOCUMENT_TYPES,
     check_ownership_xml_shape,
+    normalize_ownership_primary_document,
     parse_ownership_document,
 )
 from ..collectors.sec_edgar import TICKER_MAP_URL, normalize_cik
@@ -98,7 +99,6 @@ from .sec_acquisition_adapters import (
     SecPrimaryDocumentAdapter,
     _resolve_document_url,
     _validate_accession,
-    _validate_filename,
 )
 from .source_routing import AcquisitionStep, StepKind, StepStatus
 
@@ -388,31 +388,87 @@ class Form4Adapter:
         primary_document = candidate["primary_document"]
         if not _validate_accession(accession):
             return None, {"accession": accession, "reason": f"malformed accession number: {accession!r}"}, 0
-        if not primary_document or not _validate_filename(primary_document):
-            return None, {"accession": accession, "reason": f"unsafe or empty primaryDocument: {primary_document!r}"}, 0
+
+        # Phase 3E.2.2: SEC's own ownership-filing primaryDocument can be an
+        # XSLT display path ("xslF345X06/marketforms-73885.xml"), which the
+        # GENERAL sec_acquisition_adapters._validate_filename correctly
+        # refuses outright (it contains "/") -- that check is deliberately
+        # left unchanged for every other SEC target. This Form4-specific
+        # normalizer recognizes ONLY the two real shapes SEC uses and
+        # separates the raw XML's own basename from the XSL wrapper
+        # directory; the wrapper directory is NEVER used to build a URL --
+        # only the basename is (see below).
+        normalized, rejection = normalize_ownership_primary_document(primary_document)
+        if normalized is None:
+            assert rejection is not None
+            return None, {
+                "accession": accession,
+                "original_primary_document": primary_document,
+                "reason": f"unsafe or unrecognized ownership primaryDocument shape: {primary_document!r} ({rejection.value})",
+            }, 0
 
         accession_nodash = accession.replace("-", "")
         directory, http_reqs, _cache_hit, dir_failure = self._sec._fetch_directory(
             issuer_cik, accession, accession_nodash, context,
         )
         if dir_failure is not None:
-            return None, {"accession": accession, "reason": dir_failure}, http_reqs
-        directory_filenames = {item.get("name", "").lower() for item in (directory.get("item") or [])}
-        if primary_document.lower() not in directory_filenames:
             return None, {
-                "accession": accession,
-                "reason": f"primaryDocument {primary_document!r} not present in the accession directory listing",
+                "accession": accession, "original_primary_document": primary_document,
+                "normalized_xml_filename": normalized.normalized_xml_filename,
+                "xsl_wrapper_path": normalized.xsl_wrapper_path, "directory_index_verified": False,
+                "reason": dir_failure,
             }, http_reqs
 
-        url = _resolve_document_url(issuer_cik, accession_nodash, primary_document)
+        # The XSL display path is NEVER trusted at face value -- the raw
+        # XML's own basename must appear, verbatim, as a real item in the
+        # accession's OWN directory index.json before any URL is built
+        # from it (Phase 3E.2.2 requirement 3). A basename absent from the
+        # directory is refused, never guessed at.
+        directory_filenames = {item.get("name", "") for item in (directory.get("item") or [])}
+        directory_index_verified = normalized.normalized_xml_filename in directory_filenames
+        if not directory_index_verified:
+            return None, {
+                "accession": accession, "original_primary_document": primary_document,
+                "normalized_xml_filename": normalized.normalized_xml_filename,
+                "xsl_wrapper_path": normalized.xsl_wrapper_path, "directory_index_verified": False,
+                "reason": (
+                    f"normalized ownership XML filename {normalized.normalized_xml_filename!r} "
+                    f"(from primaryDocument {primary_document!r}) not present in the accession "
+                    "directory listing"
+                ),
+            }, http_reqs
+
+        # The RAW XML URL is built from the accession root + the verified
+        # basename -- NEVER from the XSL wrapper path (which serves an
+        # XSLT-transformed HTML rendering of the same file, not the raw
+        # XML bytes this system needs to parse).
+        url = _resolve_document_url(issuer_cik, accession_nodash, normalized.normalized_xml_filename)
         if url is None:
-            return None, {"accession": accession, "reason": "could not safely resolve a document URL"}, http_reqs
+            return None, {
+                "accession": accession, "original_primary_document": primary_document,
+                "normalized_xml_filename": normalized.normalized_xml_filename,
+                "xsl_wrapper_path": normalized.xsl_wrapper_path, "directory_index_verified": True,
+                "reason": "could not safely resolve a document URL",
+            }, http_reqs
+
+        def _failure(reason: str, *, ownership_document_verified: bool = False, issuer_cik_verified: bool = False) -> dict[str, Any]:
+            """Every failure from here on has already passed directory-index
+            verification and URL resolution -- this carries those confirmed
+            diagnostics forward (Phase 3E.2.2 requirement 4) rather than
+            dropping them at the first later failure."""
+            return {
+                "accession": accession, "original_primary_document": primary_document,
+                "normalized_xml_filename": normalized.normalized_xml_filename,
+                "xsl_wrapper_path": normalized.xsl_wrapper_path, "directory_index_verified": True,
+                "resolved_raw_xml_url": url, "ownership_document_verified": ownership_document_verified,
+                "issuer_cik_verified": issuer_cik_verified, "reason": reason,
+            }
 
         cache_key = f"http_get:{url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.BODY_FETCHED:
-                return None, {"accession": accession, "reason": cached.failure_reason or "cached fetch failed"}, http_reqs
+                return None, _failure(cached.failure_reason or "cached fetch failed"), http_reqs
             entry = dict(cached.payload)
             return entry, None, http_reqs
 
@@ -424,7 +480,7 @@ class Form4Adapter:
                 step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
                 http_requests_made=1, failure_reason=failure,
             )
-            return None, {"accession": accession, "reason": failure}, http_reqs
+            return None, _failure(failure), http_reqs
 
         text = fetch.text
         if not text.strip():
@@ -433,8 +489,13 @@ class Form4Adapter:
                 step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
                 http_requests_made=1, failure_reason=failure,
             )
-            return None, {"accession": accession, "reason": failure}, http_reqs
+            return None, _failure(failure), http_reqs
 
+        # The shape check is what actually refuses an XSL-transformed HTML
+        # rendering (or any other non-ownership-XML body) -- an
+        # ``<ownershipDocument>``-rooted well-formed-XML requirement that
+        # HTML can never satisfy (Phase 3E.2.2 requirement 3: never
+        # ACQUIRED from an HTML conversion result).
         shape_error, reason_or_type = check_ownership_xml_shape(text)
         if shape_error is not None:
             failure = f"{shape_error.value}: {reason_or_type}"
@@ -442,7 +503,7 @@ class Form4Adapter:
                 step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
                 http_requests_made=1, failure_reason=failure,
             )
-            return None, {"accession": accession, "reason": failure}, http_reqs
+            return None, _failure(failure), http_reqs
         document_type = reason_or_type
 
         if len(text.strip()) < MIN_BODY_CHARS:
@@ -451,7 +512,7 @@ class Form4Adapter:
                 step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
                 http_requests_made=1, failure_reason=failure,
             )
-            return None, {"accession": accession, "reason": failure}, http_reqs
+            return None, _failure(failure, ownership_document_verified=True), http_reqs
 
         # Cross-check: the XML's OWN issuerCik must match the REQUESTED
         # issuer -- a mismatch is never silently accepted as evidence for
@@ -467,7 +528,7 @@ class Form4Adapter:
                 step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
                 http_requests_made=1, failure_reason=failure,
             )
-            return None, {"accession": accession, "reason": failure}, http_reqs
+            return None, _failure(failure, ownership_document_verified=True), http_reqs
 
         doc_id = derive_document_id("form4", url, text)
         document = Document(
@@ -487,11 +548,20 @@ class Form4Adapter:
         )
         stored = context.document_store.put(
             document, document_id=doc_id, accession=accession,
-            filename=primary_document, document_role=DocumentRole.PRIMARY_DOCUMENT,
+            filename=normalized.normalized_xml_filename, document_role=DocumentRole.PRIMARY_DOCUMENT,
         )
         entry = {
             "accession": accession, "form": document_type, "document_id": stored.document_id,
             "ownership_xml_text": text, "primary_document": primary_document,
+            # Phase 3E.2.2 requirement 4 diagnostics -- kept on every
+            # successfully-fetched entry, not just on failures.
+            "original_primary_document": primary_document,
+            "normalized_xml_filename": normalized.normalized_xml_filename,
+            "xsl_wrapper_path": normalized.xsl_wrapper_path,
+            "directory_index_verified": True,
+            "resolved_raw_xml_url": url,
+            "ownership_document_verified": True,
+            "issuer_cik_verified": True,
         }
         result = StepExecutionResult(
             step_id=f"_cache_form4_body_{accession}", status=StepStatus.BODY_FETCHED,

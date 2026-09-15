@@ -226,6 +226,50 @@ def test_checkbox_and_date_absent_report_unknown_never_guessed():
     assert doc["parsed_ten_b5_1_checkbox"] is None  # never a guessed False
 
 
+# --- Phase 3E.2.2: ownership primaryDocument XSL-display-path fix --------
+def test_xsl_wrapped_primary_document_completes_end_to_end_via_run_live_smoke():
+    """A real SEC Live Smoke run against issuer CIK 1721484 found
+    primaryDocument values shaped 'xslF345X06/marketforms-73885.xml' --
+    the general safe-filename check correctly refuses that shape, but the
+    underlying raw XML is genuinely reachable at the accession root.
+    Proves the fix end-to-end through run_live_smoke's own report, not
+    just the adapter directly (see test_form4_ownership_primary_document.py
+    for the exhaustive normalize()/adapter-level coverage)."""
+    from investment_research.collectors.sec_edgar import FILING_INDEX_URL, cik_for_archives
+
+    accession = f"{fx.ISSUER_CIK}-26-000099"
+    accession_nodash = accession.replace("-", "")
+    basename = "sample-99001.xml"
+    wrapper = "xslF345X06"
+    submissions_payload = {
+        "cik": fx.ISSUER_CIK_INT, "name": fx.ISSUER_NAME, "tickers": [fx.ISSUER_TICKER],
+        "filings": {
+            "recent": {
+                "accessionNumber": [accession], "form": ["4"], "primaryDocument": [f"{wrapper}/{basename}"],
+                "filingDate": ["2026-03-01"], "reportDate": ["2026-03-01"],
+            },
+            "files": [],
+        },
+    }
+    directory_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document="index.json")
+    raw_xml_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document=basename)
+    http = fx.FakeHttpClient(responses={
+        fx.submissions_url(): fx.ok(json.dumps(submissions_payload)),
+        directory_url: fx.ok(json.dumps({"directory": {"item": [{"name": basename, "type": "4"}]}})),
+        raw_xml_url: fx.ok(fx.fixture_text("normal_market_purchase.xml")),
+    })
+    report = _run(http)
+    assert report.status == "COMPLETED"
+    doc = next(d for d in report.parsed_documents if d["accession"] == accession)
+    assert doc["original_primary_document"] == f"{wrapper}/{basename}"
+    assert doc["normalized_xml_filename"] == basename
+    assert doc["xsl_wrapper_path"] == wrapper
+    assert doc["directory_index_verified"] is True
+    assert doc["resolved_raw_xml_url"] == raw_xml_url
+    assert doc["ownership_document_verified"] is True
+    assert doc["issuer_cik_verified"] is True
+
+
 def test_scan_functions_never_raise_on_malformed_xml():
     assert live_smoke.scan_rule_10b5_1_elements("<not><closed>") == []
     result = live_smoke.scan_date_of_original_submission("<not><closed>")

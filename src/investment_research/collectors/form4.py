@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -163,6 +164,140 @@ def check_ownership_xml_shape(xml_text: str) -> tuple[XmlShapeError | None, str]
             f"{document_type or 'UNKNOWN'} filing as a Form 4",
         )
     return None, document_type
+
+
+#: Phase 3E.2.2: SEC serves an ownership filing's raw XML under a SECOND,
+#: XSLT-styled display path -- observed against a real issuer (CIK
+#: 1721484) as ``primaryDocument`` values shaped
+#: ``xslF345X06/marketforms-73885.xml`` -- which renders as an HTML page
+#: (the raw XML transformed client-side by an XSL stylesheet SEC serves
+#: alongside it), NOT the raw XML bytes, even though it lives at a real,
+#: SEC-served URL. The general ``sec_acquisition_adapters._validate_filename``
+#: (a bare-filename-only check used by every OTHER SEC target) correctly
+#: refuses this shape outright since it contains a ``/`` -- and is
+#: deliberately NOT relaxed to accommodate it. This function is a
+#: SEPARATE, Form4-ownership-specific normalizer: it recognizes ONLY the
+#: two real shapes SEC's own submissions metadata uses for an ownership
+#: filing's primaryDocument (a bare ``safe_basename.xml``, or
+#: ``xslF345X<2 digits>/safe_basename.xml``), and returns the raw XML's
+#: own basename separately from the XSL wrapper directory -- the basename
+#: is what ``research/form4_acquisition_adapter.py`` cross-checks against
+#: the accession's own ``index.json`` and uses to build the RAW XML URL
+#: (never the XSL-wrapped path, which would fetch an HTML rendering, not
+#: the ownership XML this system actually needs to parse).
+class OwnershipPrimaryDocumentRejection(str, Enum):
+    """Every distinguishable reason a ``primaryDocument`` value is refused
+    -- never collapsed into one generic failure, mirroring
+    ``XmlShapeError``'s own precedent (Phase 3E requirement 10)."""
+
+    EMPTY = "EMPTY"
+    CONTROL_CHARACTERS = "CONTROL_CHARACTERS"
+    PERCENT_ENCODED = "PERCENT_ENCODED"
+    BACKSLASH = "BACKSLASH"
+    QUERY_OR_FRAGMENT = "QUERY_OR_FRAGMENT"
+    SCHEME_OR_NETLOC = "SCHEME_OR_NETLOC"
+    ABSOLUTE_PATH = "ABSOLUTE_PATH"
+    PATH_TRAVERSAL = "PATH_TRAVERSAL"
+    CURRENT_DIR_SEGMENT = "CURRENT_DIR_SEGMENT"
+    TOO_MANY_PATH_SEGMENTS = "TOO_MANY_PATH_SEGMENTS"
+    UNRECOGNIZED_XSL_WRAPPER = "UNRECOGNIZED_XSL_WRAPPER"
+    EMPTY_BASENAME = "EMPTY_BASENAME"
+    NOT_XML = "NOT_XML"
+
+
+@dataclass(frozen=True)
+class NormalizedOwnershipPrimaryDocument:
+    """The three pieces kept SEPARATE, never re-merged (Phase 3E.2.2
+    requirement 1) -- ``original_primary_document`` is what SEC's own
+    submissions metadata literally said (kept for diagnostics/audit only,
+    NEVER used again to build a URL); ``xsl_wrapper_path`` is the XSL
+    display-path's directory component, ``UNKNOWN`` for the bare-filename
+    shape; ``normalized_xml_filename`` is the raw XML's own basename --
+    the ONLY piece ever used to (a) cross-check against a real accession
+    directory listing, and (b) build the raw XML URL."""
+
+    original_primary_document: str
+    xsl_wrapper_path: str
+    normalized_xml_filename: str
+
+
+#: Basename charset: letters/digits plus ``_-.``, must end in a literal
+#: ``.xml`` -- deliberately conservative (real SEC ownership filenames
+#: never need anything wider), checked only AFTER every categorical
+#: rejection above already ruled out control characters, ``%``, ``\``,
+#: ``?``/``#``, ``:``, and a leading ``.`` in the basename character class
+#: would be ambiguous with the ``.`` path-segment check, so both are kept.
+_OWNERSHIP_XML_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.xml$")
+#: SEC's own XSLT-display-path convention -- "F345" names the combined
+#: Form 3/4/5 ownership schema the stylesheet renders, "X" plus a 2-digit
+#: version suffix. Exactly this shape, never a looser "starts with xsl"
+#: guess.
+_XSL_WRAPPER_DIR_RE = re.compile(r"^xslF345X\d{2}$")
+
+
+def normalize_ownership_primary_document(
+    primary_document: str,
+) -> tuple[NormalizedOwnershipPrimaryDocument | None, OwnershipPrimaryDocumentRejection | None]:
+    """Recognizes ONLY ``safe_basename.xml`` or
+    ``xslF345X<2 digits>/safe_basename.xml`` -- anything else is refused
+    with a specific, diagnosable reason, never guessed into one of the two
+    shapes. Returns ``(normalized, None)`` on success or
+    ``(None, rejection)`` on refusal; exactly one of the pair is
+    non-``None``. Pure function -- no network, no filesystem, matching
+    this module's own "pure functions only" scope. Does NOT relax
+    ``research/sec_acquisition_adapters._validate_filename`` (the general
+    bare-filename check every other SEC target still uses unchanged) --
+    this is a separate, Form4-ownership-specific normalizer.
+    """
+    if not primary_document:
+        return None, OwnershipPrimaryDocumentRejection.EMPTY
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in primary_document):
+        return None, OwnershipPrimaryDocumentRejection.CONTROL_CHARACTERS
+    if "%" in primary_document:
+        # Catches every percent-encoded slash/backslash/traversal variant
+        # (%2e%2e, %2f, %5c, ...) in one conservative rule -- a real SEC
+        # ownership primaryDocument value never contains a percent sign.
+        return None, OwnershipPrimaryDocumentRejection.PERCENT_ENCODED
+    if "\\" in primary_document:
+        return None, OwnershipPrimaryDocumentRejection.BACKSLASH
+    if "?" in primary_document or "#" in primary_document:
+        return None, OwnershipPrimaryDocumentRejection.QUERY_OR_FRAGMENT
+    if ":" in primary_document:
+        # Covers "scheme://", a bare "scheme:", and a Windows drive letter
+        # alike -- a real ownership primaryDocument value never contains one.
+        return None, OwnershipPrimaryDocumentRejection.SCHEME_OR_NETLOC
+    if primary_document.startswith("/"):
+        return None, OwnershipPrimaryDocumentRejection.ABSOLUTE_PATH
+    if ".." in primary_document:
+        return None, OwnershipPrimaryDocumentRejection.PATH_TRAVERSAL
+
+    segments = primary_document.split("/")
+    if any(segment == "." for segment in segments):
+        return None, OwnershipPrimaryDocumentRejection.CURRENT_DIR_SEGMENT
+    if len(segments) > 2:
+        return None, OwnershipPrimaryDocumentRejection.TOO_MANY_PATH_SEGMENTS
+
+    if len(segments) == 1:
+        xsl_wrapper_path, basename = UNKNOWN, segments[0]
+    else:
+        wrapper_dir, basename = segments
+        if not _XSL_WRAPPER_DIR_RE.match(wrapper_dir):
+            return None, OwnershipPrimaryDocumentRejection.UNRECOGNIZED_XSL_WRAPPER
+        xsl_wrapper_path = wrapper_dir
+
+    if not basename:
+        return None, OwnershipPrimaryDocumentRejection.EMPTY_BASENAME
+    if not _OWNERSHIP_XML_BASENAME_RE.match(basename):
+        return None, OwnershipPrimaryDocumentRejection.NOT_XML
+
+    return (
+        NormalizedOwnershipPrimaryDocument(
+            original_primary_document=primary_document,
+            xsl_wrapper_path=xsl_wrapper_path,
+            normalized_xml_filename=basename,
+        ),
+        None,
+    )
 
 
 def _text(el: ET.Element | None, path: str, default: str = UNKNOWN) -> str:
@@ -476,9 +611,12 @@ def raw_facts_from_form4(
 
 __all__ = [
     "VALID_FORM4_DOCUMENT_TYPES",
+    "NormalizedOwnershipPrimaryDocument",
+    "OwnershipPrimaryDocumentRejection",
     "XmlShapeError",
     "check_ownership_xml_shape",
     "extract_referenced_accession",
+    "normalize_ownership_primary_document",
     "parse_ownership_document",
     "raw_facts_from_form4",
 ]

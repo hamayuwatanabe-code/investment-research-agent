@@ -520,7 +520,8 @@ def run_live_smoke(
     fetched_by_accession = {e["accession"]: e for e in fetch_result.payload.get("fetched") or []}
     for doc in parse_result.payload.get("parsed_documents") or []:
         accession = doc["accession"]
-        xml_text = fetched_by_accession.get(accession, {}).get("ownership_xml_text", "")
+        fetched_entry = fetched_by_accession.get(accession, {})
+        xml_text = fetched_entry.get("ownership_xml_text", "")
         report.parsed_documents.append({
             "accession": accession,
             "form": doc["form"],
@@ -533,6 +534,17 @@ def run_live_smoke(
             "parsed_ten_b5_1_checkbox": doc["parsed"].get("ten_b5_1_checkbox"),
             "parsed_ten_b5_1_plan_adoption_date": doc["parsed"].get("ten_b5_1_plan_adoption_date"),
             "structure_diagnostics": structure_diagnostics(xml_text) if xml_text else None,
+            # Phase 3E.2.2 requirement 4: the ownership primaryDocument
+            # normalization/verification diagnostics, per candidate --
+            # sourced from Form4Adapter._fetch_one_candidate's own entry,
+            # never recomputed here.
+            "original_primary_document": fetched_entry.get("original_primary_document", UNKNOWN),
+            "normalized_xml_filename": fetched_entry.get("normalized_xml_filename", UNKNOWN),
+            "xsl_wrapper_path": fetched_entry.get("xsl_wrapper_path", UNKNOWN),
+            "directory_index_verified": fetched_entry.get("directory_index_verified", False),
+            "resolved_raw_xml_url": fetched_entry.get("resolved_raw_xml_url", UNKNOWN),
+            "ownership_document_verified": fetched_entry.get("ownership_document_verified", False),
+            "issuer_cik_verified": fetched_entry.get("issuer_cik_verified", False),
         })
 
     report.status = "COMPLETED"
