@@ -589,8 +589,11 @@ def analyze_capture(capture_dir: Path, *, nct_id: str, as_of: str | None = None)
             # before Phase 3D.4.
             return {"capture_dir": str(capture_dir), "url": url, "found": False}
         # A manifest exists (BODY_MISSING) but there is nothing to parse or
-        # verify it against (Phase 3D.4.1 requirement 7) -- explicitly
-        # distinct from the "nothing at all" case above.
+        # verify it against (Phase 3D.4.1 requirement 7) -- an Evidence
+        # Integrity failure (Phase 3D.4.1.1: a manifest claiming a capture
+        # was made, for an artifact that cannot be found, is unsubstantiated
+        # evidence, not a harmless legacy case), and explicitly distinct
+        # from the "nothing at all" case above (MISSING).
         return {
             "capture_dir": str(capture_dir), "url": url, "found": False,
             "capture_manifest_status": manifest_result.status.value,

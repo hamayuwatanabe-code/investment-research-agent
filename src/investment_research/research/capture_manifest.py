@@ -122,7 +122,12 @@ class ManifestReadStatus(str, Enum):
     #: at all") and from a normal "nothing captured for this category"
     #: (both manifest and body absent, which callers report via their own
     #: existing "not found"/"missing category" semantics, never via this
-    #: status at all).
+    #: status at all). An Evidence Integrity failure (Phase 3D.4.1.1
+    #: correction: the manifest asserts a capture was made, but the
+    #: artifact it describes cannot be re-verified and is not on disk to
+    #: analyze at all -- unlike MISSING, this is not "an ordinary capture
+    #: from before manifests existed", it is a claimed capture that is now
+    #: unsubstantiated).
     BODY_MISSING = "BODY_MISSING"
     #: The manifest file exists but could not be READ (a filesystem-level
     #: error, e.g. a permissions problem) -- distinct from MALFORMED
@@ -130,17 +135,22 @@ class ManifestReadStatus(str, Enum):
     IO_ERROR = "IO_ERROR"
 
 
-#: Statuses that represent a genuine Evidence Integrity problem with an
-#: EXISTING manifest -- as opposed to MISSING (an unremarkable legacy
-#: capture), BODY_MISSING (nothing to check at all), or VERIFIED (Phase
-#: 3D.4.1 requirement 5). The single source of truth for "is this status a
-#: failure", so every caller (and every LIVE_VERIFIED-exclusion check)
-#: agrees, rather than each re-deriving its own list.
+#: Statuses that represent a genuine Evidence Integrity problem -- as
+#: opposed to MISSING (the one status that is an unremarkable legacy
+#: capture, never a failure) or VERIFIED (Phase 3D.4.1 requirement 5,
+#: corrected in Phase 3D.4.1.1: BODY_MISSING belongs here too -- a
+#: manifest that claims a capture was made, for an artifact that cannot
+#: actually be found or re-verified, is exactly the kind of unsubstantiated
+#: evidence claim this classification exists to catch, not something to
+#: wave through as harmless). The single source of truth for "is this
+#: status a failure", so every caller (and every LIVE_VERIFIED-exclusion
+#: check) agrees, rather than each re-deriving its own list.
 EVIDENCE_INTEGRITY_FAILURE_STATUSES: frozenset[ManifestReadStatus] = frozenset({
     ManifestReadStatus.MALFORMED,
     ManifestReadStatus.UNSUPPORTED_SCHEMA,
     ManifestReadStatus.HASH_MISMATCH,
     ManifestReadStatus.CONTENT_LENGTH_MISMATCH,
+    ManifestReadStatus.BODY_MISSING,
     ManifestReadStatus.IO_ERROR,
 })
 

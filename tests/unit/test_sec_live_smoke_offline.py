@@ -20,7 +20,9 @@ from investment_research.research import sec_live_smoke as live
 from investment_research.research.capture_manifest import (
     CAPTURE_MANIFEST_SCHEMA_VERSION,
     CaptureManifest,
+    ManifestReadStatus,
     compute_content_hash,
+    is_evidence_integrity_failure,
     write_manifest,
 )
 from investment_research.research.document_store import DocumentRole
@@ -678,9 +680,14 @@ def test_analyze_capture_manifest_io_error_is_an_integrity_failure(tmp_path, mon
     assert diag["capture_retrieved_at"] == UNKNOWN
 
 
-def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path):
-    """A manifest exists but its body file does not -- distinct from
-    MISSING (no manifest at all) (Phase 3D.4.1 requirement 7)."""
+def test_analyze_capture_manifest_body_missing_is_an_integrity_failure_distinct_from_missing(tmp_path):
+    """A manifest exists but its body file does not -- an Evidence
+    Integrity failure (Phase 3D.4.1.1 correction: the manifest claims a
+    capture was made for an artifact that cannot be found to re-verify or
+    analyze, which is unsubstantiated evidence, not a harmless legacy
+    case), and explicitly distinct from MISSING (no manifest at all,
+    which stays a non-failure legacy capture, Phase 3D.4.1 requirement 5
+    unchanged)."""
     urls = live._category_urls(CIK, ACCESSION, PRIMARY_DOCUMENT, None)
     digest = hashlib.sha256(urls["submissions"].encode()).hexdigest()[:24]
     manifest = CaptureManifest(
@@ -700,7 +707,17 @@ def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path
     assert "submissions" not in result["categories_found"]
     diag = result["capture_manifests"]["submissions"]
     assert diag["capture_manifest_status"] == "BODY_MISSING"
+    assert diag["capture_manifest_status"] != "MISSING"
+    assert is_evidence_integrity_failure(ManifestReadStatus.BODY_MISSING)
+    assert not is_evidence_integrity_failure(ManifestReadStatus.MISSING)
+    assert diag["capture_manifest_error"] is not None
+    # error_reason is a static, factual description -- never a secret.
+    assert "user_agent" not in diag["capture_manifest_error"].lower()
+    assert "@" not in diag["capture_manifest_error"]
     assert diag["capture_retrieved_at"] == UNKNOWN
+    # Never treated as VERIFIED/acquisition-complete.
+    assert diag["capture_manifest_status"] != "VERIFIED"
+    assert "live_verified_candidates" not in result
 
 
 def test_analyze_capture_manifest_never_included_in_live_verified_candidates(tmp_path):

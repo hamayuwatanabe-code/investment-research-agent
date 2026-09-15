@@ -169,13 +169,21 @@ def test_read_manifest_content_length_mismatch_via_read_manifest(tmp_path):
 
 # --- BODY_MISSING -------------------------------------------------------
 def test_read_manifest_body_missing_when_manifest_exists_but_body_is_none(tmp_path):
+    """A manifest that claims a capture was made, for an artifact that
+    cannot be found to re-verify, is an Evidence Integrity failure -- NOT
+    a harmless legacy case like MISSING (Phase 3D.4.1.1 correction)."""
     write_manifest(tmp_path, _DIGEST, _manifest(content=b"whatever was captured"))
     result = read_manifest(tmp_path, _DIGEST, body=None)
     assert result.status is ManifestReadStatus.BODY_MISSING
     assert result.manifest is not None
     assert result.error_reason is not None
-    # BODY_MISSING is distinct from MISSING (no manifest at all).
+    assert is_evidence_integrity_failure(result.status)
+    assert result.status is not ManifestReadStatus.VERIFIED
+    # BODY_MISSING is distinct from MISSING (no manifest at all) --
+    # different status, different classification (MISSING is not a
+    # failure; BODY_MISSING is).
     assert result.status is not ManifestReadStatus.MISSING
+    assert not is_evidence_integrity_failure(ManifestReadStatus.MISSING)
 
 
 # --- IO_ERROR -------------------------------------------------------------
@@ -228,7 +236,7 @@ def test_manifest_read_status_serializes_as_a_plain_string():
 
 # --- evidence integrity classification is exhaustive and non-overlapping ---
 def test_every_status_is_classified_exactly_once():
-    non_failures = {ManifestReadStatus.VERIFIED, ManifestReadStatus.MISSING, ManifestReadStatus.BODY_MISSING}
+    non_failures = {ManifestReadStatus.VERIFIED, ManifestReadStatus.MISSING}
     for status in ManifestReadStatus:
         if status in non_failures:
             assert not is_evidence_integrity_failure(status)

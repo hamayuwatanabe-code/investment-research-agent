@@ -15,7 +15,9 @@ from investment_research.research import clinicaltrials_live_smoke as live
 from investment_research.research.capture_manifest import (
     CAPTURE_MANIFEST_SCHEMA_VERSION,
     CaptureManifest,
+    ManifestReadStatus,
     compute_content_hash,
+    is_evidence_integrity_failure,
     write_manifest,
 )
 from investment_research.schemas.enums import UNKNOWN
@@ -666,10 +668,13 @@ def test_analyze_capture_manifest_io_error_is_an_integrity_failure(tmp_path, mon
     assert result["capture_retrieved_at"] == UNKNOWN
 
 
-def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path):
+def test_analyze_capture_manifest_body_missing_is_an_integrity_failure_distinct_from_missing(tmp_path):
     """A manifest exists but no body file was ever saved for this NCT ID --
-    distinct from MISSING (no manifest at all) (Phase 3D.4.1 requirement
-    7)."""
+    an Evidence Integrity failure (Phase 3D.4.1.1 correction: the manifest
+    claims a capture was made for an artifact that cannot be found to
+    re-verify or analyze, which is unsubstantiated evidence, not a
+    harmless legacy case), and explicitly distinct from MISSING (no
+    manifest at all, which stays a non-failure legacy capture)."""
     import hashlib
 
     url = fx.study_url(fx.NCT_ID)
@@ -691,7 +696,14 @@ def test_analyze_capture_manifest_body_missing_is_distinct_from_missing(tmp_path
     assert result["found"] is False
     assert result["capture_manifest_status"] == "BODY_MISSING"
     assert result["capture_manifest_status"] != "MISSING"
+    assert result["capture_manifest_status"] != "VERIFIED"
+    assert is_evidence_integrity_failure(ManifestReadStatus.BODY_MISSING)
+    assert not is_evidence_integrity_failure(ManifestReadStatus.MISSING)
+    assert result["capture_manifest_error"] is not None
+    assert "user_agent" not in result["capture_manifest_error"].lower()
+    assert "@" not in result["capture_manifest_error"]
     assert result["capture_retrieved_at"] == UNKNOWN
+    assert "live_verified_candidates" not in result
 
 
 def test_analyze_capture_manifest_status_serializes_as_a_plain_json_string(tmp_path, capsys):

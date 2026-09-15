@@ -1340,13 +1340,15 @@ def _load_captured_bodies_and_manifests(
     ``VERIFIED`` (manifest present, schema recognized, hash/length agree
     with the body), ``MISSING`` (no manifest -- an unremarkable pre-3D.4
     capture, NOT an Evidence Integrity failure, as long as the body is
-    present), ``BODY_MISSING`` (a manifest exists but the body file does
-    not -- nothing to verify it against), or one of the Evidence Integrity
-    failure statuses (``MALFORMED``/``UNSUPPORTED_SCHEMA``/
-    ``HASH_MISMATCH``/``CONTENT_LENGTH_MISMATCH``/``IO_ERROR``) -- never
-    conflated with ``MISSING`` (Phase 3D.4.1 requirement 6). Only
-    ``VERIFIED`` ever populates ``capture_retrieved_at``; every other
-    status reports ``UNKNOWN``."""
+    present), or one of the Evidence Integrity failure statuses
+    (``MALFORMED``/``UNSUPPORTED_SCHEMA``/``HASH_MISMATCH``/
+    ``CONTENT_LENGTH_MISMATCH``/``IO_ERROR``/``BODY_MISSING`` -- a manifest
+    exists claiming a capture was made, but the artifact it describes
+    cannot be found to re-verify or analyze at all, which IS an Evidence
+    Integrity failure, corrected in Phase 3D.4.1.1) -- never conflated
+    with ``MISSING`` (Phase 3D.4.1 requirement 6). Only ``VERIFIED`` ever
+    populates ``capture_retrieved_at``; every other status reports
+    ``UNKNOWN``."""
     bodies: dict[str, str] = {}
     manifests: dict[str, dict[str, Any]] = {}
     for category, url in category_urls.items():
