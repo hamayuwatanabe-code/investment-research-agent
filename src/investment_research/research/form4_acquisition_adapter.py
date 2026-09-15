@@ -1,63 +1,80 @@
-"""SEC Form 4 (Section 16 ownership) Direct Adapter (Phase 3E).
+"""SEC Form 4 (Section 16 ownership) Direct Adapter (Phase 3E, hardened in
+Phase 3E.1).
 
-Fetches ONE Form 4/4-A ownership XML document from SEC EDGAR when the
-accession/primary-document filename is already known -- never by ticker or
-company-name search, never via Web Search, never via the Anthropic API.
-Mirrors ``sec_acquisition_adapters.SecPrimaryDocumentAdapter`` closely
-(LOCATE cross-checks the caller-supplied reference against SEC's own
-submissions metadata and accession directory listing before ever
-resolving a URL; the ``sec_chain`` catalog archetype fits this adapter
-without modification), reusing its own submissions/directory fetch-and-
-cache methods directly (composition, not duplication) so a Form 4 target
-and an SEC primary-document target sharing the same filer CIK/accession
-within one ``AcquisitionExecutor.run()`` call never issue a second real
-request for the same submissions listing or directory index (Phase 3E
-requirement 2).
+Phase 3E.1 replaced Phase 3E's caller-must-already-know-the-accession
+design with genuine ISSUER-DRIVEN DISCOVERY: a caller supplies only an
+issuer CIK or ticker, and LOCATE discovers Form 4/4-A candidates itself
+from SEC's own submissions metadata -- never a pre-specified accession,
+primary-document filename, or reporting-owner CIK (Phase 3E.1
+requirement 1). This is possible because SEC's own
+``data.sec.gov/submissions/CIK##########.json`` for an ISSUER includes
+every Section 16 (Form 3/4/5) filing made against it, in the exact same
+``filings.recent`` parallel-array structure other filing types use (this
+mirrors documented EDGAR "company filing history" behavior -- the same
+concept ``browse-edgar?action=getcompany&type=4`` exposes over HTML) --
+see the module-level note below for the explicit caveat that this has
+not been checked against a real captured submissions.json in this
+offline session.
+
+Renamed from Phase 3E's ``filer_cik``/``Form4FilingReference`` to
+``issuer_cik``/``Form4IssuerReference`` throughout (Phase 3E.1
+requirement 1's last point): the ambiguous "filer" framing conflated
+"whose CIK do we query and resolve the Archives directory against" with
+an unrelated, never-actually-needed third concept. There is now exactly
+one CIK this adapter accepts from a caller -- the issuer's -- and it is
+used for both the submissions.json fetch and the Archives directory
+resolution (SEC serves one accession's documents under every CIK
+associated with it, issuer included).
+
+Fetches every LOCATEd candidate's ownership XML (bounded by
+``max_candidates``), reusing ``sec_acquisition_adapters.
+SecPrimaryDocumentAdapter``'s own submissions/directory fetch-and-cache
+methods by composition (not duplication) so a Form 4 target and an SEC
+primary-document target sharing the same issuer CIK within one
+``AcquisitionExecutor.run()`` never issue a second real request for the
+same submissions listing or directory index.
 
 Registered with an ``AcquisitionExecutor`` by the caller -- like every
 other adapter in this repository, this is NOT called from the production
-pipeline (see CLAUDE.md's Phase 3A-3D forbidden-changes lists), and every
+pipeline (see CLAUDE.md's Phase 3A-3E forbidden-changes lists), and every
 test drives it against a fake HTTP double loaded from
 ``tests/fixtures/form4_real_format/``. ``ImplementationStatus`` for the
 steps this adapter backs therefore tops out at OFFLINE_VERIFIED, never
 LIVE_VERIFIED: nothing here has ever been checked against the real SEC
-EDGAR site.
+EDGAR site, and this Phase deliberately does not add a Form 4 Live Smoke
+entry point (explicit instruction: no Live communication this phase).
 
-Safe identification of the acquisition target (Phase 3E requirement 3):
+**Unverified against a real capture (explicitly flagged, per Phase 3E.1
+requirement 7's "未解決事項" ask):** this session has no live network
+access, so the claim that an issuer's own submissions.json genuinely
+includes Form 3/4/5 entries could not be checked against an actual SEC
+response. It is a documented, well-established EDGAR behavior, not a
+guess invented for this adapter, but it remains unverified from here --
+the natural next step is a Form 4-scoped Live Smoke run (still not
+implemented this phase) confirming it against one real issuer.
 
-* Form 3, Form 4, and Form 5 share the identical ``ownershipDocument`` XML
-  schema -- distinguished ONLY by ``documentType``. This adapter cross-
-  checks BOTH the caller-supplied reference's expectation and SEC's own
-  submissions-metadata ``form`` value against
-  ``form4.VALID_FORM4_DOCUMENT_TYPES`` at LOCATE time, and re-checks the
-  fetched XML's own ``documentType`` at FETCH time -- a Form 3/5 (or
-  anything else) accession is refused at whichever point the mismatch is
-  first detectable, never silently accepted because "some SEC filing" was
-  found.
-* ``4/A`` is kept distinct from ``4`` throughout -- an amendment is never
-  read as if it were the original filing. Since ``DocumentStore`` versions
-  by URL (see ``document_store.derive_document_id``'s docstring) and a
-  4/A is filed under its OWN accession/URL, it is naturally stored as a
-  SEPARATE document, never a new "version" of the original Form 4.
-* ``Form4FilingReference.filer_cik`` (whose submissions.json + Archives
-  directory this accession actually lives under) is kept structurally
-  separate from ``issuer_cik`` and ``reporting_owner_cik`` (carried
-  through only as filing metadata) -- this adapter never assumes the
-  issuer's CIK is also the filer CIK for Section 16 purposes, and never
-  guesses one from the other.
-* The XML filename is resolved from SEC's own submissions metadata
-  (``primaryDocument``) and cross-checked against the accession's
-  directory listing -- never guessed from a ticker or company name.
+Safe identification of the acquisition target (Phase 3E/3E.1 requirement
+3): Form 3, Form 4, and Form 5 share the identical ``ownershipDocument``
+XML schema -- distinguished ONLY by ``documentType``; ``4/A`` is kept
+distinct from ``4`` throughout, and a 4/A is a genuinely SEPARATE
+``DocumentStore`` document (its own accession/URL), never a "version" of
+the original; the XML's OWN ``issuerCik`` is cross-checked against the
+REQUESTED issuer CIK at FETCH time -- a mismatch excludes that candidate
+from being stored as ACQUIRED evidence, never silently accepted (Phase
+3E.1 requirement 1's CIK-mismatch guard).
 
-Evidence Integrity (Phase 3E requirement 6): Form 4 is the REPORTING
-OWNER's own statutory filing (``DocumentAuthority.STATUTORY_FILING``,
-``Document.is_company_ir=False`` -- the issuer neither authored nor
-controls this channel). See ``collectors/form4.py``'s module docstring for
-the full transaction-semantics boundary (codes kept verbatim, acquired/
-disposed never read as buy/sell, derivative/non-derivative never merged,
-10b5-1 only on explicit footnote match). Nothing here generates an
-investment Action, promotes a domain to SUFFICIENT, or interprets a
-transaction as a judgment about the issuer.
+Evidence Integrity (Phase 3E/3E.1 requirement 4/6): Form 4 is the
+REPORTING PERSON's own statutory filing (``DocumentAuthority.
+STATUTORY_FILING``, ``Document.is_company_ir=False``). See
+``collectors/form4.py``'s module docstring for the full transaction-
+semantics boundary and the Rule 10b5-1 checkbox's own documented
+uncertainty. Nothing here generates an investment Action, promotes a
+domain to SUFFICIENT, or interprets a transaction as a judgment about the
+issuer -- and, new in Phase 3E.1, nothing here ever computes a net
+insider-buying/selling figure across an original filing and its
+amendment(s): amendment reconciliation is reported as a STATUS
+(RECONCILED/UNRESOLVED/NOT_APPLICABLE), never as a merged or summed
+transaction record (requirement 3).
 """
 
 from __future__ import annotations
@@ -72,14 +89,14 @@ from ..collectors.form4 import (
     check_ownership_xml_shape,
     parse_ownership_document,
 )
-from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, FetchOutcome, Provenance
+from ..collectors.sec_edgar import TICKER_MAP_URL, normalize_cik
+from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, Provenance
 from ..schemas.fact import utc_now_iso
 from .acquisition_executor import ExecutionContext, StepExecutionResult
 from .document_store import DocumentRole, derive_document_id
 from .sec_acquisition_adapters import (
     SecPrimaryDocumentAdapter,
     _resolve_document_url,
-    _submissions_primary_document,
     _validate_accession,
     _validate_filename,
 )
@@ -97,33 +114,49 @@ FORM4_ADAPTER_ID = "form4_xml_parser"
 #: reasoning, not SEC HTML's much higher one).
 MIN_BODY_CHARS = 60
 
+#: Hard bound on how many Form 4/4-A candidates one LOCATE will ever
+#: return, and how many ``filings.files`` continuation pages it will ever
+#: fetch -- excess candidates/pages are reported as excluded, never
+#: silently fetched without limit (Phase 3E.1 requirement 5's "budget/
+#: limit exclusion").
+DEFAULT_MAX_CANDIDATES = 5
+MAX_SUBMISSIONS_PAGES = 3
+
 
 @dataclass(frozen=True)
-class Form4FilingReference:
-    """The concrete filing identity a caller supplies for one Form 4
-    target -- see the module docstring for why ``filer_cik`` is kept
-    separate from ``issuer_cik``/``reporting_owner_cik``. Every field
-    beyond ``filer_cik``/``accession``/``primary_document`` is CALLER-
-    SUPPLIED METADATA, cross-checked where SEC's own submissions payload
-    can confirm it (form type, primary document filename) and passed
-    through as-is otherwise -- never re-derived or guessed by this
-    adapter.
-    """
+class Form4IssuerReference:
+    """The concrete issuer identity a caller supplies -- and NOTHING
+    else: no accession, no primary-document filename, no reporting-owner
+    CIK (Phase 3E.1 requirement 1). Exactly one of ``issuer_cik``/
+    ``issuer_ticker`` must resolve to a usable CIK; ``issuer_cik`` wins if
+    both are given. ``issuer_ticker`` is resolved via SEC's own ticker
+    map (one cached HTTP GET, shared across every target in a run that
+    needs it)."""
 
-    #: The CIK whose submissions.json + Archives accession directory this
-    #: filing actually lives under (commonly the reporting owner's own
-    #: CIK, but this adapter makes no assumption -- the caller supplies
-    #: whichever CIK is actually correct for this accession).
-    filer_cik: int
+    issuer_cik: int | str | None = None
+    issuer_ticker: str | None = None
+    max_candidates: int = DEFAULT_MAX_CANDIDATES
+
+
+@dataclass(frozen=True)
+class Form4Candidate:
     accession: str
+    form: str
+    filing_date: str
     primary_document: str
-    issuer_cik: str = UNKNOWN
-    issuer_name: str = UNKNOWN
-    issuer_ticker: str = UNKNOWN
-    reporting_owner_cik: str = UNKNOWN
-    reporting_owner_name: str = UNKNOWN
-    filing_date: str = UNKNOWN
-    period_of_report: str = UNKNOWN
+
+
+@dataclass(frozen=True)
+class Form4Reconciliation:
+    """Whether a Form 4/A amendment's relationship to an original Form 4
+    could be confirmed -- never inferred from mere coincidence (matching
+    period/owner), only from an explicit accession reference in the
+    amendment's own remarks that genuinely matches another candidate
+    discovered for the SAME issuer (Phase 3E.1 requirement 3)."""
+
+    status: str  # "RECONCILED" | "UNRESOLVED" | "NOT_APPLICABLE"
+    original_accession: str
+    reason: str
 
 
 def _upstream_payload(step: AcquisitionStep, context: ExecutionContext) -> dict[str, Any]:
@@ -134,39 +167,46 @@ def _upstream_payload(step: AcquisitionStep, context: ExecutionContext) -> dict[
     return {}
 
 
-def _submissions_form(payload: Any, accession: str) -> str | None:
-    """The ``form`` value SEC's own submissions payload records for
-    ``accession`` -- the authoritative value, mirroring
-    ``sec_acquisition_adapters._submissions_primary_document``'s pattern
-    exactly. ``None`` if the accession is not present at all."""
-    recent = ((payload or {}).get("filings") or {}).get("recent") or {}
+def _candidates_from_recent(recent: dict[str, Any]) -> list[Form4Candidate]:
     accessions = recent.get("accessionNumber") or []
-    if accession not in accessions:
-        return None
-    index = accessions.index(accession)
     forms = recent.get("form") or []
-    return forms[index] if index < len(forms) else None
+    documents = recent.get("primaryDocument") or []
+    filing_dates = recent.get("filingDate") or []
+    candidates: list[Form4Candidate] = []
+    for index, form in enumerate(forms):
+        if form not in VALID_FORM4_DOCUMENT_TYPES:
+            continue  # Never Form 3/5 (Phase 3E.1 requirement 1/3).
+        accession = accessions[index] if index < len(accessions) else UNKNOWN
+        document = documents[index] if index < len(documents) else ""
+        filing_date = filing_dates[index] if index < len(filing_dates) else UNKNOWN
+        if accession == UNKNOWN or not document:
+            continue
+        candidates.append(
+            Form4Candidate(accession=accession, form=form, filing_date=filing_date, primary_document=document)
+        )
+    return candidates
 
 
 class Form4Adapter:
-    """LOCATE (submissions metadata + directory listing cross-check,
-    reusing ``SecPrimaryDocumentAdapter``'s own cached fetch methods) ->
-    FETCH (HTTP GET, validate the body is well-formed Form 4/4-A
-    ownership XML, store a PRIMARY_DOCUMENT Document) -> PARSE (extract
-    ownership fields via ``collectors.form4.parse_ownership_document`` and
-    confirm the minimum required fields are present). Registered under
+    """LOCATE (resolve the issuer CIK, discover Form 4/4-A candidates from
+    SEC's own submissions metadata across ``filings.recent`` and, up to a
+    hard cap, ``filings.files`` continuation pages) -> FETCH (fetch every
+    candidate's ownership XML, up to ``max_candidates``, cross-checking
+    each one's own ``issuerCik`` against the requested issuer) -> PARSE
+    (extract ownership fields for every successfully fetched candidate,
+    reconcile 4/A amendments against their referenced original where
+    possible, and surface the Phase 3E.1 diagnostics). Registered under
     adapter_id ``form4_xml_parser``.
     """
 
     def __init__(self, http: Any) -> None:
         self.http = http
         #: Composition, not duplication: this adapter's LOCATE step needs
-        #: EXACTLY the same submissions/directory fetch-and-cache behavior
-        #: ``SecPrimaryDocumentAdapter`` already implements (including its
-        #: exact ``request_cache`` key conventions), so the two adapters
-        #: share one real HTTP call for the same CIK/accession within one
-        #: run (Phase 3E requirement 2) -- reusing the code, not merely
-        #: matching its shape by hand.
+        #: EXACTLY the same submissions/directory fetch-and-cache
+        #: behavior ``SecPrimaryDocumentAdapter`` already implements
+        #: (including its exact ``request_cache`` key conventions), so
+        #: the two adapters share one real HTTP call for the same issuer
+        #: CIK/accession within one run (Phase 3E requirement 2).
         self._sec = SecPrimaryDocumentAdapter(http)
 
     def execute(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
@@ -181,248 +221,432 @@ class Form4Adapter:
             failure_reason=f"Form4Adapter cannot handle step_kind={step.step_kind}",
         )
 
+    # -- LOCATE: issuer-driven discovery --------------------------------
+    def _resolve_ticker(self, ticker: str, context: ExecutionContext) -> tuple[int | None, int, bool, str | None]:
+        cache_key = "sec_ticker_map"
+        cached = context.request_cache.get(cache_key)
+        if cached is not None:
+            if cached.status is not StepStatus.URL_RESOLVED:
+                return None, 0, True, cached.failure_reason or "cached ticker map fetch failed"
+            payload = cached.payload.get("ticker_map", {})
+        else:
+            fetch = self.http.get(TICKER_MAP_URL)
+            if not fetch.ok:
+                failure = f"ticker map fetch failed: {fetch.outcome} {fetch.error}"
+                context.request_cache[cache_key] = StepExecutionResult(
+                    step_id="_cache_sec_ticker_map", status=StepStatus.FAILED,
+                    http_requests_made=1, failure_reason=failure,
+                )
+                return None, 1, False, failure
+            payload = fetch.json() or {}
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id="_cache_sec_ticker_map", status=StepStatus.URL_RESOLVED,
+                payload={"ticker_map": payload}, http_requests_made=1,
+            )
+
+        wanted = ticker.strip().upper()
+        for entry in (payload or {}).values():
+            if isinstance(entry, dict) and str(entry.get("ticker", "")).upper() == wanted:
+                cik_str_value = entry.get("cik_str")
+                cik = normalize_cik(cik_str_value) if cik_str_value is not None else None
+                if cik is not None:
+                    return cik, (0 if cached is not None else 1), cached is not None, None
+        return None, (0 if cached is not None else 1), cached is not None, f"ticker {ticker!r} not found in SEC's ticker map"
+
+    def _fetch_continuation_page(self, name: str, context: ExecutionContext) -> tuple[dict[str, Any], int, bool, str | None]:
+        from ..collectors.sec_edgar import SUBMISSIONS_PAGE_URL
+
+        url = SUBMISSIONS_PAGE_URL.format(name=name)
+        cache_key = f"http_get:{url}"
+        cached = context.request_cache.get(cache_key)
+        if cached is not None:
+            if cached.status is not StepStatus.URL_RESOLVED:
+                return {}, 0, True, cached.failure_reason or "cached continuation page fetch failed"
+            return cached.payload.get("page", {}), 0, True, None
+        fetch = self.http.get(url)
+        if not fetch.ok:
+            failure = f"continuation page fetch failed for {name}: {fetch.outcome} {fetch.error}"
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_page_{name}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
+            )
+            return {}, 1, False, failure
+        page = fetch.json() or {}
+        context.request_cache[cache_key] = StepExecutionResult(
+            step_id=f"_cache_form4_page_{name}", status=StepStatus.URL_RESOLVED,
+            payload={"page": page}, http_requests_made=1,
+        )
+        return page, 1, False, None
+
     def _locate(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
         ref = context.form4_reference_for(step.target_id)
         if ref is None:
             return StepExecutionResult(
                 step_id=step.step_id, status=StepStatus.FAILED,
-                failure_reason="no Form4FilingReference supplied for this target",
-            )
-        if not _validate_accession(ref.accession):
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                failure_reason=f"malformed accession number: {ref.accession!r}",
-            )
-        if not ref.primary_document or not _validate_filename(ref.primary_document):
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                failure_reason=f"unsafe or empty primaryDocument filename: {ref.primary_document!r}",
+                failure_reason="no Form4IssuerReference supplied for this target",
             )
 
-        submissions_payload, api_requests_made, cache_hit_submissions, failure = (
-            self._sec._fetch_submissions(ref.filer_cik, context)
-        )
+        api_requests_made = 0
+        http_requests_made = 0
+        cache_hit = True
+        issuer_cik: int | None = None
+
+        if ref.issuer_cik is not None:
+            issuer_cik = normalize_cik(ref.issuer_cik)
+            if issuer_cik is None:
+                return StepExecutionResult(
+                    step_id=step.step_id, status=StepStatus.FAILED,
+                    failure_reason=f"malformed issuer_cik: {ref.issuer_cik!r}",
+                )
+        elif ref.issuer_ticker:
+            issuer_cik, ticker_reqs, ticker_cache_hit, ticker_failure = self._resolve_ticker(ref.issuer_ticker, context)
+            http_requests_made += ticker_reqs
+            cache_hit = cache_hit and ticker_cache_hit
+            if issuer_cik is None:
+                return StepExecutionResult(
+                    step_id=step.step_id, status=StepStatus.NOT_FOUND,
+                    http_requests_made=http_requests_made, cache_hit=cache_hit,
+                    failure_reason=ticker_failure or f"could not resolve ticker {ref.issuer_ticker!r} to a CIK",
+                )
+        else:
+            return StepExecutionResult(
+                step_id=step.step_id, status=StepStatus.FAILED,
+                failure_reason="Form4IssuerReference supplies neither issuer_cik nor issuer_ticker",
+            )
+
+        submissions_payload, sub_api_reqs, sub_cache_hit, failure = self._sec._fetch_submissions(issuer_cik, context)
+        api_requests_made += sub_api_reqs
+        cache_hit = cache_hit and sub_cache_hit
         if failure is not None:
             return StepExecutionResult(
                 step_id=step.step_id, status=StepStatus.FAILED,
-                api_requests_made=api_requests_made, cache_hit=cache_hit_submissions,
+                api_requests_made=api_requests_made, http_requests_made=http_requests_made, cache_hit=cache_hit,
                 failure_reason=failure,
             )
 
-        authoritative_form = _submissions_form(submissions_payload, ref.accession)
-        if authoritative_form is None:
+        recent = ((submissions_payload or {}).get("filings") or {}).get("recent") or {}
+        candidates = _candidates_from_recent(recent)
+
+        files_index = (((submissions_payload or {}).get("filings") or {}).get("files")) or []
+        pages_fetched = 0
+        for page_ref in files_index[:MAX_SUBMISSIONS_PAGES]:
+            name = page_ref.get("name") if isinstance(page_ref, dict) else None
+            if not name:
+                continue
+            page, page_reqs, page_cache_hit, page_failure = self._fetch_continuation_page(name, context)
+            http_requests_made += page_reqs
+            cache_hit = cache_hit and page_cache_hit
+            pages_fetched += 1
+            if page_failure is not None:
+                continue  # a bad continuation page never fails the whole LOCATE -- reported implicitly by fewer candidates
+            candidates.extend(_candidates_from_recent(page))
+        pages_excluded = max(0, len(files_index) - MAX_SUBMISSIONS_PAGES)
+
+        if not candidates:
             return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.NOT_FOUND,
-                api_requests_made=api_requests_made, cache_hit=cache_hit_submissions,
-                failure_reason=f"accession {ref.accession} not found in CIK {ref.filer_cik}'s submissions listing",
-            )
-        if authoritative_form not in VALID_FORM4_DOCUMENT_TYPES:
-            # Requirement 3: never treat a Form 3/5 (or anything else) as
-            # a Form 4 merely because SOME filing was found at this
-            # accession.
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                api_requests_made=api_requests_made, cache_hit=cache_hit_submissions,
-                failure_reason=(
-                    f"accession {ref.accession} is form {authoritative_form!r} per SEC's own "
-                    "submissions metadata, not Form 4/4-A -- refusing to treat it as one"
-                ),
+                step_id=step.step_id, status=StepStatus.ZERO_RESULTS,
+                api_requests_made=api_requests_made, http_requests_made=http_requests_made, cache_hit=cache_hit,
+                failure_reason=f"no Form 4/4-A filings found for issuer CIK {issuer_cik} (checked filings.recent"
+                f"{f' + {pages_fetched} continuation page(s)' if pages_fetched else ''})",
+                payload={"issuer_cik": issuer_cik},
             )
 
-        authoritative_document = _submissions_primary_document(submissions_payload, ref.accession)
-        if authoritative_document is None:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.NOT_FOUND,
-                api_requests_made=api_requests_made, cache_hit=cache_hit_submissions,
-                failure_reason=f"accession {ref.accession} not found in CIK {ref.filer_cik}'s submissions listing",
-            )
-        if authoritative_document.lower() != ref.primary_document.lower():
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                api_requests_made=api_requests_made, cache_hit=cache_hit_submissions,
-                failure_reason=(
-                    f"primaryDocument mismatch: expected {ref.primary_document!r}, "
-                    f"submissions metadata records {authoritative_document!r}"
-                ),
-            )
+        # Newest first -- an unparseable/UNKNOWN filing date sorts last,
+        # never guessed into a position it wasn't actually filed at.
+        candidates.sort(key=lambda c: (c.filing_date == UNKNOWN, c.filing_date), reverse=False)
+        candidates.sort(key=lambda c: c.filing_date, reverse=True)
+        max_candidates = max(1, ref.max_candidates)
+        selected = candidates[:max_candidates]
+        excluded_candidates_count = max(0, len(candidates) - max_candidates)
 
-        accession_nodash = ref.accession.replace("-", "")
-        directory, http_requests_made, cache_hit_directory, dir_failure = self._sec._fetch_directory(
-            ref.filer_cik, ref.accession, accession_nodash, context
-        )
-        if dir_failure is not None:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                api_requests_made=api_requests_made, http_requests_made=http_requests_made,
-                cache_hit=cache_hit_submissions or cache_hit_directory,
-                failure_reason=dir_failure,
-            )
-        directory_filenames = {item.get("name", "").lower() for item in (directory.get("item") or [])}
-        if ref.primary_document.lower() not in directory_filenames:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.NOT_FOUND,
-                api_requests_made=api_requests_made, http_requests_made=http_requests_made,
-                cache_hit=cache_hit_submissions or cache_hit_directory,
-                failure_reason=(
-                    f"primaryDocument {ref.primary_document!r} is not present in the accession "
-                    "directory listing -- submissions metadata and the directory disagree"
-                ),
-            )
-
-        url = _resolve_document_url(ref.filer_cik, accession_nodash, ref.primary_document)
-        if url is None:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                api_requests_made=api_requests_made, http_requests_made=http_requests_made,
-                failure_reason="could not safely resolve a document URL",
-            )
         return StepExecutionResult(
             step_id=step.step_id, status=StepStatus.URL_RESOLVED,
-            api_requests_made=api_requests_made, http_requests_made=http_requests_made,
-            cache_hit=cache_hit_submissions and cache_hit_directory,
+            api_requests_made=api_requests_made, http_requests_made=http_requests_made, cache_hit=cache_hit,
             payload={
-                "url": url, "accession": ref.accession, "primary_document": ref.primary_document,
-                "filer_cik": ref.filer_cik, "form": authoritative_form,
-                "issuer_cik": ref.issuer_cik, "issuer_name": ref.issuer_name, "issuer_ticker": ref.issuer_ticker,
-                "reporting_owner_cik": ref.reporting_owner_cik, "reporting_owner_name": ref.reporting_owner_name,
-                "filing_date": ref.filing_date, "period_of_report": ref.period_of_report,
+                "issuer_cik": issuer_cik,
+                "issuer_ticker": ref.issuer_ticker or UNKNOWN,
+                "candidates": [
+                    {
+                        "accession": c.accession, "form": c.form,
+                        "filing_date": c.filing_date, "primary_document": c.primary_document,
+                    }
+                    for c in selected
+                ],
+                "excluded_candidates_count": excluded_candidates_count,
+                "submissions_pages_fetched": pages_fetched,
+                "submissions_pages_excluded": pages_excluded,
             },
         )
 
-    def _fetch(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
-        upstream = _upstream_payload(step, context)
-        url = upstream.get("url")
-        if not url:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED,
-                failure_reason="no resolved URL from the LOCATE step",
-            )
+    # -- FETCH: every discovered candidate, cross-checked ----------------
+    def _fetch_one_candidate(
+        self, candidate: dict[str, Any], issuer_cik: int, context: ExecutionContext,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
+        """Returns ``(fetched_entry, failure_entry, http_requests_made)`` --
+        exactly one of the first two is non-``None``."""
+        accession = candidate["accession"]
+        primary_document = candidate["primary_document"]
+        if not _validate_accession(accession):
+            return None, {"accession": accession, "reason": f"malformed accession number: {accession!r}"}, 0
+        if not primary_document or not _validate_filename(primary_document):
+            return None, {"accession": accession, "reason": f"unsafe or empty primaryDocument: {primary_document!r}"}, 0
+
+        accession_nodash = accession.replace("-", "")
+        directory, http_reqs, _cache_hit, dir_failure = self._sec._fetch_directory(
+            issuer_cik, accession, accession_nodash, context,
+        )
+        if dir_failure is not None:
+            return None, {"accession": accession, "reason": dir_failure}, http_reqs
+        directory_filenames = {item.get("name", "").lower() for item in (directory.get("item") or [])}
+        if primary_document.lower() not in directory_filenames:
+            return None, {
+                "accession": accession,
+                "reason": f"primaryDocument {primary_document!r} not present in the accession directory listing",
+            }, http_reqs
+
+        url = _resolve_document_url(issuer_cik, accession_nodash, primary_document)
+        if url is None:
+            return None, {"accession": accession, "reason": "could not safely resolve a document URL"}, http_reqs
 
         cache_key = f"http_get:{url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
-            return StepExecutionResult(
-                step_id=step.step_id, status=cached.status, document_id=cached.document_id,
-                payload=cached.payload, cache_hit=True, failure_reason=cached.failure_reason,
-            )
+            if cached.status is not StepStatus.BODY_FETCHED:
+                return None, {"accession": accession, "reason": cached.failure_reason or "cached fetch failed"}, http_reqs
+            entry = dict(cached.payload)
+            return entry, None, http_reqs
 
         fetch = self.http.get(url)
+        http_reqs += 1
         if not fetch.ok:
-            status = StepStatus.NOT_FOUND if fetch.outcome is FetchOutcome.NOT_FOUND else StepStatus.FAILED
-            result = StepExecutionResult(
-                step_id=step.step_id, status=status, http_requests_made=1,
-                failure_reason=f"GET {url} failed: {fetch.outcome} {fetch.error}",
+            failure = f"GET {url} failed: {fetch.outcome} {fetch.error}"
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
             )
-            context.request_cache[cache_key] = result
-            return result
+            return None, {"accession": accession, "reason": failure}, http_reqs
 
         text = fetch.text
         if not text.strip():
-            result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
-                failure_reason="response body was empty",
+            failure = "response body was empty"
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
             )
-            context.request_cache[cache_key] = result
-            return result
+            return None, {"accession": accession, "reason": failure}, http_reqs
 
         shape_error, reason_or_type = check_ownership_xml_shape(text)
         if shape_error is not None:
-            # Requirement 10: malformed XML, a missing <ownershipDocument>
-            # root, and a Form 3/5 wrong-document-type are each their own
-            # distinguishable failure -- never collapsed into one message.
-            result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
-                failure_reason=f"{shape_error.value}: {reason_or_type}",
+            failure = f"{shape_error.value}: {reason_or_type}"
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
             )
-            context.request_cache[cache_key] = result
-            return result
+            return None, {"accession": accession, "reason": failure}, http_reqs
         document_type = reason_or_type
 
         if len(text.strip()) < MIN_BODY_CHARS:
-            result = StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=1,
-                failure_reason="response body too short to be a real ownership document",
+            failure = "response body too short to be a real ownership document"
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
             )
-            context.request_cache[cache_key] = result
-            return result
+            return None, {"accession": accession, "reason": failure}, http_reqs
 
-        # Content-dependent, not URL-only -- see document_store.
-        # derive_document_id()'s docstring (Phase 3D.1) for why a URL-only
-        # id risks a self-referencing version-chain cycle if this exact
-        # URL is ever re-fetched with changed content. A 4/A amendment is
-        # filed under its OWN accession/URL, so it naturally derives its
-        # own id and is stored as a separate document, never a "version"
-        # of the original Form 4 (Phase 3E requirement 8).
+        # Cross-check: the XML's OWN issuerCik must match the REQUESTED
+        # issuer -- a mismatch is never silently accepted as evidence for
+        # this issuer (Phase 3E.1 requirement 1).
+        parsed_for_check = parse_ownership_document(text)
+        xml_issuer_cik = normalize_cik(parsed_for_check["issuer_cik"]) if parsed_for_check else None
+        if xml_issuer_cik != issuer_cik:
+            failure = (
+                f"issuer CIK mismatch: requested {issuer_cik}, ownership XML declares "
+                f"issuerCik={parsed_for_check['issuer_cik'] if parsed_for_check else UNKNOWN!r}"
+            )
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_form4_body_{accession}", status=StepStatus.FAILED,
+                http_requests_made=1, failure_reason=failure,
+            )
+            return None, {"accession": accession, "reason": failure}, http_reqs
+
         doc_id = derive_document_id("form4", url, text)
         document = Document(
             doc_id=doc_id,
             url=url,
-            title=f"Form {document_type} ownership filing ({upstream.get('accession', UNKNOWN)})",
+            title=f"Form {document_type} ownership filing ({accession})",
             publisher="SEC EDGAR",
-            filing_date=upstream.get("filing_date", UNKNOWN),
-            event_date=upstream.get("period_of_report", UNKNOWN) or UNKNOWN,
-            accession=str(upstream.get("accession", UNKNOWN)),
+            filing_date=candidate.get("filing_date", UNKNOWN),
+            accession=accession,
             doc_type="form4_ownership_xml",
-            # A Form 4 is filed BY the reporting owner, THROUGH SEC EDGAR
-            # -- the issuer does not control this channel and did not
-            # author it (Phase 3E requirement 6 / module docstring).
             is_company_ir=False,
             text=text,
-            # A complete ownership XML record was retrieved whole -- never
-            # merely because HTTP returned 200 (the shape/length checks
-            # above already ran).
             content_kind=ContentKind.FULL_DOCUMENT,
             provenance=Provenance.LIVE,
-            # Retrieval time is retrieval time only -- never assigned into
-            # filing_date/period_of_report/transaction dates.
             retrieved_at=utc_now_iso(),
             authority=DocumentAuthority.STATUTORY_FILING,
         )
         stored = context.document_store.put(
-            document,
-            document_id=doc_id,
-            accession=document.accession,
-            filename=str(upstream.get("primary_document", "")),
-            document_role=DocumentRole.PRIMARY_DOCUMENT,
+            document, document_id=doc_id, accession=accession,
+            filename=primary_document, document_role=DocumentRole.PRIMARY_DOCUMENT,
         )
-        payload = {**upstream, "document_id": stored.document_id, "document_type": document_type, "ownership_xml_text": text}
+        entry = {
+            "accession": accession, "form": document_type, "document_id": stored.document_id,
+            "ownership_xml_text": text, "primary_document": primary_document,
+        }
         result = StepExecutionResult(
-            step_id=step.step_id, status=StepStatus.BODY_FETCHED, document_id=stored.document_id,
-            http_requests_made=1, payload=payload,
+            step_id=f"_cache_form4_body_{accession}", status=StepStatus.BODY_FETCHED,
+            document_id=stored.document_id, http_requests_made=1, payload=entry,
         )
         context.request_cache[cache_key] = result
-        return result
+        return entry, None, http_reqs
+
+    def _fetch(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
+        upstream = _upstream_payload(step, context)
+        candidates = upstream.get("candidates") or []
+        issuer_cik = upstream.get("issuer_cik")
+        if not candidates or issuer_cik is None:
+            return StepExecutionResult(
+                step_id=step.step_id, status=StepStatus.FAILED,
+                failure_reason="no discovered candidates from the LOCATE step",
+            )
+
+        fetched: list[dict[str, Any]] = []
+        fetch_failures: list[dict[str, Any]] = []
+        total_http_requests = 0
+        for candidate in candidates:
+            entry, failure_entry, http_reqs = self._fetch_one_candidate(candidate, issuer_cik, context)
+            total_http_requests += http_reqs
+            if entry is not None:
+                fetched.append(entry)
+            else:
+                assert failure_entry is not None
+                fetch_failures.append(failure_entry)
+
+        if not fetched:
+            return StepExecutionResult(
+                step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=total_http_requests,
+                failure_reason=f"no candidate could be fetched/verified: {fetch_failures}",
+                payload={**upstream, "fetch_failures": fetch_failures},
+            )
+
+        # A single document_id "headline" pointer (the most recently
+        # filed successfully-fetched candidate) for callers/diagnostics
+        # that expect one -- the FULL set is always in "fetched" below.
+        headline_document_id = fetched[0]["document_id"]
+        return StepExecutionResult(
+            step_id=step.step_id, status=StepStatus.BODY_FETCHED, document_id=headline_document_id,
+            http_requests_made=total_http_requests,
+            payload={**upstream, "fetched": fetched, "fetch_failures": fetch_failures},
+        )
+
+    # -- PARSE: field extraction + amendment reconciliation + diagnostics
+    def _reconcile(self, parsed_documents: list[dict[str, Any]]) -> dict[str, Form4Reconciliation]:
+        by_accession = {d["accession"] for d in parsed_documents}
+        reconciliation: dict[str, Form4Reconciliation] = {}
+        for doc in parsed_documents:
+            if doc["form"] != "4/A":
+                reconciliation[doc["accession"]] = Form4Reconciliation(
+                    status="NOT_APPLICABLE", original_accession=UNKNOWN,
+                    reason="not an amendment",
+                )
+                continue
+            referenced = doc["parsed"].get("remarks_referenced_accession", UNKNOWN)
+            if referenced != UNKNOWN and referenced in by_accession and referenced != doc["accession"]:
+                reconciliation[doc["accession"]] = Form4Reconciliation(
+                    status="RECONCILED", original_accession=referenced,
+                    reason="remarks explicitly reference a co-discovered accession",
+                )
+            else:
+                # Never inferred from matching period/owner alone (Phase
+                # 3E.1 requirement 3) -- no explicit, verifiable reference
+                # means UNRESOLVED, full stop.
+                reconciliation[doc["accession"]] = Form4Reconciliation(
+                    status="UNRESOLVED", original_accession=UNKNOWN,
+                    reason="no explicit, co-discovered original accession reference in remarks",
+                )
+        return reconciliation
 
     def _parse(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
         upstream = _upstream_payload(step, context)
-        document_id = upstream.get("document_id")
-        text = upstream.get("ownership_xml_text")
-        if not document_id or not text:
+        fetched = upstream.get("fetched") or []
+        if not fetched:
             return StepExecutionResult(
                 step_id=step.step_id, status=StepStatus.FAILED,
-                failure_reason="no fetched ownership XML body available to parse",
+                failure_reason="no fetched ownership XML bodies available to parse",
             )
-        parsed = parse_ownership_document(text)
-        if parsed is None:
-            # FETCH already gated shape; PARSE never trusts that blindly
-            # and re-validates independently.
+
+        parsed_documents: list[dict[str, Any]] = []
+        parse_failures: list[dict[str, Any]] = []
+        for entry in fetched:
+            text = entry.get("ownership_xml_text")
+            parsed = parse_ownership_document(text) if text else None
+            if parsed is None:
+                parse_failures.append({"accession": entry["accession"], "reason": "did not match the expected Form 4/4-A schema on re-parse"})
+                continue
+            if not parsed.get("issuer_cik") or parsed["issuer_cik"] == UNKNOWN:
+                parse_failures.append({"accession": entry["accession"], "reason": "issuer CIK is UNKNOWN in the ownership document"})
+                continue
+            if not parsed.get("reporting_owners"):
+                parse_failures.append({"accession": entry["accession"], "reason": "no reportingOwner recorded"})
+                continue
+            parsed_documents.append({
+                "accession": entry["accession"], "form": entry["form"],
+                "document_id": entry["document_id"], "parsed": parsed,
+            })
+
+        if not parsed_documents:
             return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, document_id=document_id,
-                failure_reason="ownership XML did not match the expected Form 4/4-A schema on re-parse",
+                step_id=step.step_id, status=StepStatus.FAILED,
+                failure_reason=f"no fetched candidate parsed successfully: {parse_failures}",
+                payload={**upstream, "parse_failures": parse_failures},
             )
-        if not parsed.get("issuer_cik") or parsed["issuer_cik"] == UNKNOWN:
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, document_id=document_id,
-                payload={**upstream, "parsed": parsed},
-                failure_reason="issuer CIK is UNKNOWN in the ownership document -- required fields not present",
-            )
-        if not parsed.get("reporting_owners"):
-            return StepExecutionResult(
-                step_id=step.step_id, status=StepStatus.FAILED, document_id=document_id,
-                payload={**upstream, "parsed": parsed},
-                failure_reason="no reportingOwner recorded in the ownership document -- required fields not present",
-            )
+
+        reconciliation = self._reconcile(parsed_documents)
+        for doc in parsed_documents:
+            doc["reconciliation"] = reconciliation[doc["accession"]]
+
+        diagnostics = self._compute_diagnostics(parsed_documents)
+        headline_document_id = parsed_documents[0]["document_id"]
         return StepExecutionResult(
-            step_id=step.step_id, status=StepStatus.PARSED,
-            document_id=document_id, payload={**upstream, "parsed": parsed},
+            step_id=step.step_id, status=StepStatus.PARSED, document_id=headline_document_id,
+            payload={
+                **upstream,
+                "parsed_documents": parsed_documents,
+                "parse_failures": parse_failures,
+                "diagnostics": diagnostics,
+            },
         )
+
+    @staticmethod
+    def _compute_diagnostics(parsed_documents: list[dict[str, Any]]) -> dict[str, int]:
+        diagnostics = {
+            "parsed_non_derivative_transactions": 0,
+            "parsed_derivative_transactions": 0,
+            "parsed_reporting_owners": 0,
+            "form4_amendments_found": 0,
+            "amendments_reconciled": 0,
+            "amendments_unresolved": 0,
+            "ten_b5_1_checkbox_true": 0,
+            "ten_b5_1_checkbox_false": 0,
+            "ten_b5_1_checkbox_unknown": 0,
+        }
+        for doc in parsed_documents:
+            parsed = doc["parsed"]
+            diagnostics["parsed_non_derivative_transactions"] += len(parsed["non_derivative_transactions"])
+            diagnostics["parsed_derivative_transactions"] += len(parsed["derivative_transactions"])
+            diagnostics["parsed_reporting_owners"] += len(parsed["reporting_owners"])
+            checkbox = parsed.get("ten_b5_1_checkbox")
+            if checkbox is True:
+                diagnostics["ten_b5_1_checkbox_true"] += 1
+            elif checkbox is False:
+                diagnostics["ten_b5_1_checkbox_false"] += 1
+            else:
+                diagnostics["ten_b5_1_checkbox_unknown"] += 1
+            if doc["form"] == "4/A":
+                diagnostics["form4_amendments_found"] += 1
+                status = doc["reconciliation"].status
+                if status == "RECONCILED":
+                    diagnostics["amendments_reconciled"] += 1
+                elif status == "UNRESOLVED":
+                    diagnostics["amendments_unresolved"] += 1
+        return diagnostics

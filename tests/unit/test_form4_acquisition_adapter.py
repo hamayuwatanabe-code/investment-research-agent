@@ -1,8 +1,7 @@
-"""Phase 3E: Form4Adapter against real-Form4-format fixtures
-(``tests/fixtures/form4_real_format/``, see that directory's MANIFEST.md).
-No real network call anywhere in this file; every URL and request count
-is asserted exactly, mirroring test_sec_acquisition_adapters.py's own
-established pattern.
+"""Phase 3E.1: Form4Adapter's issuer-driven discovery against real-Form4-
+format fixtures (``tests/fixtures/form4_real_format/``, see that
+directory's MANIFEST.md). No real network call anywhere in this file;
+every URL and request count is asserted exactly.
 """
 
 from __future__ import annotations
@@ -14,11 +13,7 @@ from investment_research.research.document_store import DocumentRole, DocumentSt
 from investment_research.research.form4_acquisition_adapter import (
     FORM4_ADAPTER_ID,
     Form4Adapter,
-    Form4FilingReference,
-)
-from investment_research.research.sec_acquisition_adapters import (
-    SecFilingReference,
-    SecPrimaryDocumentAdapter,
+    Form4IssuerReference,
 )
 from investment_research.research.source_routing import (
     AcquisitionStep,
@@ -35,9 +30,7 @@ from investment_research.research.source_routing import (
 from investment_research.schemas.enums import (
     ContentKind,
     DocumentAuthority,
-    FetchOutcome,
     ResearchDomain,
-    SourceTier,
 )
 
 from . import _form4_fixture_support as fx
@@ -74,240 +67,345 @@ def _form4_graph(tag: str = "a"):
     return SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(l1, f, p))
 
 
-def _ref(scenario: str, **overrides) -> Form4FilingReference:
-    base = {
-        "filer_cik": fx.FILER_CIK, "accession": fx.accession(scenario), "primary_document": fx.PRIMARY_DOCUMENT,
-        "issuer_cik": fx.ISSUER_CIK, "issuer_name": fx.ISSUER_NAME, "issuer_ticker": fx.ISSUER_TICKER,
-        "reporting_owner_cik": fx.FILER_CIK_PADDED, "reporting_owner_name": fx.OWNER_NAME,
-    }
-    base.update(overrides)
-    return Form4FilingReference(**base)
-
-
-def _run(scenario: str, http, *, graph=None, target=None, refs=None):
+def _run(ref, http, *, graph=None):
     graph = graph or _form4_graph()
-    target = target or graph.targets[0]
-    refs = refs if refs is not None else {target.target_id: _ref(scenario)}
+    target = graph.targets[0]
     store = DocumentStore()
     executor = AcquisitionExecutor(adapters={FORM4_ADAPTER_ID: Form4Adapter(http)}, document_store=store)
-    report = executor.run(graph, form4_references=refs)
+    report = executor.run(graph, form4_references={target.target_id: ref})
     return report, store, target
 
 
-# --- happy path scenarios: every required transaction-type fixture --------
-_HAPPY_SCENARIOS = (
-    "normal_market_purchase", "normal_market_sale", "option_exercise", "tax_withholding",
-    "grant_award", "gift", "derivative_transaction", "indirect_ownership", "multiple_transactions",
-    "footnote_10b5_1", "form4a_amendment", "missing_fields",
-)
+def _by_step_prefix(report, prefix):
+    return next(r for r in report.target_reports[0].step_results if r.step_id.startswith(prefix))
 
 
-def test_every_happy_path_scenario_acquires_successfully():
+# --- issuer-driven discovery (Phase 3E.1 requirement 1) --------------------
+def test_issuer_cik_alone_discovers_form4_candidates_never_pre_specified():
+    """No accession, primary_document, or reporting-owner CIK is ever
+    supplied by the caller -- LOCATE must discover them itself."""
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    for scenario in _HAPPY_SCENARIOS:
-        report, store, target = _run(scenario, http)
-        assert report.outcome_for(target.target_id) is TargetAcquisitionOutcome.ACQUIRED, scenario
-        stored = store.resolve_by_accession(fx.accession(scenario))
-        assert len(stored) == 1, scenario
-        assert stored[0].authority is DocumentAuthority.STATUTORY_FILING
-        assert stored[0].document.is_company_ir is False
-        assert stored[0].document.content_kind is ContentKind.FULL_DOCUMENT
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT)
+    report, store, target = _run(ref, http)
+    assert report.outcome_for(target.target_id) is TargetAcquisitionOutcome.ACQUIRED
+    locate_result = _by_step_prefix(report, "l1_")
+    assert locate_result.payload["candidates"]
+    for candidate in locate_result.payload["candidates"]:
+        assert candidate["form"] in ("4", "4/A")
 
 
-def test_market_purchase_end_to_end_urls_and_counts_exact():
+def test_issuer_ticker_alone_resolves_cik_and_discovers_candidates():
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("normal_market_purchase", http)
-    assert http.requested_urls == [
-        fx.submissions_url(), fx.directory_index_url("normal_market_purchase"),
-        fx.document_url("normal_market_purchase"),
-    ]
-    diag = report.diagnostics
-    # The submissions.json call is inherited from SecPrimaryDocumentAdapter's
-    # own composed _fetch_submissions() and is classified as a direct API
-    # call there (Phase 3D.1's classification convention); the directory
-    # index.json and the XML body itself are both generic HTTP fetches.
-    assert diag.direct_api_requests == 1
-    assert diag.direct_http_requests == 2
-    assert diag.body_fetch_successes == 1
-    assert diag.parsed_documents == 1
-    assert diag.external_llm_tokens == 0
+    ref = Form4IssuerReference(issuer_ticker=fx.ISSUER_TICKER)
+    report, store, target = _run(ref, http)
+    assert report.outcome_for(target.target_id) is TargetAcquisitionOutcome.ACQUIRED
+    assert fx.ticker_map_url() in http.requested_urls
+    locate_result = _by_step_prefix(report, "l1_")
+    assert locate_result.payload["issuer_cik"] == fx.ISSUER_CIK_INT
 
 
-def test_form4a_amendment_stored_as_separate_document_never_an_overwrite():
+def test_unknown_ticker_never_acquired():
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report_orig, store, _ = _run("normal_market_purchase", http)
-    graph_amend = _form4_graph(tag="amend")
-    target_amend = graph_amend.targets[0]
-    executor = AcquisitionExecutor(adapters={FORM4_ADAPTER_ID: Form4Adapter(http)}, document_store=store)
-    report_amend = executor.run(graph_amend, form4_references={target_amend.target_id: _ref("form4a_amendment")})
-
-    assert report_amend.outcome_for(target_amend.target_id) is TargetAcquisitionOutcome.ACQUIRED
-    original_docs = store.resolve_by_accession(fx.accession("normal_market_purchase"))
-    amendment_docs = store.resolve_by_accession(fx.accession("form4a_amendment"))
-    assert len(original_docs) == 1
-    assert len(amendment_docs) == 1
-    assert original_docs[0].document_id != amendment_docs[0].document_id
-    assert original_docs[0].version == 1
-    assert amendment_docs[0].version == 1  # a NEW document, not a new version of the original
-
-
-# --- transaction classification lands correctly per scenario --------------
-def test_option_exercise_parsed_as_derivative_transaction():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, target = _run("option_exercise", http)
-    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("p_"))
-    parsed = parse_result.payload["parsed"]
-    assert len(parsed["derivative_transactions"]) == 1
-    assert parsed["non_derivative_transactions"] == []
-    assert parsed["derivative_transactions"][0]["transaction_code"] == "M"
-
-
-def test_footnote_10b5_1_reaches_parse_stage_true():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("footnote_10b5_1", http)
-    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("p_"))
-    parsed = parse_result.payload["parsed"]
-    assert parsed["non_derivative_transactions"][0]["is_10b5_1_plan"] is True
-
-
-def test_multiple_transactions_all_present_after_full_chain():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("multiple_transactions", http)
-    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("p_"))
-    parsed = parse_result.payload["parsed"]
-    assert len(parsed["non_derivative_transactions"]) == 2
-
-
-# --- Form 3/4/5 disambiguation ------------------------------------------
-def test_metadata_says_form3_refused_at_locate_never_fetched():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("metadata_says_form3", http)
+    ref = Form4IssuerReference(issuer_ticker="NOSUCHTICKER")
+    report, store, target = _run(ref, http)
     assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    # LOCATE refused before any body URL was ever requested.
-    assert fx.document_url("metadata_says_form3") not in http.requested_urls
-    assert store.resolve_by_accession(fx.accession("metadata_says_form3")) == []
-    locate_result = report.target_reports[0].step_results[0]
-    assert locate_result.status is StepStatus.FAILED
-    assert "form" in locate_result.failure_reason.lower()
-
-
-def test_body_says_form3_refused_at_fetch_defense_in_depth():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("body_says_form3", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert store.resolve_by_accession(fx.accession("body_says_form3")) == []
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert fetch_result.status is StepStatus.FAILED
-    assert "WRONG_DOCUMENT_TYPE" in fetch_result.failure_reason
-
-
-# --- other failure states, each distinguishable, never ACQUIRED -----------
-def test_unknown_accession_is_not_found_never_acquired():
-    responses = dict(fx.default_responses())
-    http = fx.FakeHttpClient(responses=responses)
-    report, store, target = _run(
-        "normal_market_purchase", http,
-        refs={_form4_graph().targets[0].target_id: _ref("normal_market_purchase", accession=fx.UNKNOWN_ACCESSION)},
-    )
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    locate_result = report.target_reports[0].step_results[0]
+    locate_result = _by_step_prefix(report, "l1_")
     assert locate_result.status is StepStatus.NOT_FOUND
 
 
-def test_missing_ownership_document_root_fails_at_fetch():
+def test_neither_cik_nor_ticker_fails_never_acquired():
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("missing_ownership_document", http)
+    report, store, target = _run(Form4IssuerReference(), http)
     assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert "MISSING_OWNERSHIP_DOCUMENT" in fetch_result.failure_reason
+    assert http.requested_urls == []
 
 
-def test_malformed_xml_fails_at_fetch():
+def test_malformed_issuer_cik_refused():
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("malformed_xml", http)
+    ref = Form4IssuerReference(issuer_cik="not-a-cik")
+    report, store, target = _run(ref, http)
     assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert "MALFORMED" in fetch_result.failure_reason
+    assert http.requested_urls == []
 
 
-def test_empty_body_fails_at_fetch_never_acquired():
+# --- Forms 3/5 excluded (Phase 3E.1 requirement 1/3) -----------------------
+def test_form3_never_becomes_a_candidate():
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("empty_body", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert fetch_result.status is StepStatus.FAILED
-    assert "empty" in fetch_result.failure_reason.lower()
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    locate_result = _by_step_prefix(report, "l1_")
+    accessions = {c["accession"] for c in locate_result.payload["candidates"]}
+    assert fx.accession("metadata_says_form3") not in accessions
+    assert store.resolve_by_accession(fx.accession("metadata_says_form3")) == []
 
 
-def test_html_error_page_never_accepted_as_ownership_document():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("html_error_page", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert store.resolve_by_accession(fx.accession("html_error_page")) == []
-
-
-def test_missing_required_fields_fails_at_parse_not_fetch():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("missing_required_fields", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("p_"))
-    assert fetch_result.status is StepStatus.BODY_FETCHED  # FETCH's coarse gate passed
-    assert parse_result.status is StepStatus.FAILED  # PARSE's field-presence check caught it
-    assert "issuer CIK" in parse_result.failure_reason
-    # The document WAS stored (a fetch genuinely happened) -- never
-    # promoted to ACQUIRED, since PARSE never completed.
-    assert store.resolve_by_accession(fx.accession("missing_required_fields"))
-
-
-def test_404_never_acquired():
+# --- zero results, malformed, CIK mismatch, budget exclusion --------------
+def test_issuer_with_zero_form4_filings_is_zero_results_never_acquired():
     responses = dict(fx.default_responses())
-    responses[fx.document_url("normal_market_purchase")] = fx.not_found()
+    empty_submissions = fx.build_submissions_payload()
+    empty_submissions["filings"]["recent"] = {
+        "accessionNumber": [], "form": [], "primaryDocument": [], "filingDate": [], "reportDate": [],
+    }
+    import json
+    responses[fx.submissions_url()] = fx.ok(json.dumps(empty_submissions))
     http = fx.FakeHttpClient(responses=responses)
-    report, store, target = _run("normal_market_purchase", http)
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT)
+    report, store, target = _run(ref, http)
     assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert fetch_result.status is StepStatus.NOT_FOUND
+    locate_result = _by_step_prefix(report, "l1_")
+    assert locate_result.status is StepStatus.ZERO_RESULTS
 
 
-def test_rate_limited_429_never_acquired():
-    responses = dict(fx.default_responses())
-    responses[fx.document_url("normal_market_purchase")] = fx.failed(FetchOutcome.RATE_LIMITED, "429 too many requests")
-    http = fx.FakeHttpClient(responses=responses)
-    report, store, target = _run("normal_market_purchase", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    fetch_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("f_"))
-    assert fetch_result.status is StepStatus.FAILED
-
-
-def test_server_error_5xx_never_acquired():
-    responses = dict(fx.default_responses())
-    responses[fx.document_url("normal_market_purchase")] = fx.failed(FetchOutcome.ERROR, "500 internal server error")
-    http = fx.FakeHttpClient(responses=responses)
-    report, store, target = _run("normal_market_purchase", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-
-
-def test_timeout_never_acquired():
-    responses = dict(fx.default_responses())
-    responses[fx.document_url("normal_market_purchase")] = fx.failed(FetchOutcome.TIMEOUT, "timed out")
-    http = fx.FakeHttpClient(responses=responses)
-    report, store, target = _run("normal_market_purchase", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-
-
-def test_no_form4_reference_supplied_fails_never_acquired():
+def test_cik_mismatch_candidate_excluded_never_acquired_as_evidence():
+    """A candidate whose OWN ownership XML declares a DIFFERENT issuerCik
+    than requested must never be stored as ACQUIRED evidence for this
+    issuer (Phase 3E.1 requirement 1)."""
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    graph = _form4_graph()
-    store = DocumentStore()
-    executor = AcquisitionExecutor(adapters={FORM4_ADAPTER_ID: Form4Adapter(http)}, document_store=store)
-    report = executor.run(graph, form4_references={})
-    assert report.outcome_for(graph.targets[0].target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert http.requested_urls == []  # zero HTTP calls with nothing to locate
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    fetch_result = _by_step_prefix(report, "f_")
+    mismatch_accession = fx.accession("cik_mismatch")
+    fetched_accessions = {e["accession"] for e in fetch_result.payload.get("fetched", [])}
+    failure_accessions = {e["accession"] for e in fetch_result.payload.get("fetch_failures", [])}
+    assert mismatch_accession not in fetched_accessions
+    assert mismatch_accession in failure_accessions
+    assert store.resolve_by_accession(mismatch_accession) == []
 
 
-# --- dedup: same accession/URL/CIK never re-fetched -----------------------
-def test_two_targets_same_accession_dedup_to_one_real_fetch():
+def test_malformed_candidate_never_acquired_as_evidence():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    fetch_result = _by_step_prefix(report, "f_")
+    failure_accessions = {e["accession"] for e in fetch_result.payload.get("fetch_failures", [])}
+    assert fx.accession("malformed_xml") in failure_accessions
+    assert store.resolve_by_accession(fx.accession("malformed_xml")) == []
+
+
+def test_budget_exclusion_never_silently_fetches_beyond_max_candidates():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=3)
+    report, store, target = _run(ref, http)
+    locate_result = _by_step_prefix(report, "l1_")
+    assert len(locate_result.payload["candidates"]) == 3
+    assert locate_result.payload["excluded_candidates_count"] > 0
+    fetch_result = _by_step_prefix(report, "f_")
+    assert len(fetch_result.payload["fetched"]) + len(fetch_result.payload["fetch_failures"]) == 3
+
+
+def test_continuation_page_filings_files_reached_when_present():
+    http = fx.FakeHttpClient(responses=fx.default_responses(with_continuation_pointer=True))
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    assert fx.continuation_page_url() in http.requested_urls
+    locate_result = _by_step_prefix(report, "l1_")
+    accessions = {c["accession"] for c in locate_result.payload["candidates"]}
+    assert fx.continuation_accession() in accessions
+    assert locate_result.payload["submissions_pages_fetched"] == 1
+
+
+# --- 4 vs 4/A never double-counted (Phase 3E.1 requirement 3) -------------
+def test_amendment_and_original_both_discovered_never_double_counted():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    parsed_by_accession = {d["accession"]: d for d in parse_result.payload["parsed_documents"]}
+    original = fx.accession("normal_market_purchase")
+    amendment = fx.accession("reconciled_amendment")
+    assert original in parsed_by_accession
+    assert amendment in parsed_by_accession
+    # Two distinct documents, two distinct transaction lists -- never
+    # merged into one, never summed into a single "net" figure.
+    assert parsed_by_accession[original]["document_id"] != parsed_by_accession[amendment]["document_id"]
+    diagnostics = parse_result.payload["diagnostics"]
+    assert diagnostics["form4_amendments_found"] >= 2  # reconciled_amendment + form4a_amendment
+    # No "net"/aggregate transaction key exists anywhere in the payload.
+    assert "net_shares" not in parse_result.payload
+    assert "net_buying" not in parse_result.payload
+    assert not any("net" in str(k).lower() for k in parse_result.payload["diagnostics"])
+
+
+def test_reconciled_amendment_references_its_original():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    parsed_by_accession = {d["accession"]: d for d in parse_result.payload["parsed_documents"]}
+    amendment_doc = parsed_by_accession[fx.accession("reconciled_amendment")]
+    assert amendment_doc["reconciliation"].status == "RECONCILED"
+    assert amendment_doc["reconciliation"].original_accession == fx.accession("normal_market_purchase")
+
+
+def test_unresolved_amendment_never_guessed_related():
+    """form4a_amendment.xml's remarks name no accession at all -- must
+    stay UNRESOLVED, never guessed related to any other filing merely by
+    period/owner coincidence (Phase 3E.1 requirement 3)."""
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    parsed_by_accession = {d["accession"]: d for d in parse_result.payload["parsed_documents"]}
+    doc = parsed_by_accession[fx.accession("form4a_amendment")]
+    assert doc["reconciliation"].status == "UNRESOLVED"
+    assert doc["reconciliation"].original_accession == "UNKNOWN"
+
+
+def test_plain_form4_reconciliation_is_not_applicable():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    parsed_by_accession = {d["accession"]: d for d in parse_result.payload["parsed_documents"]}
+    doc = parsed_by_accession[fx.accession("normal_market_purchase")]
+    assert doc["reconciliation"].status == "NOT_APPLICABLE"
+
+
+def test_diagnostics_amendments_reconciled_and_unresolved_counted_separately():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    diagnostics = _by_step_prefix(report, "p_").payload["diagnostics"]
+    assert diagnostics["amendments_reconciled"] == 1  # reconciled_amendment
+    assert diagnostics["amendments_unresolved"] == 1  # form4a_amendment
+    assert diagnostics["form4_amendments_found"] == diagnostics["amendments_reconciled"] + diagnostics["amendments_unresolved"]
+
+
+# --- Rule 10b5-1 checkbox diagnostics (Phase 3E.1 requirement 2/5) --------
+def test_ten_b5_1_checkbox_diagnostics_all_unknown_when_absent_everywhere():
+    """None of this Phase's fixtures include the (unverified-name)
+    checkbox element -- every parsed document's checkbox must resolve to
+    UNKNOWN, never a guessed False."""
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    diagnostics = _by_step_prefix(report, "p_").payload["diagnostics"]
+    assert diagnostics["ten_b5_1_checkbox_true"] == 0
+    assert diagnostics["ten_b5_1_checkbox_false"] == 0
+    assert diagnostics["ten_b5_1_checkbox_unknown"] > 0
+
+
+def test_ten_b5_1_checkbox_never_present_on_individual_transactions():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    for doc in parse_result.payload["parsed_documents"]:
+        for t in doc["parsed"]["non_derivative_transactions"] + doc["parsed"]["derivative_transactions"]:
+            assert "ten_b5_1_checkbox" not in t
+
+
+# --- diagnostics: every named field present and accurate -------------------
+def test_all_required_diagnostics_fields_present():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    diagnostics = _by_step_prefix(report, "p_").payload["diagnostics"]
+    for key in (
+        "parsed_non_derivative_transactions", "parsed_derivative_transactions", "parsed_reporting_owners",
+        "form4_amendments_found", "amendments_reconciled", "amendments_unresolved",
+        "ten_b5_1_checkbox_true", "ten_b5_1_checkbox_false", "ten_b5_1_checkbox_unknown",
+    ):
+        assert key in diagnostics, key
+        assert isinstance(diagnostics[key], int)
+
+
+def test_parsed_transaction_counts_match_actual_parsed_documents():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    diagnostics = parse_result.payload["diagnostics"]
+    nd_count = sum(len(d["parsed"]["non_derivative_transactions"]) for d in parse_result.payload["parsed_documents"])
+    d_count = sum(len(d["parsed"]["derivative_transactions"]) for d in parse_result.payload["parsed_documents"])
+    assert diagnostics["parsed_non_derivative_transactions"] == nd_count
+    assert diagnostics["parsed_derivative_transactions"] == d_count
+
+
+# --- evidence semantics: reporting-person filing never independent -------
+def test_form4_raw_fact_never_promoted_to_independent_evidence_via_real_pipeline():
+    """The REAL RawFact -> Fact pipeline (EvidenceIntegrityAgent), not
+    merely the RawFact's own fields, must never promote a Form 4 fact to
+    independent_confirmation=True or EvidenceClass.INDEPENDENT_EVIDENCE
+    (Phase 3E.1 requirement 4)."""
+    from datetime import date
+
+    from investment_research.agents.evidence_integrity import EvidenceIntegrityAgent
+    from investment_research.collectors.form4 import parse_ownership_document, raw_facts_from_form4
+    from investment_research.schemas.agent_io import AgentInput
+    from investment_research.schemas.enums import EvidenceClass, SourceTier
+    from investment_research.schemas.fact import Fact, Source, make_source_id
+
+    parsed = parse_ownership_document(fx.fixture_xml("normal_market_purchase"))
+    source = Source(
+        source_id=make_source_id("https://example.test/form4", "Form 4"),
+        url="https://example.test/form4", title="Form 4", tier=SourceTier.TIER_1,
+    )
+    raw_facts = raw_facts_from_form4("SAMPB", parsed, source, document_id="doc_form4_test")
+    assert raw_facts
+    assert all(f.company_claim is False for f in raw_facts)
+
+    facts = [
+        Fact(
+            fact_id=rf.fact_id(), ticker=rf.ticker, category=rf.category, claim=rf.claim,
+            evidence_class=EvidenceClass.UNVERIFIED_CLAIM, source_id=rf.source.source_id,
+            source_url=rf.source.url, source_title=rf.source.title, source_tier=rf.source.tier,
+            company_claim=rf.company_claim, document_id=rf.document_id,
+        )
+        for rf in raw_facts
+    ]
+    agent = EvidenceIntegrityAgent(today=date(2026, 9, 15))
+    agent_input = AgentInput(
+        agent_id="evidence_integrity", run_id="test_run", ticker="SAMPB", company_name=fx.ISSUER_NAME,
+        facts=tuple(facts),
+    )
+    output = agent.run(agent_input)
+
+    for assessed in output.facts:
+        assert assessed.independent_confirmation is False, (
+            f"Form 4 fact wrongly independently confirmed: {assessed.claim}"
+        )
+        assert assessed.evidence_class is not EvidenceClass.INDEPENDENT_EVIDENCE, (
+            f"Form 4 fact wrongly classified INDEPENDENT_EVIDENCE: {assessed.claim}"
+        )
+        assert assessed.evidence_class is not EvidenceClass.VERIFIED_FACT, (
+            f"Form 4 fact wrongly classified VERIFIED_FACT -- a reporting person's own statutory "
+            f"filing is not the regulator's own statement: {assessed.claim}"
+        )
+
+
+# --- Document/authority basics unchanged from Phase 3E ---------------------
+def test_every_stored_form4_document_is_statutory_filing_never_company_ir():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
+    parse_result = _by_step_prefix(report, "p_")
+    for doc in parse_result.payload["parsed_documents"]:
+        stored = store.get(doc["document_id"])
+        assert stored is not None
+        assert stored.authority is DocumentAuthority.STATUTORY_FILING
+        assert stored.document.is_company_ir is False
+        assert stored.document.content_kind is ContentKind.FULL_DOCUMENT
+        assert stored.document_role is DocumentRole.PRIMARY_DOCUMENT
+
+
+def test_zero_external_llm_tokens_always():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT)
+    report, store, target = _run(ref, http)
+    assert report.diagnostics.external_llm_tokens == 0
+
+
+def test_module_never_imports_pipeline_or_web_search():
+    import investment_research.research.form4_acquisition_adapter as module
+
+    assert "pipeline" not in module.__dict__
+    assert not hasattr(module, "run_pipeline")
+    assert "anthropic" not in "".join(dir(module)).lower()
+
+
+# --- cross-adapter/same-accession dedup (still true after the rewrite) ----
+def test_two_form4_targets_same_issuer_dedup_submissions_fetch():
     http = fx.FakeHttpClient(responses=fx.default_responses())
     graph_a, graph_b = _form4_graph("d1"), _form4_graph("d2")
     graph = SourceRoutingGraph(
@@ -317,210 +415,38 @@ def test_two_targets_same_accession_dedup_to_one_real_fetch():
     )
     store = DocumentStore()
     executor = AcquisitionExecutor(adapters={FORM4_ADAPTER_ID: Form4Adapter(http)}, document_store=store)
-    refs = {
-        graph_a.targets[0].target_id: _ref("normal_market_purchase"),
-        graph_b.targets[0].target_id: _ref("normal_market_purchase"),
-    }
-    report = executor.run(graph, form4_references=refs)
-    assert report.outcome_for(graph_a.targets[0].target_id) is TargetAcquisitionOutcome.ACQUIRED
-    assert report.outcome_for(graph_b.targets[0].target_id) is TargetAcquisitionOutcome.ACQUIRED
-    # Exactly one physical GET per distinct URL -- the second target's
-    # identical accession/URL is served entirely from request_cache.
-    assert http.requested_urls.count(fx.document_url("normal_market_purchase")) == 1
-    assert http.requested_urls.count(fx.submissions_url()) == 1
-    assert report.diagnostics.duplicate_acquisition_avoided > 0
-    # Both targets resolve to the SAME stored document -- never duplicated.
-    docs = store.resolve_by_accession(fx.accession("normal_market_purchase"))
-    assert len(docs) == 1
-
-
-def test_form4_and_sec_primary_adapter_share_one_submissions_fetch():
-    """Cross-adapter dedup (Phase 3E requirement 2): a Form4 target and an
-    SEC primary-document target for the SAME filer CIK share exactly one
-    submissions.json GET within one AcquisitionExecutor.run() call."""
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-
-    form4_graph = _form4_graph("x1")
-    sec_tag = "x2"
-    l1 = AcquisitionStep(
-        step_id=f"l1_{sec_tag}", target_id=f"target_{sec_tag}", step_kind=StepKind.LOCATE,
-        acquisition_method=AcquisitionMethod.EXISTING_DIRECT_API, adapter_id="sec_primary_document_adapter",
-        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.REQUIRED,
-        implementation_status=ImplementationStatus.EXECUTOR_WIRED,
-    )
-    f = AcquisitionStep(
-        step_id=f"f_{sec_tag}", target_id=f"target_{sec_tag}", step_kind=StepKind.FETCH,
-        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="sec_primary_document_adapter",
-        depends_on_step_ids=(f"l1_{sec_tag}",), completion_condition=StepStatus.BODY_FETCHED,
-        implementation_status=ImplementationStatus.EXECUTOR_WIRED,
-    )
-    p = AcquisitionStep(
-        step_id=f"p_{sec_tag}", target_id=f"target_{sec_tag}", step_kind=StepKind.PARSE,
-        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id="sec_primary_document_adapter",
-        depends_on_step_ids=(f"f_{sec_tag}",), completion_condition=StepStatus.PARSED,
-        implementation_status=ImplementationStatus.EXECUTOR_WIRED,
-    )
-    requirement = EvidenceRequirement(
-        requirement_id=f"req_{sec_tag}", serves_legacy_need_ids=(f"synthetic_{sec_tag}",),
-        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.CAPITAL_STRUCTURE,
-    )
-    sec_target = AcquisitionTarget(
-        target_id=f"target_{sec_tag}", target_kind=TargetKind.SEC_PRIMARY_DOCUMENT,
-        required_step_ids=(f"l1_{sec_tag}", f"f_{sec_tag}", f"p_{sec_tag}"), serves_requirement_ids=(f"req_{sec_tag}",),
-    )
-    sec_graph = SourceRoutingGraph(requirements=(requirement,), targets=(sec_target,), steps=(l1, f, p))
-
-    graph = SourceRoutingGraph(
-        requirements=form4_graph.requirements + sec_graph.requirements,
-        targets=form4_graph.targets + sec_graph.targets,
-        steps=form4_graph.steps + sec_graph.steps,
-    )
-    store = DocumentStore()
-    executor = AcquisitionExecutor(
-        adapters={FORM4_ADAPTER_ID: Form4Adapter(http), "sec_primary_document_adapter": SecPrimaryDocumentAdapter(http)},
-        document_store=store,
-    )
-    # Same filer CIK/accession/document as the Form4 target below -- both
-    # adapters must resolve against the SAME submissions.json/directory
-    # listing entries, proving the shared request_cache is what dedups
-    # the submissions.json call, not merely two independent fixtures that
-    # happen to look alike.
-    sec_ref = SecFilingReference(
-        cik=fx.FILER_CIK, accession=fx.accession("normal_market_purchase"),
-        primary_document=fx.PRIMARY_DOCUMENT, form="4",
-    )
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT)
     report = executor.run(
         graph,
-        form4_references={form4_graph.targets[0].target_id: _ref("normal_market_purchase")},
-        filing_references={sec_target.target_id: sec_ref},
+        form4_references={graph_a.targets[0].target_id: ref, graph_b.targets[0].target_id: ref},
     )
-    assert report.outcome_for(form4_graph.targets[0].target_id) is TargetAcquisitionOutcome.ACQUIRED
-    assert report.outcome_for(sec_target.target_id) is TargetAcquisitionOutcome.ACQUIRED
+    assert report.outcome_for(graph_a.targets[0].target_id) is TargetAcquisitionOutcome.ACQUIRED
+    assert report.outcome_for(graph_b.targets[0].target_id) is TargetAcquisitionOutcome.ACQUIRED
     assert http.requested_urls.count(fx.submissions_url()) == 1
+    assert report.diagnostics.duplicate_acquisition_avoided > 0
 
 
 # --- lineage: SEC metadata -> Document -> RawFact -> Fact.document_id -----
 def test_lineage_document_id_flows_from_document_store_to_raw_facts():
     from investment_research.collectors.form4 import raw_facts_from_form4
+    from investment_research.schemas.enums import SourceTier
     from investment_research.schemas.fact import Source, make_source_id
 
     http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, store, target = _run("normal_market_purchase", http)
+    ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
+    report, store, target = _run(ref, http)
     assert report.outcome_for(target.target_id) is TargetAcquisitionOutcome.ACQUIRED
 
-    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id.startswith("p_"))
-    document_id = parse_result.document_id
-    parsed = parse_result.payload["parsed"]
-    assert document_id is not None
-
-    stored = store.get(document_id)
-    assert stored is not None
-    assert stored.document_role is DocumentRole.PRIMARY_DOCUMENT
-    assert stored.document.text  # the actual XML text is in hand
-
-    source = Source(
-        source_id=make_source_id(stored.document.url, stored.document.title),
-        url=stored.document.url, title=stored.document.title, tier=SourceTier.TIER_1,
-    )
-    facts = raw_facts_from_form4("SAMPB", parsed, source, document_id=document_id)
-    assert facts
-    assert all(f.document_id == document_id for f in facts)
-    # And the document_id genuinely resolves back to the SAME stored
-    # document -- lineage is a real, checkable chain, not a label.
-    for f in facts:
-        resolved = store.get(f.document_id)
-        assert resolved is stored
-
-
-# --- issuer CIK vs reporting-owner CIK never confused ----------------------
-def test_issuer_cik_and_reporting_owner_cik_never_confused_in_payload():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("normal_market_purchase", http)
-    locate_result = report.target_reports[0].step_results[0]
-    assert locate_result.payload["issuer_cik"] == fx.ISSUER_CIK
-    assert locate_result.payload["reporting_owner_cik"] == fx.FILER_CIK_PADDED
-    assert locate_result.payload["issuer_cik"] != locate_result.payload["reporting_owner_cik"]
-    assert locate_result.payload["filer_cik"] == fx.FILER_CIK
-
-
-# --- unsafe references refused, never guessed -----------------------------
-def test_malformed_accession_refused():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    graph = _form4_graph()
-    report, store, target = _run(
-        "normal_market_purchase", http,
-        refs={graph.targets[0].target_id: _ref("normal_market_purchase", accession="not-an-accession")},
-        graph=graph, target=graph.targets[0],
-    )
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert http.requested_urls == []
-
-
-def test_unsafe_primary_document_filename_refused():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    graph = _form4_graph()
-    report, store, target = _run(
-        "normal_market_purchase", http,
-        refs={graph.targets[0].target_id: _ref("normal_market_purchase", primary_document="../../etc/passwd")},
-        graph=graph, target=graph.targets[0],
-    )
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert http.requested_urls == []
-
-
-def test_empty_primary_document_refused():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    graph = _form4_graph()
-    report, store, target = _run(
-        "normal_market_purchase", http,
-        refs={graph.targets[0].target_id: _ref("normal_market_purchase", primary_document="")},
-        graph=graph, target=graph.targets[0],
-    )
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-
-
-# --- never company_claim / never company IR --------------------------------
-def test_form4_document_is_never_marked_company_ir():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    _report, store, _target = _run("normal_market_purchase", http)
-    stored = store.resolve_by_accession(fx.accession("normal_market_purchase"))[0]
-    assert stored.document.is_company_ir is False
-    assert stored.authority is DocumentAuthority.STATUTORY_FILING
-
-
-# --- never Pipeline.run() connected, never Web Search / LLM ---------------
-def test_module_never_imports_pipeline_or_web_search():
-    import investment_research.research.form4_acquisition_adapter as module
-
-    assert "pipeline" not in module.__dict__
-    assert not hasattr(module, "run_pipeline")
-    assert "anthropic" not in "".join(dir(module)).lower()
-
-
-def test_zero_external_llm_tokens_always():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("normal_market_purchase", http)
-    assert report.diagnostics.external_llm_tokens == 0
-
-
-# --- diagnostics: metadata-only and incomplete-target counts ---------------
-def test_diagnostics_metadata_only_result_recorded_on_locate_success():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("normal_market_purchase", http)
-    assert report.diagnostics.metadata_only_results >= 1
-
-
-def test_diagnostics_incomplete_targets_counts_a_failed_target():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, target = _run("malformed_xml", http)
-    assert report.outcome_for(target.target_id) is not TargetAcquisitionOutcome.ACQUIRED
-    assert report.diagnostics.incomplete_targets == 1
-    assert report.diagnostics.body_fetch_failures == 1
-
-
-def test_diagnostics_planned_and_executed_steps_reported():
-    http = fx.FakeHttpClient(responses=fx.default_responses())
-    report, _store, _target = _run("normal_market_purchase", http)
-    graph = _form4_graph()
-    assert report.diagnostics.planned_steps == len(graph.steps)
-    assert report.diagnostics.executed_steps == len(graph.steps)
+    parse_result = _by_step_prefix(report, "p_")
+    for doc in parse_result.payload["parsed_documents"]:
+        stored = store.get(doc["document_id"])
+        assert stored is not None
+        source = Source(
+            source_id=make_source_id(stored.document.url, stored.document.title),
+            url=stored.document.url, title=stored.document.title, tier=SourceTier.TIER_1,
+        )
+        facts = raw_facts_from_form4("SAMPB", doc["parsed"], source, document_id=doc["document_id"])
+        assert facts
+        for f in facts:
+            resolved = store.get(f.document_id)
+            assert resolved is stored

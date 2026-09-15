@@ -147,19 +147,108 @@ def test_multiple_transactions_never_merged():
     assert {transactions[0]["transaction_shares"], transactions[1]["transaction_shares"]} == {"400", "150"}
 
 
-# --- Rule 10b5-1: footnote-explicit only ------------------------------------
-def test_10b5_1_plan_set_true_only_on_explicit_footnote_reference():
+# --- Rule 10b5-1: footnote-explicit legacy/fallback signal -----------------
+def test_10b5_1_plan_footnote_fallback_set_true_only_on_explicit_footnote_reference():
     parsed = parse_ownership_document(fx.fixture_xml("footnote_10b5_1"))
     t = parsed["non_derivative_transactions"][0]
     assert t["footnote_ids"] == ("F1",)
-    assert t["is_10b5_1_plan"] is True
+    assert t["is_10b5_1_plan_footnote_fallback"] is True
 
 
-def test_10b5_1_plan_never_guessed_when_no_footnote_referenced():
+def test_10b5_1_plan_footnote_fallback_never_guessed_when_no_footnote_referenced():
     for scenario in ("normal_market_purchase", "normal_market_sale", "tax_withholding", "grant_award", "gift"):
         parsed = parse_ownership_document(fx.fixture_xml(scenario))
         for t in parsed["non_derivative_transactions"] + parsed["derivative_transactions"]:
-            assert t["is_10b5_1_plan"] is None, f"{scenario} transaction wrongly guessed a 10b5-1 plan"
+            assert t["is_10b5_1_plan_footnote_fallback"] is None, (
+                f"{scenario} transaction wrongly guessed a 10b5-1 plan"
+            )
+
+
+# --- Rule 10b5-1: document-level checkbox (Phase 3E.1) --------------------
+def test_ten_b5_1_checkbox_absent_is_unknown_never_false():
+    """Every existing fixture has no checkbox element at all -- absence
+    must resolve to None (UNKNOWN), never a guessed False (Phase 3E.1
+    requirement 2)."""
+    for scenario in ("normal_market_purchase", "footnote_10b5_1", "multiple_transactions"):
+        parsed = parse_ownership_document(fx.fixture_xml(scenario))
+        assert parsed["ten_b5_1_checkbox"] is None
+
+
+def test_ten_b5_1_checkbox_true_when_element_present():
+    import xml.etree.ElementTree as ET
+
+    from investment_research.collectors.form4 import _read_checkbox
+
+    root = ET.fromstring("<ownershipDocument><aff10b5One><value>1</value></aff10b5One></ownershipDocument>")
+    assert _read_checkbox(root, ("aff10b5One",)) is True
+
+
+def test_ten_b5_1_checkbox_false_when_element_present_and_unchecked():
+    import xml.etree.ElementTree as ET
+
+    from investment_research.collectors.form4 import _read_checkbox
+
+    root = ET.fromstring("<ownershipDocument><aff10b5One><value>0</value></aff10b5One></ownershipDocument>")
+    assert _read_checkbox(root, ("aff10b5One",)) is False
+
+
+def test_ten_b5_1_checkbox_never_auto_attributed_to_individual_transactions():
+    """The document-level checkbox field lives only at the top level of
+    the parsed record -- never copied down onto individual transactions,
+    which carry only their own separate legacy/fallback field (Phase
+    3E.1 requirement 2)."""
+    parsed = parse_ownership_document(fx.fixture_xml("footnote_10b5_1"))
+    assert "ten_b5_1_checkbox" in parsed
+    for t in parsed["non_derivative_transactions"] + parsed["derivative_transactions"]:
+        assert "ten_b5_1_checkbox" not in t
+        assert "is_10b5_1_plan_footnote_fallback" in t
+
+
+def test_ten_b5_1_plan_adoption_date_only_from_explicit_text():
+    parsed = parse_ownership_document(fx.fixture_xml("footnote_10b5_1"))
+    # This fixture's footnote mentions 10b5-1 but never an adoption date.
+    assert parsed["ten_b5_1_plan_adoption_date"] == UNKNOWN
+
+
+def test_ten_b5_1_plan_adoption_date_extracted_when_explicitly_stated():
+    from investment_research.collectors.form4 import _extract_plan_adoption_date
+
+    remarks = "Effected pursuant to a Rule 10b5-1 trading plan adopted on March 2, 2026."
+    assert _extract_plan_adoption_date(remarks, {}) == "March 2, 2026"
+
+
+def test_ten_b5_1_plan_adoption_date_never_guessed_without_10b5_1_mention():
+    from investment_research.collectors.form4 import _extract_plan_adoption_date
+
+    remarks = "Adopted on March 2, 2026."  # no "10b5-1" anywhere
+    assert _extract_plan_adoption_date(remarks, {}) == UNKNOWN
+
+
+# --- amendment cross-reference extraction (Phase 3E.1 requirement 3) ------
+def test_extract_referenced_accession_finds_an_embedded_accession():
+    from investment_research.collectors.form4 import extract_referenced_accession
+
+    text = "This Form 4/A amends the Form 4 filed with accession number 0005556667-26-000001."
+    assert extract_referenced_accession(text) == "0005556667-26-000001"
+
+
+def test_extract_referenced_accession_unknown_when_absent():
+    from investment_research.collectors.form4 import extract_referenced_accession
+
+    assert extract_referenced_accession("No accession mentioned here.") == UNKNOWN
+    assert extract_referenced_accession("") == UNKNOWN
+
+
+def test_accession_in_text_pattern_stays_in_sync_with_sec_accession_pattern():
+    """collectors/form4.py's module docstring claims this module's own
+    accession-shaped-text pattern is kept in sync with sec_acquisition_
+    adapters._ACCESSION_RE -- this test is that sync check."""
+    from investment_research.collectors.form4 import _ACCESSION_IN_TEXT_RE
+    from investment_research.research.sec_acquisition_adapters import _ACCESSION_RE
+
+    core_in_text = _ACCESSION_IN_TEXT_RE.pattern.replace(r"\b", "")
+    core_standalone = _ACCESSION_RE.pattern.replace("^", "").replace("$", "")
+    assert core_in_text == core_standalone
 
 
 # --- Form 4/A amendment -------------------------------------------------
@@ -190,7 +279,7 @@ def test_issuer_cik_and_reporting_owner_cik_are_distinct_fields():
     parsed = parse_ownership_document(fx.fixture_xml("normal_market_purchase"))
     assert parsed["issuer_cik"] != parsed["reporting_owners"][0]["reporting_owner_cik"]
     assert parsed["issuer_cik"] == fx.ISSUER_CIK
-    assert parsed["reporting_owners"][0]["reporting_owner_cik"] == fx.FILER_CIK_PADDED
+    assert parsed["reporting_owners"][0]["reporting_owner_cik"] == fx.OWNER_CIK_PADDED
 
 
 # --- raw facts: never merged, company_claim=False, verbatim codes ----------

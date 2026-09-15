@@ -26,8 +26,52 @@ log = logging.getLogger(__name__)
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+#: SEC's own continuation pages for filing history beyond ``filings.recent``
+#: (roughly the most recent ~1000 filings) -- each entry in a submissions
+#: payload's ``filings.files`` array names one of these directly (e.g.
+#: ``"CIK0000320193-submissions-001.json"``); resolved via this template,
+#: never guessed or reconstructed from the CIK alone.
+SUBMISSIONS_PAGE_URL = "https://data.sec.gov/submissions/{name}"
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 FILING_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{document}"
+
+
+def normalize_cik(value: int | str) -> int | None:
+    """The single source of truth for validating/normalizing a caller-
+    supplied CIK to its canonical ``int`` form. Accepts a bare int, a
+    decimal string, or a zero-padded decimal string (e.g. ``"0000320193"``)
+    -- returns ``None`` for anything that is not a positive integer CIK
+    (never guessed, never silently truncated, never accepts a negative or
+    zero value or non-digit characters).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or not stripped.isdigit():
+            return None
+        as_int = int(stripped)
+        return as_int if as_int > 0 else None
+    return None
+
+
+def cik_for_submissions_api(cik: int) -> str:
+    """The 10-digit, zero-padded representation ``data.sec.gov/submissions/
+    CIK##########.json`` requires. Kept as an explicit, named function
+    (rather than relying on callers to remember ``SUBMISSIONS_URL``'s own
+    ``:010d`` format spec) so the two SEC CIK representations are never
+    confused with each other at a call site."""
+    return f"{cik:010d}"
+
+
+def cik_for_archives(cik: int) -> str:
+    """The UNPADDED representation ``www.sec.gov/Archives/edgar/data/{cik}/
+    ...`` requires -- zero-padding this would silently build a URL that
+    does not resolve. Kept separate from :func:`cik_for_submissions_api`
+    so neither representation is ever used in the other's place."""
+    return str(cik)
 
 #: Filing forms this system cares about, mapped to the fact category they feed.
 FORM_CATEGORIES: dict[str, FactCategory] = {

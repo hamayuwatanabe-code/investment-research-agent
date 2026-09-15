@@ -67,21 +67,56 @@ module does NOT do:
 * Multiple transactions in one filing are returned as multiple list
   entries, one each -- never summed, averaged, or otherwise collapsed
   into a single aggregate record.
-* ``is_10b5_1_plan`` is ``True`` ONLY when a footnote this transaction
-  actually references contains the literal substring ``"10b5-1"`` --
-  ``None`` (never a guessed ``False``) whenever no such footnote reference
-  exists. Never inferred from the transaction code, the filer's role, or
-  anything else.
+* ``is_10b5_1_plan_footnote_fallback`` is ``True`` ONLY when a footnote
+  this transaction actually references contains the literal substring
+  ``"10b5-1"`` -- ``None`` (never a guessed ``False``) whenever no such
+  footnote reference exists. Never inferred from the transaction code,
+  the filer's role, or anything else. This is a LEGACY/FALLBACK signal,
+  kept structurally separate from ``ten_b5_1_checkbox`` (Phase 3E.1
+  requirement 2) -- see that field's own docstring below for why, and for
+  the honest uncertainty about the real SEC schema element name.
+
+Rule 10b5-1 checkbox (Phase 3E.1 requirement 2): SEC's Insider Trading
+Arrangements rule (Release No. 33-11138, effective 2023) added a checkbox
+indicating whether a transaction was made under a Rule 10b5-1(c) trading
+arrangement. **The exact XML element name could not be confirmed against
+SEC's own XSD or a real captured filing from this offline session** (no
+live network access was available to verify it) -- this module checks a
+small set of plausible candidate element names
+(``_DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS``), at the document level as
+instructed, and returns ``None`` (UNKNOWN) whenever none of them are
+present, which is the overwhelmingly common case for any fixture/capture
+that does not specifically exercise this field -- an absent checkbox is
+NEVER read as ``False`` (a checkbox that cannot be found is unknown, not
+negative). This is flagged as unresolved/unverified pending a real
+capture; see the Phase 3E.1 report for the full reasoning, including
+schema note this module's own recollection could plausibly be wrong
+about whether the real checkbox is document-level or per-transaction.
+``ten_b5_1_plan_adoption_date`` is extracted ONLY from an explicit date
+following "adopted ... on" wording in ``remarks`` or a referenced
+footnote whose text also mentions "10b5-1" -- never inferred otherwise.
 """
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from enum import Enum
 from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory
 from ..schemas.fact import RawFact, Source
+
+#: Candidate element names for the document-level Rule 10b5-1 checkbox --
+#: see the module docstring's "Rule 10b5-1 checkbox" section for why this
+#: is a best-effort, unverified identification, checked in order.
+_DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS: tuple[str, ...] = ("aff10b5One", "rule10b51PlanChecked")
+
+_PLAN_ADOPTION_DATE_RE = re.compile(
+    r"adopt(?:ed|ion)?(?:\s+the\s+plan)?\s+(?:on\s+)?"
+    r"([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
 
 #: Distinguishes a genuine Form 4/4-A from a Form 3 or Form 5 -- all three
 #: share the identical ``ownershipDocument`` XML schema, differing only in
@@ -160,6 +195,61 @@ def _footnote_ids(t_el: ET.Element) -> tuple[str, ...]:
     return tuple(sorted(i for i in ids if i is not None))
 
 
+def _read_checkbox(el: ET.Element, paths: tuple[str, ...]) -> bool | None:
+    """SEC's 0/1 checkbox convention, tried against each candidate element
+    name in turn. ``None`` -- never a guessed ``False`` -- when none of
+    them are present (Phase 3E.1 requirement 2)."""
+    for path in paths:
+        found = el.find(path)
+        if found is None:
+            continue
+        value_el = found.find("value")
+        text = value_el.text if value_el is not None else found.text
+        if text is None:
+            continue
+        text = text.strip()
+        if text == "1":
+            return True
+        if text == "0":
+            return False
+    return None
+
+
+def _extract_plan_adoption_date(remarks: str, footnotes: dict[str, str]) -> str:
+    """Only from text that BOTH mentions "10b5-1" AND states an explicit
+    adoption date -- never inferred from a transaction date, a filing
+    date, or anything else (Phase 3E.1 requirement 2)."""
+    for text in (remarks, *footnotes.values()):
+        if "10b5-1" not in text.lower():
+            continue
+        match = _PLAN_ADOPTION_DATE_RE.search(text)
+        if match:
+            return match.group(1)
+    return UNKNOWN
+
+
+#: An SEC accession number, as it would appear embedded in free-text
+#: remarks (e.g. "This Form 4/A amends the Form 4 filed with accession
+#: number 0001112223-26-000001."). Same shape as sec_acquisition_
+#: adapters._ACCESSION_RE, duplicated here deliberately: this module must
+#: stay import-independent of research/ code (a pure parsing module), and
+#: a dedicated test keeps the two patterns in sync.
+_ACCESSION_IN_TEXT_RE = re.compile(r"\b\d{10}-\d{2}-\d{6}\b")
+
+
+def extract_referenced_accession(text: str) -> str:
+    """The FIRST SEC-accession-shaped substring in free text (typically a
+    4/A's own ``remarks``) -- ``UNKNOWN`` if none is present. Purely a
+    textual pattern match: this is evidence an amendment's remarks name a
+    specific prior accession, never proof the two are actually related
+    (Phase 3E.1 requirement 3) -- research/form4_acquisition_adapter.py's
+    reconciliation logic still requires that referenced accession to
+    genuinely be among the OTHER filings discovered for the same issuer
+    before treating it as reconciled."""
+    match = _ACCESSION_IN_TEXT_RE.search(text or "")
+    return match.group(0) if match else UNKNOWN
+
+
 def _parse_transaction(
     t_el: ET.Element, *, is_derivative: bool, footnotes: dict[str, str]
 ) -> dict[str, Any]:
@@ -200,10 +290,12 @@ def _parse_transaction(
         transaction["underlying_security_title"] = _value(underlying, "underlyingSecurityTitle")
         transaction["underlying_security_shares"] = _value(underlying, "underlyingSecurityShares")
 
-    # Rule 10b5-1: True ONLY on an explicit footnote match -- never a
-    # guessed False, never inferred from the transaction code (module
-    # docstring / Phase 3E requirement 5).
-    transaction["is_10b5_1_plan"] = (
+    # Rule 10b5-1 LEGACY/FALLBACK signal: True ONLY on an explicit
+    # footnote match -- never a guessed False, never inferred from the
+    # transaction code. Structurally separate from the document-level
+    # ten_b5_1_checkbox field (Phase 3E.1 requirement 2) -- never
+    # conflated with it.
+    transaction["is_10b5_1_plan_footnote_fallback"] = (
         any("10b5-1" in footnotes.get(fid, "").lower() for fid in footnote_ids) if footnote_ids else None
     )
     return transaction
@@ -267,6 +359,7 @@ def parse_ownership_document(xml_text: str) -> dict[str, Any] | None:
         for sig in root.findall("ownerSignature")
     ]
 
+    remarks = _text(root, "remarks")
     return {
         "document_type": document_type,
         "period_of_report": _text(root, "periodOfReport"),
@@ -277,12 +370,22 @@ def parse_ownership_document(xml_text: str) -> dict[str, Any] | None:
         "non_derivative_transactions": non_derivative,
         "derivative_transactions": derivative,
         "footnotes": footnotes,
-        "remarks": _text(root, "remarks"),
+        "remarks": remarks,
         "signatures": signatures,
         # Flat convenience fields for the (common) single-signer case --
         # UNKNOWN, never a guess, when there is more than one or none.
         "signature_name": signatures[0]["signature_name"] if len(signatures) == 1 else UNKNOWN,
         "signature_date": signatures[0]["signature_date"] if len(signatures) == 1 else UNKNOWN,
+        # Document-level Rule 10b5-1 checkbox -- see module docstring for
+        # the honest uncertainty about the real SEC element name. None
+        # (UNKNOWN) whenever absent, never a guessed False.
+        "ten_b5_1_checkbox": _read_checkbox(root, _DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS),
+        "ten_b5_1_plan_adoption_date": _extract_plan_adoption_date(remarks, footnotes),
+        # A 4/A's own remarks naming a prior accession -- a textual clue
+        # only, never proof of relatedness on its own (Phase 3E.1
+        # requirement 3; see research/form4_acquisition_adapter.py's
+        # reconciliation logic for how this is actually used).
+        "remarks_referenced_accession": extract_referenced_accession(remarks),
     }
 
 
@@ -309,7 +412,7 @@ def _transaction_claim(document_type: str, issuer_name: str, kind: str, t: dict[
         f"transaction_price_per_share={t['transaction_price_per_share']}, "
         f"shares_owned_following_transaction={t['shares_owned_following_transaction']}, "
         f"direct_or_indirect_ownership={t['direct_or_indirect_ownership']}, "
-        f"is_10b5_1_plan={t['is_10b5_1_plan']}"
+        f"is_10b5_1_plan_footnote_fallback={t['is_10b5_1_plan_footnote_fallback']}"
     )
 
 
@@ -375,6 +478,7 @@ __all__ = [
     "VALID_FORM4_DOCUMENT_TYPES",
     "XmlShapeError",
     "check_ownership_xml_shape",
+    "extract_referenced_accession",
     "parse_ownership_document",
     "raw_facts_from_form4",
 ]

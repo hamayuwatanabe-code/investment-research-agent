@@ -210,6 +210,22 @@ class EvidenceIntegrityAgent(Agent):
             return EvidenceClass.UNVERIFIED_CLAIM
         if fact.category == FactCategory.MICROSTRUCTURE:
             return EvidenceClass.MARKET_INFERENCE
+        if fact.category == FactCategory.INSIDER:
+            # Phase 3E.1 finding: the tier==TIER_1 branch below assumes a
+            # Tier-1-hosted, non-company-claim fact is "the regulator's or
+            # exchange's own statement" -- true for every fact producer
+            # that existed before Form 4 (research/form4_acquisition_
+            # adapter.py), but false here. A Form 4/4-A is the REPORTING
+            # PERSON's own statutory assertion about their own
+            # transaction, filed THROUGH SEC EDGAR -- never SEC's own
+            # statement, and never independently confirmed merely by
+            # being Tier-1 hosted. Routed to COMPANY_CLAIM (the closest
+            # existing "interested party's own unconfirmed assertion"
+            # class, despite its name) rather than a new EvidenceClass
+            # value, which would be a much larger schema change; see
+            # collectors/form4.py's module docstring for the full
+            # evidence-semantics boundary this exists to protect.
+            return EvidenceClass.COMPANY_CLAIM
         if tier == SourceTier.TIER_1:
             # A regulator's or exchange's own statement of its own position.
             return EvidenceClass.VERIFIED_FACT
