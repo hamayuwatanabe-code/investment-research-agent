@@ -521,19 +521,37 @@ def test_omitted_user_agent_resolves_from_ambient_env(monkeypatch):
     assert report.request_count > 0
 
 
-def test_main_env_injection_isolates_from_real_ambient_environment(monkeypatch):
+def test_main_env_injection_isolates_from_real_ambient_environment(monkeypatch, tmp_path):
     """The main()-level analogue: even when the REAL ambient environment
     (via monkeypatch, standing in for a genuinely-set shell variable) has
     a valid IRA_SEC_USER_AGENT, an explicitly injected env={} still
     refuses -- proving main()'s env parameter, not the ambient process
-    environment, is what actually governs resolution when supplied."""
+    environment, is what actually governs resolution when supplied.
+
+    Phase 3E.2.2.1: the ORIGINAL version of this test omitted
+    --marker-path entirely, so it fell through to main()'s real default
+    (data/live_smoke/form4/LAST_RUN.json). On a machine where a genuine
+    prior Live Smoke run had already left that marker on disk, main()'s
+    marker guard -- which runs BEFORE the user-agent gate, and is
+    correct, unchanged production ordering -- returned exit code 2
+    (blocked by an existing marker) instead of 1 (refused for a missing
+    user agent), because the run never reached the user-agent check at
+    all. That is a test filesystem-isolation bug, not a production bug:
+    fixed by pointing --marker-path at a fresh tmp_path, exactly like
+    every other main() test in this file already does, never by
+    reordering main()'s own checks or reaching for --force-rerun (which
+    would exercise a completely different code path than the one this
+    test means to prove)."""
     monkeypatch.setenv("IRA_SEC_USER_AGENT", _AMBIENT_VALID_AGENT)
+    marker_path = tmp_path / "LAST_RUN.json"
     poison_factory = _PoisonHttpClientFactory()
     exit_code = live_smoke.main(
-        ["--issuer-cik", str(fx.ISSUER_CIK_INT)], env={}, http_client_factory=poison_factory,
+        ["--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(marker_path)],
+        env={}, http_client_factory=poison_factory,
     )
     assert exit_code == 1
     assert poison_factory.called is False
+    assert not marker_path.is_file()
 
 
 def test_main_omitted_env_resolves_from_real_ambient_ira_sec_user_agent(monkeypatch, tmp_path):
