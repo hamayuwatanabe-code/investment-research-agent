@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000003</PMID>
+<Article PubModel="Print">
+<Journal>
+<Title>Fictional Letters in Medicine</Title>
+<ISOAbbreviation>Fict Lett Med</ISOAbbreviation>
+<JournalIssue><Volume>2</Volume><Issue>4</Issue><PubDate><Year>2023</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional letter to the editor with no abstract</ArticleTitle>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Fictional</LastName><ForeName>Sam</ForeName><Initials>S</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016422">Letter</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000003</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

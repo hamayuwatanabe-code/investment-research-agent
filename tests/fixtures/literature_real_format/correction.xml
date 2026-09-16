@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000009</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Corrections</Title>
+<ISOAbbreviation>Fict J Correct</ISOAbbreviation>
+<JournalIssue><Volume>2</Volume><Issue>2</Issue><PubDate><Year>2024</Year><Month>Nov</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional article that was later corrected</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text for the original (uncorrected) fictional article.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Correctable</LastName><ForeName>Cory</ForeName><Initials>C</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000009</ArticleId>
+</ArticleIdList>
+<CommentsCorrectionsList>
+<CommentsCorrections RefType="CorrectionIn">
+<RefSource>Fict J Correct. 2025 Jan;3(1):10</RefSource>
+<PMID>90000019</PMID>
+</CommentsCorrections>
+</CommentsCorrectionsList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

@@ -30,8 +30,9 @@ step chains):
   fetch -> parse fallback chain if the structured attempt does not resolve
   the claim. Registry-status claims only (failed trial, catalyst timing).
 * ``literature_web`` -- peer-reviewed efficacy/safety/reproducibility claims
-  route through Europe PMC/PubMed (``NEW_DIRECT_ADAPTER``, unimplemented but
-  free) first, with the same web-search fallback chain. Kept as a
+  route through Europe PMC/PubMed (``NEW_DIRECT_ADAPTER``; Phase 3F
+  implemented and proven OFFLINE_VERIFIED against a fake HTTP double) first,
+  with the same web-search fallback chain, still DISABLED. Kept as a
   COMPLETELY SEPARATE requirement/target from ``clinicaltrials_web`` --
   Phase 2.5's single-target simplification (ClinicalTrials/PubMed/Web on one
   target) is retired: a ClinicalTrials success never completes a
@@ -445,21 +446,49 @@ def _clinicaltrials_web(index, need_ids, domain, subject_scope, key) -> SourceRo
     return SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=tuple(steps))
 
 
+#: Matches literature_acquisition_adapter.py's own
+#: ``LITERATURE_ADAPTER_ID`` string exactly.
+_LITERATURE_ADAPTER_ID = "pubmed_europepmc"
+
+
 def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     """A COMPLETELY SEPARATE requirement/target family from
     ``clinicaltrials_web`` -- never the same target, never satisfied by a
-    ClinicalTrials.gov success (Phase 2.6 requirement 4)."""
+    ClinicalTrials.gov success (Phase 2.6 requirement 4).
+
+    Phase 3F: switched from ``_structured_or_web_chain`` (a bare FETCH+PARSE
+    direct path, no real LOCATE) to ``_document_chain`` -- PubMed/Europe PMC
+    acquisition genuinely has a distinct LOCATE step (NCBI ESearch,
+    resolving a claimed PMID/NCT-ID/alias search to a concrete PMID list)
+    separate from FETCH (NCBI EFetch of the PubMed XML, or Europe PMC's own
+    fullTextXML endpoint), exactly like the SEC/Form4 archetypes' own
+    LOCATE->FETCH->PARSE shape -- never like ClinicalTrials' single
+    known-NCT-ID structured fetch, which has no comparable discovery step.
+    ``research/literature_acquisition_adapter.py``'s ``PubMedLiteratureAdapter``
+    now exists as code and is proven, in this repository's own test suite,
+    against an injected fake HTTP double and the real-format fixtures in
+    ``tests/fixtures/literature_real_format/`` -- genuinely OFFLINE_VERIFIED,
+    never LIVE_VERIFIED (no real network call was ever made; the web-search
+    LOCATE alternative stays DISABLED, unchanged, exactly as every other
+    archetype's does). Europe PMC's OPEN-ACCESS-full-text-only FETCH is
+    covered by the same adapter/steps; a non-OA article's LOCATE/FETCH still
+    completes (an abstract was genuinely acquired), it merely never reaches
+    ContentKind.FULL_DOCUMENT -- see the adapter's own module docstring.
+    """
     tag = f"{index:03d}a"
     req_id, target_id = f"req_{tag}", f"target_{tag}"
-    steps, required, alt_groups = _structured_or_web_chain(
+    steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
-        direct_adapter="pubmed_europepmc", direct_authority=DocumentAuthority.INDEPENDENT,
-        direct_implementation_status=ImplementationStatus.DECLARED,
+        direct_adapter=_LITERATURE_ADAPTER_ID, direct_authority=DocumentAuthority.PEER_REVIEWED_LITERATURE,
+        direct_locate_completion=StepStatus.URL_RESOLVED,
+        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_LITERATURE_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        parse_adapter_id=_LITERATURE_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"peer-reviewed literature signal for: {key}",
-        required_authorities=(DocumentAuthority.INDEPENDENT,),
+        required_authorities=(DocumentAuthority.PEER_REVIEWED_LITERATURE,),
     )
     target = AcquisitionTarget(
         target_id=target_id, target_kind=TargetKind.LITERATURE_ARTICLE,

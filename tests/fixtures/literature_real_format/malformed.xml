@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000012</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Unclosed journal title
+</Article>
+</PubmedArticle>
+</PubmedArticleSet>

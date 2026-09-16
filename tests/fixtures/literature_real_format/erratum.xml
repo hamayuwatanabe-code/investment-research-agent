@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000010</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Errata</Title>
+<ISOAbbreviation>Fict J Errata</ISOAbbreviation>
+<JournalIssue><Volume>6</Volume><Issue>3</Issue><PubDate><Year>2024</Year><Month>Aug</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional article that later received an erratum</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text for the original fictional article that received an erratum.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Erratic</LastName><ForeName>Erin</ForeName><Initials>E</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000010</ArticleId>
+</ArticleIdList>
+<CommentsCorrectionsList>
+<CommentsCorrections RefType="ErratumIn">
+<RefSource>Fict J Errata. 2024 Sep;6(4):99</RefSource>
+<PMID>90000020</PMID>
+</CommentsCorrections>
+</CommentsCorrectionsList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

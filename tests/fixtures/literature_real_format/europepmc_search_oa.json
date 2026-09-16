@@ -1,0 +1,31 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "request": {
+    "queryString": "ext_id:90000008 AND src:med",
+    "resultType": "lite",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "sort": "",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "90000008",
+        "source": "MED",
+        "pmid": "90000008",
+        "pmcid": "PMC9990008",
+        "doi": "10.9999/fict.2025.00008",
+        "title": "A fictional article carrying PMID, PMCID, and DOI together",
+        "authorString": "Idwright I.",
+        "journalTitle": "Fictional Journal of Full Identifiers",
+        "pubYear": "2025",
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "inPMC": "Y",
+        "license": "cc by"
+      }
+    ]
+  }
+}

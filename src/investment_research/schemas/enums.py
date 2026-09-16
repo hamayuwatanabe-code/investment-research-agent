@@ -43,6 +43,22 @@ class EvidenceClass(StrEnum):
     #: DECISION_GRADE_CLASSES (see below) -- never VERIFIED_FACT and never
     #: promotable to it by anything downstream.
     REPORTING_PERSON_STATUTORY_ASSERTION = "REPORTING_PERSON_STATUTORY_ASSERTION"
+    #: Phase 3F: a claim asserted BY a peer-reviewed publication's own
+    #: authors (a reported result, an endpoint definition, a study-design
+    #: statement) -- distinct from INDEPENDENT_EVIDENCE, which this system's
+    #: existing escalation mapping treats as carrying
+    #: ``independent_confirmation=True``. That is exactly wrong for
+    #: literature: peer review is editorial review of methodology, not
+    #: independent confirmation that a reported result is true, and the
+    #: authors themselves may be sponsor employees or investigators paid by
+    #: the company under study. A paper existing, and even being published
+    #: in a reputable journal, is never itself "efficacy confirmed" or
+    #: "safety confirmed" -- see requirement 6 of the Phase 3F literature
+    #: adapters. Deliberately excluded from DECISION_GRADE_CLASSES: never
+    #: VERIFIED_FACT and never promotable to it by anything downstream.
+    #: Independence of the specific authors/funding/COI is a SEPARATE,
+    #: later-stage assessment this class does not perform or imply.
+    PEER_REVIEWED_PUBLICATION_ASSERTION = "PEER_REVIEWED_PUBLICATION_ASSERTION"
 
 
 #: Evidence classes that may, on their own, support a material investment
@@ -51,6 +67,8 @@ class EvidenceClass(StrEnum):
 #: 3E.4 requirement 11) -- a reporting person's own statutory assertion is
 #: never decision-grade on its own, however primary the venue it was filed
 #: through.
+#: PEER_REVIEWED_PUBLICATION_ASSERTION (Phase 3F) is likewise deliberately
+#: NOT a member: see its own docstring above.
 DECISION_GRADE_CLASSES = frozenset(
     {EvidenceClass.VERIFIED_FACT, EvidenceClass.INDEPENDENT_EVIDENCE}
 )
@@ -180,6 +198,18 @@ class DocumentAuthority(StrEnum):
     #: reporting person's unconfirmed assertion inherit an issuer
     #: statement's evidentiary weight merely because SEC hosts both.
     REPORTING_PERSON_FILING = "REPORTING_PERSON_FILING"
+    #: Phase 3F: a peer-reviewed journal article (PubMed/Europe PMC) --
+    #: authored by the study's investigators, not by the issuer, a
+    #: regulator, or a registry. Kept structurally distinct from
+    #: INDEPENDENT (whose escalation mapping is company_claim=False,
+    #: independent_confirmation=True): a published paper's authors may be
+    #: company employees, paid investigators, or otherwise non-independent
+    #: of the subject under study, and peer review checks methodology, not
+    #: truth. Never conflated with REGISTRY (a ClinicalTrials.gov record is
+    #: the sponsor's own structured entry, not a published paper) or with
+    #: COMPANY_IR (a journal is not the issuer's own investor-relations
+    #: channel merely because a company employee co-authored the paper).
+    PEER_REVIEWED_LITERATURE = "PEER_REVIEWED_LITERATURE"
     UNKNOWN = "UNKNOWN"
 
 

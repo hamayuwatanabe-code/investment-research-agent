@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000006</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Disclosure</Title>
+<ISOAbbreviation>Fict J Disclos</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>1</Issue><PubDate><Year>2025</Year><Month>Apr</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional study with an explicit conflict-of-interest statement</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text; the conflict-of-interest statement is carried in a separate structured field.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Disclosed</LastName><ForeName>Dana</ForeName><Initials>D</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+<CoiStatement>The authors declare that one author is a paid consultant to a fictional sponsor and holds fictional equity.</CoiStatement>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000006</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

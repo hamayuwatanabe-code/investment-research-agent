@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000004</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Multicenter Trials Journal</Title>
+<ISOAbbreviation>Fict Multi Trials J</ISOAbbreviation>
+<JournalIssue><Volume>8</Volume><Issue>2</Issue><PubDate><Year>2025</Year><Month>Mar</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional multicenter study with a collective author group</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text for a multi-author, multi-affiliation study.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Alpha</LastName><ForeName>Ann</ForeName><Initials>A</Initials>
+<AffiliationInfo><Affiliation>Sample Biotech Holdings, Inc., Fictional City</Affiliation></AffiliationInfo>
+</Author>
+<Author ValidYN="Y"><LastName>Beta</LastName><ForeName>Bob</ForeName><Initials>B</Initials>
+<AffiliationInfo><Affiliation>University of Fictional Sciences</Affiliation></AffiliationInfo>
+<AffiliationInfo><Affiliation>Fictional Research Consortium</Affiliation></AffiliationInfo>
+</Author>
+<Author ValidYN="Y"><CollectiveName>Fictional Study Group</CollectiveName></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000004</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

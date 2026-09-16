@@ -155,6 +155,13 @@ class ExecutionContext:
     #: lives here -- see ``form4_acquisition_adapter.py``'s module
     #: docstring).
     form4_references: Mapping[str, Any] = field(default_factory=dict)
+    #: Phase 3F: the same per-target-input pattern, for a PubMed/Europe PMC
+    #: literature target -- a caller driving a known PMID/NCT-ID/alias
+    #: literature fetch populates this before calling ``run()``. Never
+    #: resolved by this module itself (no Web Search, no alias/condition
+    #: guessing lives here -- see ``literature_acquisition_adapter.py``'s
+    #: module docstring).
+    literature_references: Mapping[str, Any] = field(default_factory=dict)
 
     def payload_for(self, step_id: str) -> Mapping[str, Any]:
         return self.payloads.get(step_id, {})
@@ -170,6 +177,9 @@ class ExecutionContext:
 
     def form4_reference_for(self, target_id: str) -> Any:
         return self.form4_references.get(target_id)
+
+    def literature_reference_for(self, target_id: str) -> Any:
+        return self.literature_references.get(target_id)
 
 
 @dataclass
@@ -247,6 +257,7 @@ class AcquisitionExecutor:
         exhibit_selectors: Mapping[str, Any] | None = None,
         study_references: Mapping[str, Any] | None = None,
         form4_references: Mapping[str, Any] | None = None,
+        literature_references: Mapping[str, Any] | None = None,
     ) -> ExecutionReport:
         outcomes: dict[str, StepStatus] = {}
         request_cache: dict[str, StepExecutionResult] = {}
@@ -265,6 +276,7 @@ class AcquisitionExecutor:
                 exhibit_selectors=exhibit_selectors or {},
                 study_references=study_references or {},
                 form4_references=form4_references or {},
+                literature_references=literature_references or {},
             )
             step_results: list[StepExecutionResult] = []
 

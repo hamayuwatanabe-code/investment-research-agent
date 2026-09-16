@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000007</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Registered Trials</Title>
+<ISOAbbreviation>Fict J Reg Trials</ISOAbbreviation>
+<JournalIssue><Volume>9</Volume><Issue>2</Issue><PubDate><Year>2025</Year><Month>May</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional trial registered on a fictional registry</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text for a registered fictional trial.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Registrant</LastName><ForeName>Ray</ForeName><Initials>R</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016448">Randomized Controlled Trial</PublicationType></PublicationTypeList>
+<DataBankList>
+<DataBank>
+<DataBankName>ClinicalTrials.gov</DataBankName>
+<AccessionNumberList><AccessionNumber>NCT09990001</AccessionNumber></AccessionNumberList>
+</DataBank>
+</DataBankList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000007</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

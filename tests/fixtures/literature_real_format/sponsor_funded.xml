@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000005</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Sponsored Research</Title>
+<ISOAbbreviation>Fict J Spons Res</ISOAbbreviation>
+<JournalIssue><Volume>3</Volume><Issue>1</Issue><PubDate><Year>2025</Year><Month>Feb</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional sponsor-funded study of Sample Compound</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract describing a study funded by a fictional sponsor grant.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Grantwright</LastName><ForeName>Gale</ForeName><Initials>G</Initials>
+<AffiliationInfo><Affiliation>Sample Biotech Holdings, Inc.</Affiliation></AffiliationInfo></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+<GrantList CompleteYN="Y">
+<Grant><GrantID>SAMPLE-GRANT-0001</GrantID><Agency>Sample Biotech Holdings, Inc.</Agency><Country>United States</Country></Grant>
+</GrantList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000005</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

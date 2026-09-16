@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000015</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Batch Fetch A</Title>
+<ISOAbbreviation>Fict J Batch A</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>1</Issue><PubDate><Year>2025</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>First fictional article in a batched EFetch response</ArticleTitle>
+<Abstract><AbstractText>Fictional abstract text for the first of two batched articles.</AbstractText></Abstract>
+<AuthorList CompleteYN="Y"><Author ValidYN="Y"><LastName>Batchone</LastName><ForeName>Bea</ForeName><Initials>B</Initials></Author></AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList><ArticleId IdType="pubmed">90000015</ArticleId></ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000016</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Batch Fetch B</Title>
+<ISOAbbreviation>Fict J Batch B</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>2</Issue><PubDate><Year>2025</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>Second fictional article in a batched EFetch response</ArticleTitle>
+<Abstract><AbstractText>Fictional abstract text for the second of two batched articles.</AbstractText></Abstract>
+<AuthorList CompleteYN="Y"><Author ValidYN="Y"><LastName>Batchtwo</LastName><ForeName>Bo</ForeName><Initials>B</Initials></Author></AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList><ArticleId IdType="pubmed">90000016</ArticleId></ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

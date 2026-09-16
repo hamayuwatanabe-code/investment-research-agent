@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000008</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Full Identifiers</Title>
+<ISOAbbreviation>Fict J Full Id</ISOAbbreviation>
+<JournalIssue><Volume>4</Volume><Issue>1</Issue><PubDate><Year>2025</Year><Month>Jul</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional article carrying PMID, PMCID, and DOI together</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text for an article with every identifier populated.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Idwright</LastName><ForeName>Ida</ForeName><Initials>I</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>epublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000008</ArticleId>
+<ArticleId IdType="pmc">PMC9990008</ArticleId>
+<ArticleId IdType="doi">10.9999/fict.2025.00008</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

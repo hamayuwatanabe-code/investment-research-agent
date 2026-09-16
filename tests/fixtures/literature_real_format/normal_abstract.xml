@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000001</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Journal of Fictional Oncology</Title>
+<ISOAbbreviation>J Fict Oncol</ISOAbbreviation>
+<JournalIssue><Volume>12</Volume><Issue>3</Issue><PubDate><Year>2025</Year><Month>Jun</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional single-arm study of Sample Compound in Fictional Syndrome</ArticleTitle>
+<Abstract>
+<AbstractText>This is an unstructured abstract describing a wholly fictional study of a sample compound. No real company, drug, or patient data is described anywhere in this fixture.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y">
+<LastName>Example</LastName><ForeName>Alex</ForeName><Initials>A</Initials>
+<AffiliationInfo><Affiliation>Department of Fictional Medicine, Sample University</Affiliation></AffiliationInfo>
+</Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+<ArticleDate DateType="Electronic"><Year>2025</Year><Month>05</Month><Day>20</Day></ArticleDate>
+</Article>
+<MedlineJournalInfo><Country>United States</Country></MedlineJournalInfo>
+</MedlineCitation>
+<PubmedData>
+<History><PubMedPubDate PubStatus="pubmed"><Year>2025</Year><Month>6</Month><Day>1</Day></PubMedPubDate></History>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000001</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

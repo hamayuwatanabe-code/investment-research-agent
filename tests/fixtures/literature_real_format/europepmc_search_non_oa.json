@@ -1,0 +1,31 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "request": {
+    "queryString": "ext_id:90000001 AND src:med",
+    "resultType": "lite",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "sort": "",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "90000001",
+        "source": "MED",
+        "pmid": "90000001",
+        "pmcid": "",
+        "doi": "",
+        "title": "A fictional single-arm study of Sample Compound in Fictional Syndrome",
+        "authorString": "Example A.",
+        "journalTitle": "Journal of Fictional Oncology",
+        "pubYear": "2025",
+        "isOpenAccess": "N",
+        "inEPMC": "N",
+        "inPMC": "N",
+        "license": ""
+      }
+    ]
+  }
+}

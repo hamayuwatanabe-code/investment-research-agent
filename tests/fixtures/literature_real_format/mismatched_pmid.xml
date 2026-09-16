@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000099</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Mismatches</Title>
+<ISOAbbreviation>Fict J Mismatch</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>1</Issue><PubDate><Year>2025</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional article whose own PMID differs from the one requested</ArticleTitle>
+<Abstract>
+<AbstractText>This fixture's own PMID (90000099) deliberately does not match the PMID a test will request (90000013), to exercise PMID-mismatch handling.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Mismatched</LastName><ForeName>Mia</ForeName><Initials>M</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000099</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

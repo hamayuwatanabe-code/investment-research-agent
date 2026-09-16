@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<article>
+<front>
+<article-meta>
+<title-group><article-title>A fictional article carrying PMID, PMCID, and DOI together</article-title></title-group>
+</article-meta>
+</front>
+<body>
+<sec>
+<title>Introduction</title>
+<p>This is fictional full-text introduction content, genuinely distinct from the abstract text carried in the PubMed XML for the same PMID.</p>
+</sec>
+<sec>
+<title>Methods</title>
+<p>Fictional full-text methods section describing a synthetic study design.</p>
+</sec>
+<sec>
+<title>Results</title>
+<p>Fictional full-text results section, present only because this article is open access in Europe PMC.</p>
+</sec>
+</body>
+<back>
+<ref-list>
+<ref><label>1</label><mixed-citation>A fictional reference, never used by this module's parser.</mixed-citation></ref>
+</ref-list>
+</back>
+</article>

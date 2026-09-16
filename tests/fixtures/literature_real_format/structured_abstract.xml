@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000002</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Clinical Research</Title>
+<ISOAbbreviation>Fict J Clin Res</ISOAbbreviation>
+<JournalIssue><Volume>5</Volume><Issue>1</Issue><PubDate><Year>2025</Year><Month>Jan</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional randomized controlled trial of Sample Compound versus placebo</ArticleTitle>
+<Abstract>
+<AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND">Fictional background text describing an unmet need in a wholly synthetic condition.</AbstractText>
+<AbstractText Label="METHODS" NlmCategory="METHODS">This fictional study was a randomized, double-blind trial. The primary endpoint was change in a fictional composite score at week 24.</AbstractText>
+<AbstractText Label="RESULTS" NlmCategory="RESULTS">The sample-compound arm reported a numerically larger improvement than placebo; the authors describe this as a positive reported result within this fictional abstract.</AbstractText>
+<AbstractText Label="CONCLUSIONS" NlmCategory="CONCLUSIONS">The authors conclude that sample compound warrants further fictional study.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Sample</LastName><ForeName>Jordan</ForeName><Initials>J</Initials>
+<AffiliationInfo><Affiliation>Institute of Fictional Studies</Affiliation></AffiliationInfo></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList>
+<PublicationType UI="D016448">Randomized Controlled Trial</PublicationType>
+<PublicationType UI="D016428">Journal Article</PublicationType>
+</PublicationTypeList>
+<ArticleDate DateType="Electronic"><Year>2024</Year><Month>12</Month><Day>15</Day></ArticleDate>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000002</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

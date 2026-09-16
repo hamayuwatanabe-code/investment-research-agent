@@ -66,6 +66,15 @@ _EVIDENCE_FOR_AUTHORITY: dict[DocumentAuthority, tuple[EvidenceClass, bool, bool
     DocumentAuthority.REPORTING_PERSON_FILING: (
         EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION, False, False,
     ),
+    # Phase 3F: a peer-reviewed publication's own claim about its own study
+    # is never company_claim (its authors are not the issuer) and never
+    # independent_confirmation=True merely because it fetched -- see
+    # EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION's own docstring for
+    # why DocumentAuthority.INDEPENDENT's (False, True) mapping would be
+    # wrong here.
+    DocumentAuthority.PEER_REVIEWED_LITERATURE: (
+        EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION, False, False,
+    ),
     DocumentAuthority.UNKNOWN: (EvidenceClass.UNVERIFIED_CLAIM, False, False),
 }
 

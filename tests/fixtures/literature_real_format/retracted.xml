@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000011</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Fictional Journal of Retractions</Title>
+<ISOAbbreviation>Fict J Retract</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>4</Issue><PubDate><Year>2023</Year><Month>Oct</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional article that was later retracted</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional abstract text describing a fictional positive result. This fixture exists specifically so a retracted article's facts are still generated but never treated as decision-grade.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Retractable</LastName><ForeName>Rex</ForeName><Initials>R</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000011</ArticleId>
+</ArticleIdList>
+<CommentsCorrectionsList>
+<CommentsCorrections RefType="RetractionIn">
+<RefSource>Fict J Retract. 2024 Jan;2(1):1</RefSource>
+<PMID>90000021</PMID>
+</CommentsCorrections>
+</CommentsCorrectionsList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

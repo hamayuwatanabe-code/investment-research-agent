@@ -259,6 +259,20 @@ def validate_fact(fact: Fact, *, facts_only: bool = True) -> None:
             "independent_confirmation=True: a reporting person's own statutory "
             "assertion is never independent confirmation of anything"
         )
+    # Phase 3F requirement 6: a peer-reviewed publication's own claim about
+    # its own study is never independent confirmation of anything, however
+    # reputable the journal -- defense in depth on top of
+    # agents/evidence_integrity.py forcing this False at classification
+    # time and research/escalation.py's own mapping never setting it True.
+    if (
+        fact.evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+        and fact.independent_confirmation
+    ):
+        raise SchemaError(
+            "a PEER_REVIEWED_PUBLICATION_ASSERTION fact cannot have "
+            "independent_confirmation=True: peer review is not independent "
+            "confirmation of a reported result"
+        )
 
 
 def validate_facts(facts: Iterable[Fact], **kwargs: Any) -> None:

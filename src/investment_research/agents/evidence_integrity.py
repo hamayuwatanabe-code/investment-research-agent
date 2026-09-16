@@ -161,6 +161,14 @@ class EvidenceIntegrityAgent(Agent):
             # unconditionally, regardless of what the generic corroboration
             # path computed.
             confirmed, corroborating = False, ()
+        elif evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION:
+            # Phase 3F requirement 6: peer review alone must never set
+            # independent_confirmation=True, including two papers'
+            # coincidentally similar wording "confirming" each other --
+            # independence of authorship/funding is a separate, later-stage
+            # assessment this evidence class does not perform. Forced False
+            # unconditionally, same as the Form 4 branch above.
+            confirmed, corroborating = False, ()
         stale, effective = self._staleness(fact)
         status = self._status(fact, evidence_class, confirmed)
         materiality = self._materiality(fact)
@@ -220,6 +228,24 @@ class EvidenceIntegrityAgent(Agent):
             return EvidenceClass.UNVERIFIED_CLAIM
         if fact.category == FactCategory.MICROSTRUCTURE:
             return EvidenceClass.MARKET_INFERENCE
+        if fact.category == FactCategory.SCIENCE and fact.unit.startswith("literature_"):
+            # Phase 3F: a RawFact built from a PubMed/Europe PMC article
+            # (collectors/literature.py) uses FactCategory.SCIENCE, the same
+            # category many other non-literature producers also use -- so,
+            # unlike FactCategory.INSIDER's near-exclusive use by Form 4,
+            # category alone cannot discriminate "this came from a peer-
+            # reviewed publication" from any other SCIENCE fact. The
+            # ``unit`` field carries that discriminator instead (mirroring
+            # Form4's own convention of differentiating within one shared
+            # category by ``unit``, e.g. ``f"{kind}_transaction"``):
+            # research/literature_acquisition_adapter.py prefixes every
+            # literature RawFact's ``unit`` with ``"literature_"``. A
+            # publication's own claim about its own study is never
+            # independently confirmed merely by being published --
+            # PEER_REVIEWED_PUBLICATION_ASSERTION is excluded from
+            # DECISION_GRADE_CLASSES (schemas/enums.py), so this can never
+            # alone be decision-grade.
+            return EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
         if fact.category == FactCategory.INSIDER:
             # Phase 3E.1 finding, given its own EvidenceClass in Phase
             # 3E.4: the tier==TIER_1 branch below assumes a Tier-1-hosted,
@@ -285,6 +311,11 @@ class EvidenceIntegrityAgent(Agent):
         if evidence_class == EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION:
             # confirmed is always False here (forced in _assess) -- always
             # NOT_VERIFIED, never PARTIALLY_VERIFIED/VERIFIED.
+            return VerifiedStatus.NOT_VERIFIED
+        if evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION:
+            # confirmed is always False here (forced in _assess) -- a
+            # publication's own reported result is never, by this class
+            # alone, VERIFIED or PARTIALLY_VERIFIED (Phase 3F requirement 6).
             return VerifiedStatus.NOT_VERIFIED
         if evidence_class in (EvidenceClass.ANALYST_OPINION, EvidenceClass.UNVERIFIED_CLAIM):
             return VerifiedStatus.INSUFFICIENT_EVIDENCE
