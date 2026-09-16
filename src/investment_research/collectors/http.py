@@ -21,6 +21,19 @@ in an exception message. This has no effect on SEC/ClinicalTrials/Form4
 callers, whose URLs never carry a secret-shaped query parameter to begin
 with -- sanitizing a URL with none is a no-op, so their existing behavior
 and tests are unchanged by this hardening.
+
+Retry semantics and pre-connect redirect validation (Phase 3F.0.4):
+``max_retries`` is the number of retries AFTER the first attempt -- so
+``max_retries=0`` still makes exactly one real request, never zero, and
+``max_retries=N`` makes at most ``N + 1`` attempts in total. This matches
+``research/sec_live_smoke.py``'s ``AllowlistedHttpClient``, which already
+had this semantics; this module previously did not (a range() off-by-one
+made ``max_retries=0`` skip the request entirely -- fixed here). Separately,
+when a caller opts into ``allowed_hosts``, a redirect's scheme/userinfo/host
+is now validated BEFORE urllib ever connects to it -- the previous
+``final_url`` re-check (kept, as defense in depth) only runs AFTER the
+connection to the redirect target has already been made, which is too late
+to prevent it.
 """
 
 from __future__ import annotations
@@ -85,6 +98,104 @@ def _strip_wire_url(text: str, wire_url: str, public_url: str) -> str:
     if wire_url == public_url or wire_url not in text:
         return text
     return text.replace(wire_url, public_url)
+
+
+class RedirectRejectedError(Exception):
+    """Raised by :func:`_validate_redirect_target` when a redirect target
+    fails scheme/userinfo/host validation -- checked BEFORE urllib ever
+    connects to it (Phase 3F.0.4). Carries only a safe, URL-free reason
+    string (host/scheme, never the rejected URL itself), so it is always
+    safe to log or place directly in a ``FetchResult.error``."""
+
+
+class TooManyRedirectsError(Exception):
+    """Raised when a redirect chain exceeds the configured cap -- an
+    explicit, typed limit independent of urllib's own internal one (10), so
+    a redirect loop or an excessive chain surfaces as a clear, catchable
+    failure rather than an opaque ``HTTPError`` (Phase 3F.0.4)."""
+
+
+#: Default cap on redirects followed in one request when a caller opts into
+#: ``allowed_hosts`` -- generous enough for a normal same-host redirect
+#: chain, low enough that a loop fails fast and explicitly rather than
+#: silently riding out urllib's own internal cap of 10.
+DEFAULT_MAX_REDIRECTS = 5
+
+
+def _validate_redirect_target(url: str, allowed_hosts: frozenset[str], *, current_scheme: str) -> None:
+    """Validates a redirect target BEFORE urllib ever opens a connection to
+    it -- a post-hoc check of ``response.geturl()`` is too late, since the
+    connection to the (possibly disallowed) target has already been made by
+    the time a response exists to inspect. Raises
+    :class:`RedirectRejectedError` rather than returning a boolean, so a
+    caller cannot accidentally ignore a rejection.
+
+    ``current_scheme`` is the scheme of the request being redirected FROM
+    (``req.type``, or ``"https"`` if that cannot be determined -- the safe
+    default that never silently skips the downgrade check below). Passed
+    explicitly rather than assumed, so this never breaks a legitimate
+    plain-http redirect chain (e.g. a loopback test server) while still
+    catching a REAL downgrade -- an https request whose redirect points at
+    anything other than https.
+
+    Rejects, in order:
+
+    * a URL carrying userinfo (``user:pass@host``) outright -- rather than
+      trusting any one parser's resolution of a ``host@actually-the-host``
+      style ambiguity, a userinfo component is simply never valid here;
+      none of this module's real callers ever need one.
+    * any scheme other than ``http``/``https`` outright (``file://``,
+      ``ftp://``, ...), regardless of ``current_scheme``.
+    * a redirect FROM ``https`` TO anything other than ``https`` -- this
+      would newly expose a secret query parameter in plaintext, and every
+      real caller (SEC/NCBI/Europe PMC) is https-only, so this is a
+      downgrade, not a legitimate same-scheme redirect.
+    * a host (matched case-insensitively; ``.hostname`` is already
+      lowercased by :mod:`urllib.parse`, lowercased again here for clarity
+      and defense in depth) not present in ``allowed_hosts``.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is not None or parsed.password is not None:
+        raise RedirectRejectedError("refused redirect: URL carries userinfo")
+    if parsed.scheme not in ("http", "https"):
+        raise RedirectRejectedError(f"refused redirect: unsupported scheme {parsed.scheme!r}")
+    if current_scheme == "https" and parsed.scheme != "https":
+        raise RedirectRejectedError(f"refused redirect: downgrade from https to {parsed.scheme!r}")
+    host = (parsed.hostname or "").lower()
+    if host not in allowed_hosts:
+        raise RedirectRejectedError(f"refused redirect to disallowed host {host!r}")
+
+
+class _PreConnectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Validates -- and counts -- a redirect BEFORE urllib follows it.
+    Mirrors ``research/sec_live_smoke.py``'s own
+    ``_AllowlistedRedirectHandler`` (which now shares this same validation
+    function). Used by :class:`HttpClient` only when the caller opts into
+    ``allowed_hosts`` -- ``None`` (the default) never builds one of these,
+    so existing SEC/ClinicalTrials/Form4 callers are unaffected (Phase
+    3F.0.4 requirement 2)."""
+
+    def __init__(self, allowed_hosts: frozenset[str], max_redirects: int) -> None:
+        super().__init__()
+        self._allowed_hosts = allowed_hosts
+        self._max_redirects = max_redirects
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        #: urllib gives no built-in way to thread state across a redirect
+        #: chain, so the count is carried as a dynamic attribute on the
+        #: Request object itself -- redirect_request returns a NEW Request
+        #: each time, and that new object is what gets passed back in on
+        #: the next redirect, so setting it here (below) is what makes the
+        #: count visible on the following call.
+        count = getattr(req, "_ira_redirect_count", 0) + 1
+        if count > self._max_redirects:
+            raise TooManyRedirectsError(f"redirect count exceeded cap of {self._max_redirects}")
+        current_scheme = getattr(req, "type", None) or "https"
+        _validate_redirect_target(newurl, self._allowed_hosts, current_scheme=current_scheme)
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req._ira_redirect_count = count
+        return new_req
 
 
 @dataclass
@@ -184,6 +295,7 @@ class HttpClient:
         cache_ttl_seconds: int = 6 * 3600,
         offline: bool = False,
         allowed_hosts: frozenset[str] | None = None,
+        max_redirects: int = DEFAULT_MAX_REDIRECTS,
     ) -> None:
         self.user_agent = user_agent
         self.timeout = timeout
@@ -192,13 +304,23 @@ class HttpClient:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.cache_ttl = cache_ttl_seconds
         self.offline = offline
-        #: Phase 3F.0.3 requirement 4: when set, the FINAL response URL
-        #: (after any redirect) is re-checked against this set; a redirect
-        #: that leaves it is treated as BLOCKED, never silently accepted.
-        #: ``None`` (the default) preserves this class's pre-existing
-        #: behavior exactly for every current caller (SEC/ClinicalTrials/
-        #: Form4 never pass this) -- opt-in only.
+        #: Phase 3F.0.3 requirement 4 / Phase 3F.0.4 requirement 2: when
+        #: set, (a) the initial request's host and (b) every redirect's
+        #: scheme/userinfo/host are validated -- the redirect check BEFORE
+        #: urllib ever connects to it, not merely after -- and the FINAL
+        #: response URL is re-checked too, as defense in depth. ``None``
+        #: (the default) preserves this class's pre-existing behavior
+        #: exactly for every current caller (SEC/ClinicalTrials/Form4 never
+        #: pass this) -- opt-in only.
         self.allowed_hosts = allowed_hosts
+        self.max_redirects = max_redirects
+        #: Built only when allowed_hosts is set -- None means "use the
+        #: default urllib opener", i.e. exactly the pre-3F.0.4 behavior.
+        self._redirect_opener = (
+            urllib.request.build_opener(_PreConnectRedirectHandler(self.allowed_hosts, self.max_redirects))
+            if self.allowed_hosts is not None
+            else None
+        )
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.fetch_log: list[FetchResult] = []
@@ -268,6 +390,19 @@ class HttpClient:
             self.fetch_log.append(result)
             return result
 
+        if self.allowed_hosts is not None:
+            # Phase 3F.0.4: the INITIAL host is checked before ever
+            # attempting a connection too, not just a redirect target --
+            # mirrors research/sec_live_smoke.py's AllowlistedHttpClient.
+            initial_host = (urllib.parse.urlparse(wire_url).hostname or "").lower()
+            if initial_host not in self.allowed_hosts:
+                result = FetchResult(
+                    url=public_url, outcome=FetchOutcome.BLOCKED,
+                    error=f"refused disallowed host {initial_host!r}",
+                )
+                self.fetch_log.append(result)
+                return result
+
         request_headers = {
             "User-Agent": self.user_agent,
             "Accept": accept,
@@ -275,25 +410,34 @@ class HttpClient:
         }
         request_headers.update(dict(headers or {}))
 
+        # Phase 3F.0.4: max_retries is the number of retries AFTER the
+        # first attempt, so max_attempts is always >= 1 -- max_retries=0
+        # still makes exactly one real request (previously it made zero:
+        # range(1, 0 + 1) never executed, a latent off-by-one this phase
+        # fixes). See the module docstring's "Retry semantics" section.
+        max_attempts = self.max_retries + 1
+        open_ = self._redirect_opener.open if self._redirect_opener is not None else urllib.request.urlopen
+
         last_error = ""
         status: int | None = None
         outcome = FetchOutcome.ERROR
+        attempts_made = 0
 
-        for attempt in range(1, self.max_retries + 1):
+        for attempt in range(1, max_attempts + 1):
+            attempts_made = attempt
             self.limiter.wait()
             request = urllib.request.Request(wire_url, headers=request_headers, method="GET")
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    # Phase 3F.0.3 requirement 4: the URL actually reached,
-                    # after any redirect -- re-validated against
-                    # allowed_hosts (when the caller opted in) before the
-                    # body is ever accepted, mirroring
-                    # research/sec_live_smoke.py's AllowlistedHttpClient
-                    # defense-in-depth check.
+                with open_(request, timeout=self.timeout) as response:
+                    # Defense in depth: the redirect target was already
+                    # validated BEFORE it was connected to (via
+                    # _PreConnectRedirectHandler, when allowed_hosts is
+                    # set) -- this re-checks the URL the response actually
+                    # came from, catching anything that path might miss.
                     final_wire_url = response.geturl()
                     final_public_url = _sanitize_url(final_wire_url)
                     if self.allowed_hosts is not None:
-                        final_host = urllib.parse.urlparse(final_wire_url).hostname
+                        final_host = (urllib.parse.urlparse(final_wire_url).hostname or "").lower()
                         if final_host not in self.allowed_hosts:
                             result = FetchResult(
                                 url=public_url, outcome=FetchOutcome.BLOCKED,
@@ -322,6 +466,12 @@ class HttpClient:
                         self._write_cache(wire_url, body)
                     self.fetch_log.append(result)
                     return result
+            except (RedirectRejectedError, TooManyRedirectsError) as exc:
+                # A redirect policy refusal -- never retried, never routed
+                # around (Phase 3F.0.4 requirement 2).
+                last_error = str(exc)
+                outcome = FetchOutcome.BLOCKED
+                break
             except urllib.error.HTTPError as exc:
                 status = int(exc.code)
                 last_error = _strip_wire_url(f"HTTP {status}: {exc.reason}", wire_url, public_url)
@@ -352,14 +502,14 @@ class HttpClient:
                 else:
                     outcome = FetchOutcome.ERROR
 
-            if attempt < self.max_retries:
+            if attempt < max_attempts:
                 backoff = 2.0 ** (attempt - 1)
                 log.info(
                     "retrying %s in %.1fs (attempt %d/%d): %s",
                     public_url,
                     backoff,
                     attempt,
-                    self.max_retries,
+                    max_attempts,
                     last_error,
                 )
                 time.sleep(backoff)
@@ -368,9 +518,7 @@ class HttpClient:
             url=public_url,
             outcome=outcome,
             status=status,
-            attempts=self.max_retries
-            if outcome not in (FetchOutcome.BLOCKED, FetchOutcome.NOT_FOUND)
-            else 1,
+            attempts=attempts_made,
             error=last_error,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )

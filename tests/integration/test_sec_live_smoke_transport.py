@@ -13,9 +13,11 @@ prove.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -72,12 +74,118 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/ratelimited":
+            self.send_response(429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/flaky-error":
+            # Fails with a retryable 500 twice, then succeeds -- keyed on
+            # the FULL request line (query string included), so different
+            # tests can get independent counters via a distinct query.
+            counts = Handler.state.setdefault("flaky_counts", {})
+            counts[self.path] = counts.get(self.path, 0) + 1
+            if counts[self.path] < 3:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        elif path == "/slow":
+            time.sleep(1.0)
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                body = b'{"late": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
+    state: dict = {}
     last_raw_path: str = ""
+
+
+class AllowedHandler(BaseHTTPRequestHandler):
+    """A SEPARATE server from Handler -- Phase 3F.0.4's two-loopback-server
+    redirect tests need an independently-countable "disallowed" server, not
+    just a different hostname string pointing at the same socket."""
+
+    disallowed_port: int = 0
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/ok":
+            self._send(200, b'{"ok": true}')
+        elif path == "/redirect-to-disallowed-server":
+            self._redirect(
+                f"http://localhost:{AllowedHandler.disallowed_port}/ok"
+                "?api_key=SHOULD-NOT-REACH-DISALLOWED"
+            )
+        elif path == "/redirect-loop-a":
+            self._redirect("/redirect-loop-b")
+        elif path == "/redirect-loop-b":
+            self._redirect("/redirect-loop-a")
+        elif path == "/redirect-two-hop":
+            self._redirect("/redirect-to-ok")
+        elif path == "/redirect-to-ok":
+            self._redirect("/ok")
+        else:
+            self._send(404, b"")
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class DisallowedHandler(BaseHTTPRequestHandler):
+    state: dict = {}
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        DisallowedHandler.state["hits"] = DisallowedHandler.state.get("hits", 0) + 1
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def two_servers():
+    DisallowedHandler.state = {}
+    disallowed = ThreadingHTTPServer(("127.0.0.1", 0), DisallowedHandler)
+    threading.Thread(target=disallowed.serve_forever, daemon=True).start()
+
+    AllowedHandler.disallowed_port = disallowed.server_port
+    allowed = ThreadingHTTPServer(("127.0.0.1", 0), AllowedHandler)
+    threading.Thread(target=allowed.serve_forever, daemon=True).start()
+
+    yield f"http://127.0.0.1:{allowed.server_port}"
+    allowed.shutdown()
+    disallowed.shutdown()
 
 
 @pytest.fixture(scope="module")
@@ -284,6 +392,105 @@ def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path
     assert secret not in manifest.requested_url
     assert secret not in manifest.final_url
     assert "x=1" in manifest.requested_url
+
+
+# --- Phase 3F.0.4: retry semantics -- max_retries is retries AFTER the
+# first attempt, audited to already match this (unlike HttpClient before
+# this phase's fix) -- these tests prove the counts, not change behavior. --
+
+def test_allowlisted_max_retries_zero_makes_exactly_one_attempt_on_success(base_url):
+    client = _client(max_retries=0)
+    result = client.get(f"{base_url}/ok")
+    assert result.ok
+    assert result.attempts == 1
+
+
+def test_allowlisted_max_retries_zero_makes_exactly_one_attempt_on_404(base_url):
+    client = _client(max_retries=0)
+    result = client.get(f"{base_url}/does-not-exist")
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.attempts == 1
+
+
+def test_allowlisted_429_is_never_retried_regardless_of_max_retries(base_url):
+    """Documented, audited, and deliberately UNCHANGED asymmetry with
+    HttpClient (which DOES retry a 429): AllowlistedHttpClient's
+    _get_with_retry only retries an ERROR/TIMEOUT outcome -- RATE_LIMITED
+    returns immediately, at any max_retries. The COUNT semantics
+    (max_retries=N -> at most N+1 attempts) already matched before this
+    phase; this asymmetry is about WHICH outcomes are retryable, which
+    Phase 3F.0.4 does not unify (see the final report)."""
+    client = _client(max_retries=3)
+    result = client.get(f"{base_url}/ratelimited")
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert result.attempts == 1
+
+
+def test_allowlisted_max_retries_zero_makes_exactly_one_attempt_on_5xx(base_url):
+    client = _client(max_retries=0)
+    result = client.get(f"{base_url}/flaky-error?t=zero-retry")
+    assert result.outcome is FetchOutcome.ERROR
+    assert result.attempts == 1
+
+
+def test_allowlisted_max_retries_two_succeeds_within_budget_on_5xx(base_url):
+    """/flaky-error fails twice then succeeds -- exactly matches a
+    max_retries=2 budget (1 initial + 2 retries = 3 attempts)."""
+    client = _client(max_retries=2)
+    result = client.get(f"{base_url}/flaky-error?t=two-retry")
+    assert result.ok
+    assert result.attempts == 3
+
+
+def test_allowlisted_max_retries_zero_makes_exactly_one_attempt_on_timeout(base_url):
+    client = _client(max_retries=0, timeout=0.2)
+    result = client.get(f"{base_url}/slow")
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert result.attempts == 1
+
+
+def test_allowlisted_max_retries_one_timeout_makes_two_attempts(base_url):
+    client = _client(max_retries=1, timeout=0.2)
+    result = client.get(f"{base_url}/slow")
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert result.attempts == 2
+
+
+def test_allowlisted_max_retries_zero_makes_exactly_one_attempt_on_connection_error():
+    client = _client(max_retries=0, timeout=0.5)
+    result = client.get("http://127.0.0.1:1/x")
+    assert result.attempts == 1
+
+
+# --- Phase 3F.0.4: redirect allowlist enforced BEFORE connecting, proven
+# against two INDEPENDENT loopback servers ----------------------------------
+
+def test_redirect_to_a_second_disallowed_server_makes_zero_requests_to_it(two_servers):
+    client = _client()
+    result = client.get(f"{two_servers}/redirect-to-disallowed-server")
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert DisallowedHandler.state.get("hits", 0) == 0
+    assert "SHOULD-NOT-REACH-DISALLOWED" not in result.error
+    assert "SHOULD-NOT-REACH-DISALLOWED" not in result.url
+
+
+def test_redirect_within_the_allowlisted_host_still_succeeds(two_servers):
+    client = _client()
+    result = client.get(f"{two_servers}/redirect-to-ok")
+    assert result.ok
+
+
+def test_multi_hop_redirect_within_the_allowlist_succeeds(two_servers):
+    client = _client(max_redirects=5)
+    result = client.get(f"{two_servers}/redirect-two-hop")
+    assert result.ok
+
+
+def test_redirect_loop_is_rejected_as_blocked_once_the_cap_is_exceeded(two_servers):
+    client = _client(max_redirects=4)
+    result = client.get(f"{two_servers}/redirect-loop-a")
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert "redirect count exceeded" in result.error
 
 
 def test_capture_manifest_read_manifest_missing_for_a_pre_manifest_capture(base_url, tmp_path):

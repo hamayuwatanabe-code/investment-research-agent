@@ -10,6 +10,7 @@ import contextlib
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -96,6 +97,88 @@ def server():
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_port}"
     httpd.shutdown()
+
+
+# --- Phase 3F.0.4: two INDEPENDENT loopback servers, so "the disallowed
+# server received zero requests" is a real, separately-verifiable claim --
+# not just a different hostname string pointing at the same socket. --------
+class AllowedHandler(BaseHTTPRequestHandler):
+    state: dict = {}
+    #: Set by the two_servers fixture once the disallowed server's real
+    #: port is known.
+    disallowed_port: int = 0
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        counts = AllowedHandler.state.setdefault("counts", {})
+        counts[path] = counts.get(path, 0) + 1
+        if path == "/ok":
+            self._send(200, b'{"ok": true}')
+        elif path == "/redirect-to-disallowed-server":
+            # A DIFFERENT hostname string ("localhost") pointing at a
+            # SEPARATE server/port -- and the target's own query carries a
+            # secret, proving it never reaches even that far.
+            self._redirect(f"http://localhost:{AllowedHandler.disallowed_port}/ok?api_key=SHOULD-NOT-REACH-DISALLOWED")
+        elif path == "/redirect-loop-a":
+            self._redirect("/redirect-loop-b")
+        elif path == "/redirect-loop-b":
+            self._redirect("/redirect-loop-a")
+        elif path == "/redirect-two-hop":
+            self._redirect("/redirect-to-ok")
+        elif path == "/redirect-to-ok":
+            self._redirect("/ok")
+        else:
+            self._send(404, b"")
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class DisallowedHandler(BaseHTTPRequestHandler):
+    state: dict = {}
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        DisallowedHandler.state["hits"] = DisallowedHandler.state.get("hits", 0) + 1
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def two_servers():
+    """A fresh pair of servers per test -- DisallowedHandler.state must
+    start at zero hits for each test's own assertion to mean anything."""
+    DisallowedHandler.state = {}
+    disallowed = ThreadingHTTPServer(("127.0.0.1", 0), DisallowedHandler)
+    threading.Thread(target=disallowed.serve_forever, daemon=True).start()
+
+    AllowedHandler.state = {}
+    AllowedHandler.disallowed_port = disallowed.server_port
+    allowed = ThreadingHTTPServer(("127.0.0.1", 0), AllowedHandler)
+    threading.Thread(target=allowed.serve_forever, daemon=True).start()
+
+    yield f"http://127.0.0.1:{allowed.server_port}"
+    allowed.shutdown()
+    disallowed.shutdown()
 
 
 @pytest.fixture
@@ -296,7 +379,7 @@ def test_allowed_hosts_blocks_redirect_to_a_different_host(server):
     )
     result = client.get(f"{server}/redirect-to-other-host", use_cache=False)
     assert result.outcome is FetchOutcome.BLOCKED
-    assert "not allowlisted" in result.error
+    assert "disallowed host" in result.error
 
 
 def test_allowed_hosts_none_by_default_does_not_change_existing_behavior(server, client):
@@ -307,3 +390,201 @@ def test_allowed_hosts_none_by_default_does_not_change_existing_behavior(server,
     assert client.allowed_hosts is None
     result = client.get(f"{server}/redirect-to-ok", use_cache=False)
     assert result.ok
+
+
+# --- Phase 3F.0.4: retry semantics -- max_retries counts RETRIES AFTER the
+# first attempt, so max_retries=0 still makes exactly one real request. ----
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_success(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/ok", use_cache=False)
+    assert result.ok
+    assert result.attempts == 1
+    assert Handler.state["counts"]["/ok"] == 1
+
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_404(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/notfound", use_cache=False)
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.attempts == 1
+    assert Handler.state["counts"]["/notfound"] == 1
+
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_429(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/ratelimited", use_cache=False)
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert result.attempts == 1
+    assert Handler.state["counts"]["/ratelimited"] == 1
+
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_5xx(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/flaky", use_cache=False)
+    assert result.outcome is FetchOutcome.ERROR
+    assert result.attempts == 1
+    assert Handler.state["counts"]["/flaky"] == 1
+
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_timeout(server):
+    client = HttpClient(timeout=0.2, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/slow", use_cache=False)
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert result.attempts == 1
+
+
+def test_max_retries_zero_makes_exactly_one_attempt_on_connection_error():
+    client = HttpClient(timeout=1.0, max_retries=0, rate_limit_rps=0, cache_dir=None)
+    result = client.get("http://127.0.0.1:1/x", use_cache=False)
+    assert result.outcome in (FetchOutcome.ERROR, FetchOutcome.TIMEOUT)
+    assert result.attempts == 1
+
+
+def test_max_retries_one_makes_at_most_two_attempts(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=1, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/ratelimited", use_cache=False)
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert result.attempts == 2
+    assert Handler.state["counts"]["/ratelimited"] == 2
+
+
+def test_max_retries_two_makes_at_most_three_attempts(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=2, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/ratelimited", use_cache=False)
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert result.attempts == 3
+    assert Handler.state["counts"]["/ratelimited"] == 3
+
+
+def test_max_retries_two_succeeds_within_budget_on_5xx(server):
+    """/flaky fails twice then succeeds -- exactly matches a max_retries=2
+    budget (1 initial + 2 retries = 3 attempts, succeeding on the 3rd)."""
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=2, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/flaky", use_cache=False)
+    assert result.ok
+    assert result.attempts == 3
+    assert Handler.state["counts"]["/flaky"] == 3
+
+
+def test_404_never_retries_regardless_of_max_retries(server):
+    Handler.state["counts"] = {}
+    client = HttpClient(timeout=0.8, max_retries=2, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/notfound", use_cache=False)
+    assert result.outcome is FetchOutcome.NOT_FOUND
+    assert result.attempts == 1
+    assert Handler.state["counts"]["/notfound"] == 1
+
+
+def test_max_retries_one_timeout_makes_two_attempts(server):
+    client = HttpClient(timeout=0.2, max_retries=1, rate_limit_rps=0, cache_dir=None)
+    result = client.get(f"{server}/slow", use_cache=False)
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert result.attempts == 2
+
+
+def test_max_retries_one_connection_error_makes_two_attempts():
+    client = HttpClient(timeout=0.5, max_retries=1, rate_limit_rps=0, cache_dir=None)
+    result = client.get("http://127.0.0.1:1/x", use_cache=False)
+    assert result.attempts == 2
+
+
+# --- Phase 3F.0.4: redirect allowlist enforced BEFORE connecting, proven
+# against two INDEPENDENT loopback servers ----------------------------------
+
+def test_redirect_to_a_second_disallowed_server_makes_zero_requests_to_it(two_servers):
+    client = HttpClient(
+        timeout=1.0, max_retries=0, rate_limit_rps=0, cache_dir=None,
+        allowed_hosts=frozenset({"127.0.0.1"}),
+    )
+    result = client.get(f"{two_servers}/redirect-to-disallowed-server", use_cache=False)
+    assert result.outcome is FetchOutcome.BLOCKED
+    # The whole point: the disallowed server's own hit counter is zero --
+    # not "we got a response and then discarded it", but "we never
+    # connected at all" (a post-hoc response.geturl() check could only ever
+    # prove the former).
+    assert DisallowedHandler.state.get("hits", 0) == 0
+    assert "SHOULD-NOT-REACH-DISALLOWED" not in result.error
+    assert "SHOULD-NOT-REACH-DISALLOWED" not in result.url
+    assert "SHOULD-NOT-REACH-DISALLOWED" not in result.final_url
+
+
+def test_redirect_within_the_allowlisted_host_still_succeeds(two_servers):
+    client = HttpClient(
+        timeout=1.0, max_retries=0, rate_limit_rps=0, cache_dir=None,
+        allowed_hosts=frozenset({"127.0.0.1"}),
+    )
+    result = client.get(f"{two_servers}/redirect-to-ok", use_cache=False)
+    assert result.ok
+    assert result.final_url == f"{two_servers}/ok"
+
+
+def test_multi_hop_redirect_within_the_allowlist_succeeds(two_servers):
+    client = HttpClient(
+        timeout=1.0, max_retries=0, rate_limit_rps=0, cache_dir=None,
+        allowed_hosts=frozenset({"127.0.0.1"}), max_redirects=5,
+    )
+    result = client.get(f"{two_servers}/redirect-two-hop", use_cache=False)
+    assert result.ok
+    assert result.final_url == f"{two_servers}/ok"
+
+
+def test_redirect_loop_is_rejected_as_blocked_once_the_cap_is_exceeded(two_servers):
+    client = HttpClient(
+        timeout=1.0, max_retries=0, rate_limit_rps=0, cache_dir=None,
+        allowed_hosts=frozenset({"127.0.0.1"}), max_redirects=4,
+    )
+    result = client.get(f"{two_servers}/redirect-loop-a", use_cache=False)
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert "redirect count exceeded" in result.error
+
+
+def test_redirect_scheme_downgrade_is_rejected():
+    """https -> http is a downgrade (would expose a secret query param in
+    plaintext) -- checked directly against the validator, since a real TLS
+    loopback server is out of scope for this test file; the host/userinfo/
+    loop checks above are already proven end-to-end over real sockets."""
+    from investment_research.collectors.http import RedirectRejectedError, _validate_redirect_target
+
+    with pytest.raises(RedirectRejectedError, match="downgrade"):
+        _validate_redirect_target(
+            "http://127.0.0.1/ok", frozenset({"127.0.0.1"}), current_scheme="https",
+        )
+    # A same-scheme (http -> http) redirect is NOT a downgrade.
+    _validate_redirect_target("http://127.0.0.1/ok", frozenset({"127.0.0.1"}), current_scheme="http")
+
+
+def test_redirect_with_userinfo_is_rejected():
+    from investment_research.collectors.http import RedirectRejectedError, _validate_redirect_target
+
+    with pytest.raises(RedirectRejectedError, match="userinfo"):
+        _validate_redirect_target(
+            "https://127.0.0.1@evil.example/ok", frozenset({"127.0.0.1", "evil.example"}),
+            current_scheme="https",
+        )
+
+
+def test_redirect_host_spoofing_via_userinfo_resolves_to_the_real_host():
+    """https://127.0.0.1@evil.example/ -- a classic userinfo confusion
+    attack -- must be evaluated against the REAL host (evil.example), never
+    the text before the '@'. Rejected outright by the userinfo check above
+    regardless, but this proves urlsplit().hostname itself is not fooled
+    even if that check were ever removed."""
+    parsed = urllib.parse.urlsplit("https://127.0.0.1@evil.example/ok")
+    assert parsed.hostname == "evil.example"
+
+
+def test_redirect_unsupported_scheme_is_rejected():
+    from investment_research.collectors.http import RedirectRejectedError, _validate_redirect_target
+
+    with pytest.raises(RedirectRejectedError, match="scheme"):
+        _validate_redirect_target(
+            "file:///etc/passwd", frozenset({"127.0.0.1"}), current_scheme="http",
+        )

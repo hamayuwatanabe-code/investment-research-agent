@@ -61,7 +61,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..collectors.http import FetchResult, RateLimiter, _sanitize_url, _strip_wire_url
+from ..collectors.http import (
+    DEFAULT_MAX_REDIRECTS,
+    FetchResult,
+    RateLimiter,
+    RedirectRejectedError,
+    TooManyRedirectsError,
+    _sanitize_url,
+    _strip_wire_url,
+    _validate_redirect_target,
+)
 from ..collectors.sec_edgar import FILING_INDEX_URL, SUBMISSIONS_URL
 from ..logging_setup import SecretRedactingFilter
 from ..schemas.enums import UNKNOWN, FetchOutcome, ResearchDomain
@@ -207,19 +216,40 @@ def _safe(text: str, secrets: list[str]) -> str:
 
 
 class _AllowlistedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuses to follow a redirect whose target host is not in
-    ``allowed_hosts`` -- checked BEFORE the redirect is ever taken (Phase 3C
-    requirement 11)."""
+    """Refuses to follow a redirect whose target fails scheme/userinfo/host
+    validation, or that would push the chain past ``max_redirects`` --
+    checked BEFORE the redirect is ever taken (Phase 3C requirement 11;
+    scheme/userinfo/redirect-count checks added Phase 3F.0.4, via the same
+    ``collectors.http._validate_redirect_target`` that ``HttpClient``'s own
+    pre-connect redirect handler now uses -- one validation rule, shared,
+    rather than two independently-maintained copies)."""
 
-    def __init__(self, allowed_hosts: frozenset[str]) -> None:
+    def __init__(self, allowed_hosts: frozenset[str], max_redirects: int = DEFAULT_MAX_REDIRECTS) -> None:
         super().__init__()
         self._allowed_hosts = allowed_hosts
+        self._max_redirects = max_redirects
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        host = urllib.parse.urlparse(newurl).hostname
-        if host not in self._allowed_hosts:
-            raise HostAllowlistError(f"refused redirect to disallowed host: {host!r}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        #: See collectors.http._PreConnectRedirectHandler's own comment --
+        #: redirect_request returns a NEW Request each time, and that new
+        #: object is what's passed back in on the next redirect, so setting
+        #: this attribute on it (below) is what makes the count visible on
+        #: the following call.
+        count = getattr(req, "_ira_redirect_count", 0) + 1
+        if count > self._max_redirects:
+            raise TooManyRedirectsError(f"redirect count exceeded cap of {self._max_redirects}")
+        current_scheme = getattr(req, "type", None) or "https"
+        try:
+            _validate_redirect_target(newurl, self._allowed_hosts, current_scheme=current_scheme)
+        except RedirectRejectedError as exc:
+            # Preserve this module's own established exception type for
+            # every existing catch site and test -- HostAllowlistError,
+            # never the shared module's RedirectRejectedError directly.
+            raise HostAllowlistError(str(exc)) from exc
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req._ira_redirect_count = count
+        return new_req
 
 
 @dataclass
@@ -238,6 +268,9 @@ class AllowlistedHttpClient:
     rate_limit_rps: float = DEFAULT_RATE_LIMIT_RPS
     max_retries: int = MAX_RETRIES
     max_requests: int = MAX_LIVE_GETS
+    #: Explicit cap on redirects followed in one request -- Phase 3F.0.4
+    #: requirement 2; passed straight to ``_AllowlistedRedirectHandler``.
+    max_redirects: int = DEFAULT_MAX_REDIRECTS
     out_dir: Path | None = None
     #: Which live-smoke module this client belongs to ("sec" /
     #: "clinicaltrials") -- recorded in each capture's manifest so a shared
@@ -255,7 +288,9 @@ class AllowlistedHttpClient:
         self._limiter = RateLimiter(self.rate_limit_rps)
         self._cache: dict[str, FetchResult] = {}
         self._requests_made = 0
-        self._opener = urllib.request.build_opener(_AllowlistedRedirectHandler(self.allowed_hosts))
+        self._opener = urllib.request.build_opener(
+            _AllowlistedRedirectHandler(self.allowed_hosts, self.max_redirects)
+        )
         #: requested URL -> the URL the response actually came from (after
         #: any allowed redirect) -- FetchResult itself carries no field for
         #: this (it is shared with production collectors.http.FetchResult),
@@ -368,6 +403,8 @@ class AllowlistedHttpClient:
                 return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
             return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
         except HostAllowlistError as exc:
+            return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
+        except TooManyRedirectsError as exc:
             return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
         except TimeoutError:
             return FetchResult(url=public_url, outcome=FetchOutcome.TIMEOUT, attempts=attempt, error="timed out")
