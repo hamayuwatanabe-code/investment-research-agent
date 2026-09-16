@@ -76,22 +76,26 @@ module does NOT do:
   requirement 2) -- see that field's own docstring below for why, and for
   the honest uncertainty about the real SEC schema element name.
 
-Rule 10b5-1 checkbox (Phase 3E.1 requirement 2): SEC's Insider Trading
-Arrangements rule (Release No. 33-11138, effective 2023) added a checkbox
-indicating whether a transaction was made under a Rule 10b5-1(c) trading
-arrangement. **The exact XML element name could not be confirmed against
-SEC's own XSD or a real captured filing from this offline session** (no
-live network access was available to verify it) -- this module checks a
-small set of plausible candidate element names
-(``_DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS``), at the document level as
-instructed, and returns ``None`` (UNKNOWN) whenever none of them are
-present, which is the overwhelmingly common case for any fixture/capture
-that does not specifically exercise this field -- an absent checkbox is
-NEVER read as ``False`` (a checkbox that cannot be found is unknown, not
-negative). This is flagged as unresolved/unverified pending a real
-capture; see the Phase 3E.1 report for the full reasoning, including
-schema note this module's own recollection could plausibly be wrong
-about whether the real checkbox is document-level or per-transaction.
+Rule 10b5-1 checkbox (Phase 3E.1 requirement 2, CONFIRMED in Phase 3E.3):
+SEC's Insider Trading Arrangements rule (Release No. 33-11138, effective
+2023) added a checkbox indicating whether a transaction was made under a
+Rule 10b5-1(c) trading arrangement. **``aff10b5One`` is now a CONFIRMED
+real, document-level element name** -- a real Mac Live Smoke run (Phase
+3E.3) against a real issuer observed ``aff10b5One`` as a direct child of
+``ownershipDocument`` in 3 real, normal (non-amendment) Form 4 documents,
+all Capture-Manifest-``VERIFIED`` with zero Evidence Integrity failures,
+with a real ``0`` raw value parsing correctly to ``False``. This
+confirmation covers NORMAL Form 4 only -- it has not been independently
+re-confirmed against a real Form 4/A instance, though the two document
+types share the identical ``ownershipDocument`` schema and there is no
+structural reason to expect the checkbox to behave differently there.
+``rule10b51PlanChecked`` remains in
+``_DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS`` only as a defensive secondary
+candidate -- it has never been observed in any real capture and may be
+removed in a future phase once that is itself confirmed one way or the
+other. ``_read_checkbox`` still returns ``None`` (UNKNOWN) whenever
+neither candidate element is present -- an absent checkbox is NEVER read
+as ``False`` (a checkbox that cannot be found is unknown, not negative).
 ``ten_b5_1_plan_adoption_date`` is extracted ONLY from an explicit date
 following "adopted ... on" wording in ``remarks`` or a referenced
 footnote whose text also mentions "10b5-1" -- never inferred otherwise.
@@ -108,9 +112,10 @@ from typing import Any
 from ..schemas.enums import UNKNOWN, FactCategory
 from ..schemas.fact import RawFact, Source
 
-#: Candidate element names for the document-level Rule 10b5-1 checkbox --
-#: see the module docstring's "Rule 10b5-1 checkbox" section for why this
-#: is a best-effort, unverified identification, checked in order.
+#: Document-level Rule 10b5-1 checkbox element names, checked in order.
+#: ``aff10b5One`` is CONFIRMED against a real SEC capture (Phase 3E.3 --
+#: see the module docstring); ``rule10b51PlanChecked`` remains only as an
+#: unconfirmed defensive secondary candidate, never observed for real.
 _DOCUMENT_LEVEL_10B5_1_CHECKBOX_PATHS: tuple[str, ...] = ("aff10b5One", "rule10b51PlanChecked")
 
 _PLAN_ADOPTION_DATE_RE = re.compile(

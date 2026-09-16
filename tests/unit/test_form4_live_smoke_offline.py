@@ -58,6 +58,12 @@ def _run(http, **kwargs):
     )
 
 
+def _run_targeted(http, accession, **kwargs):
+    return live_smoke.run_targeted_live_smoke(
+        fx.ISSUER_CIK_INT, accession, user_agent=USER_AGENT, http_client=http, **kwargs
+    )
+
+
 # --- input / refusal ---------------------------------------------------
 def test_refuses_with_zero_requests_when_user_agent_unset():
     http = fx.FakeHttpClient(responses=fx.default_responses())
@@ -569,4 +575,339 @@ def test_main_omitted_env_resolves_from_real_ambient_ira_sec_user_agent(monkeypa
         http_client_factory=lambda user_agent, out_dir, max_requests: http,
     )
     assert exit_code == 0
+    assert http.requested_urls
+
+
+# =============================================================================
+# Phase 3E.3
+# =============================================================================
+
+# --- confirmed checkbox: raw value 0 -> False (real Mac finding) -----------
+def test_checkbox_false_raw_value_parses_to_false_never_none():
+    http, accession = _single_candidate_client("checkbox_false_no_date.xml")
+    report = _run(http)
+    doc = next(d for d in report.parsed_documents if d["accession"] == accession)
+    assert doc["parsed_ten_b5_1_checkbox"] is False
+    matches = doc["structure_diagnostics"]["rule_10b5_1_candidate_elements"]
+    assert any(m["tag"] == "aff10b5One" and m["raw_value"] == "0" for m in matches)
+    assert any(m["is_direct_child_of_ownership_document"] for m in matches)
+    # A normal Form 4 need not carry dateOfOriginalSubmission at all.
+    assert doc["structure_diagnostics"]["date_of_original_submission"]["found"] is False
+
+
+# --- smoke_run_completed vs coverage_complete (requirement 5) --------------
+def test_smoke_run_completed_true_coverage_complete_false_when_capped():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run(http, max_filings=2)
+    assert report.not_fetched_due_to_cap > 0
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is False
+
+
+def test_smoke_run_completed_and_coverage_complete_both_true_when_uncapped():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run(http, max_filings=1000)
+    assert report.not_fetched_due_to_cap == 0
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is True
+
+
+def test_discovery_not_supported_is_completed_with_full_coverage():
+    payload = {
+        "cik": fx.ISSUER_CIK_INT, "name": fx.ISSUER_NAME, "tickers": [fx.ISSUER_TICKER],
+        "filings": {"recent": {"accessionNumber": [], "form": [], "primaryDocument": [], "filingDate": [], "reportDate": []}, "files": []},
+    }
+    http = fx.FakeHttpClient(responses={fx.submissions_url(): fx.ok(json.dumps(payload))})
+    report = _run(http)
+    assert report.status == "DISCOVERY_NOT_SUPPORTED"
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is True
+
+
+def test_no_candidates_in_lookback_is_completed_with_full_coverage():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run(http, as_of_date="1999-01-01", lookback_days=1)
+    assert report.status == "NO_CANDIDATES_IN_LOOKBACK_WINDOW"
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is True
+
+
+def test_refused_and_locate_failed_are_never_smoke_run_completed():
+    refused = live_smoke.run_live_smoke(fx.ISSUER_CIK_INT, user_agent=None, http_client=_PoisonHttpClient())
+    assert refused.smoke_run_completed is False
+    assert refused.coverage_complete is False
+
+    failing_http = fx.FakeHttpClient(responses={fx.submissions_url(): fx.not_found()})
+    failed = _run(failing_http)
+    assert failed.status == "LOCATE_FAILED"
+    assert failed.smoke_run_completed is False
+    assert failed.coverage_complete is False
+
+
+# --- discovery candidate printing is truncated; full list stays in JSON ----
+def test_printed_report_truncates_discovery_candidates_with_remainder_note():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run(http, max_filings=1000)
+    assert len(report.discovery_candidates) > live_smoke.MAX_DISCOVERY_CANDIDATES_PRINTED
+    printed = live_smoke.format_report_for_print(report, secrets=[])
+    printed_candidate_lines = [line for line in printed.splitlines() if line.strip().startswith("candidate:")]
+    assert len(printed_candidate_lines) == live_smoke.MAX_DISCOVERY_CANDIDATES_PRINTED
+    assert "more candidate(s) not printed here" in printed
+
+
+def test_report_to_jsonable_includes_every_discovery_candidate_untruncated():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run(http, max_filings=1000)
+    assert len(report.discovery_candidates) > live_smoke.MAX_DISCOVERY_CANDIDATES_PRINTED
+    payload = live_smoke.report_to_jsonable(report)
+    assert len(payload["discovery_candidates"]) == len(report.discovery_candidates)
+
+
+def test_main_json_flag_prints_full_untruncated_candidate_list(tmp_path, capsys):
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    exit_code = live_smoke.main(
+        [
+            "--issuer-cik", str(fx.ISSUER_CIK_INT), "--marker-path", str(tmp_path / "LAST_RUN.json"),
+            "--out-dir", str(tmp_path / "captures"), "--as-of", "2026-03-15", "--max-filings", "1000", "--json",
+        ],
+        env={"IRA_SEC_USER_AGENT": USER_AGENT},
+        http_client_factory=lambda user_agent, out_dir, max_requests: http,
+    )
+    assert exit_code == 0
+    printed = capsys.readouterr().out
+    json_start = printed.index('{\n  "plan"')
+    payload = json.loads(printed[json_start:])
+    assert len(payload["discovery_candidates"]) > live_smoke.MAX_DISCOVERY_CANDIDATES_PRINTED
+
+
+# --- targeted mode -----------------------------------------------------------
+def test_targeted_mode_never_accepts_a_primary_document_argument():
+    import inspect
+
+    params = set(inspect.signature(live_smoke.run_targeted_live_smoke).parameters)
+    assert "primary_document" not in params
+    assert "accession" in params
+    assert "issuer_cik" in params
+
+
+def test_targeted_mode_success_uses_exactly_three_gets():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    accession = fx.accession("normal_market_purchase")
+    report = _run_targeted(http, accession)
+    assert report.status == "COMPLETED"
+    assert report.mode == "targeted"
+    assert report.requested_accession == accession
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is True
+    assert report.request_count == 3
+    assert len(http.requested_urls) == 3
+    assert report.plan.max_requests == live_smoke.TARGETED_MAX_LIVE_GETS == 3
+
+
+def test_targeted_mode_accession_not_found_never_falls_back_to_continuation_pages():
+    http = fx.FakeHttpClient(responses=fx.default_responses(with_continuation_pointer=True))
+    report = _run_targeted(http, fx.UNKNOWN_ACCESSION)
+    assert report.status == "ACCESSION_NOT_FOUND"
+    assert report.smoke_run_completed is True
+    assert report.coverage_complete is True
+    # Only the submissions GET -- never a continuation page, never a directory/body GET.
+    assert http.requested_urls == [fx.submissions_url()]
+
+
+def test_targeted_mode_never_searches_continuation_pages_even_for_a_page_only_accession():
+    """A filing reachable ONLY via filings.files (never filings.recent) is
+    ACCESSION_NOT_FOUND in targeted mode -- the 3-GET cap has no room for
+    a continuation-page search (Phase 3E.3 requirement 8)."""
+    http = fx.FakeHttpClient(responses=fx.default_responses(with_continuation_pointer=True))
+    report = _run_targeted(http, fx.continuation_accession())
+    assert report.status == "ACCESSION_NOT_FOUND"
+    assert http.requested_urls == [fx.submissions_url()]
+
+
+def test_targeted_mode_directory_verification_is_not_skipped():
+    accession = f"{fx.ISSUER_CIK}-26-000199"
+    accession_nodash = accession.replace("-", "")
+    from investment_research.collectors.sec_edgar import FILING_INDEX_URL, cik_for_archives
+
+    submissions_payload = {
+        "cik": fx.ISSUER_CIK_INT, "name": fx.ISSUER_NAME, "tickers": [fx.ISSUER_TICKER],
+        "filings": {"recent": {
+            "accessionNumber": [accession], "form": ["4"], "primaryDocument": ["xslF345X06/sample-99001.xml"],
+            "filingDate": ["2026-03-01"], "reportDate": ["2026-03-01"],
+        }, "files": []},
+    }
+    directory_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document="index.json")
+    http = fx.FakeHttpClient(responses={
+        fx.submissions_url(): fx.ok(json.dumps(submissions_payload)),
+        directory_url: fx.ok(json.dumps({"directory": {"item": [{"name": "some-other-file.xml", "type": "4"}]}})),
+        # raw XML URL deliberately NOT registered -- if targeted mode ever
+        # skipped directory verification, this would 404 instead of the
+        # assertion below failing loudly.
+    })
+    report = _run_targeted(http, accession)
+    assert report.status == "LOCATE_FAILED"
+    assert report.fetch_failures
+    assert report.fetch_failures[0]["directory_index_verified"] is False
+
+
+def test_targeted_mode_xsl_wrapped_primary_document_resolved_from_submissions_only():
+    """primaryDocument is resolved from SEC's own submissions metadata --
+    never accepted from the caller (Phase 3E.3 requirement 6). This test
+    passes no primaryDocument to run_targeted_live_smoke at all; only
+    issuer_cik + accession."""
+    accession = f"{fx.ISSUER_CIK}-26-000199"
+    accession_nodash = accession.replace("-", "")
+    basename = "sample-99001.xml"
+    wrapper = "xslF345X06"
+    from investment_research.collectors.sec_edgar import FILING_INDEX_URL, cik_for_archives
+
+    submissions_payload = {
+        "cik": fx.ISSUER_CIK_INT, "name": fx.ISSUER_NAME, "tickers": [fx.ISSUER_TICKER],
+        "filings": {"recent": {
+            "accessionNumber": [accession], "form": ["4"], "primaryDocument": [f"{wrapper}/{basename}"],
+            "filingDate": ["2026-03-01"], "reportDate": ["2026-03-01"],
+        }, "files": []},
+    }
+    directory_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document="index.json")
+    raw_xml_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document=basename)
+    http = fx.FakeHttpClient(responses={
+        fx.submissions_url(): fx.ok(json.dumps(submissions_payload)),
+        directory_url: fx.ok(json.dumps({"directory": {"item": [{"name": basename, "type": "4"}]}})),
+        raw_xml_url: fx.ok(fx.fixture_text("normal_market_purchase.xml")),
+    })
+    report = _run_targeted(http, accession)
+    assert report.status == "COMPLETED"
+    doc = report.parsed_documents[0]
+    assert doc["xsl_wrapper_path"] == wrapper
+    assert doc["normalized_xml_filename"] == basename
+    assert doc["resolved_raw_xml_url"] == raw_xml_url
+    assert report.request_count == 3
+
+
+def test_targeted_mode_form4a_amendment_diagnostics():
+    """Requirement 9: documentType/dateOfOriginalSubmission/remarks/
+    reporting_owner/issuer CIK/reconciliation status, all sourced from
+    the real fetched document, never guessed. Fetching ONLY this one
+    accession in targeted mode means its remarks-referenced original
+    accession is never co-discovered -- so reconciliation is honestly
+    UNRESOLVED here, never RECONCILED by coincidence."""
+    accession = fx.accession("reconciled_amendment")
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run_targeted(http, accession)
+    assert report.status == "COMPLETED"
+    doc = report.parsed_documents[0]
+    assert doc["form"] == "4/A"
+    assert doc["structure_diagnostics"]["document_type"] == "4/A"
+    assert doc["structure_diagnostics"]["issuer_cik"] == fx.ISSUER_CIK
+    assert doc["structure_diagnostics"]["date_of_original_submission"]["found"] is False
+    assert "amends the Form 4" in doc["remarks"]
+    assert doc["reporting_owners"][0]["reporting_owner_name"] == fx.OWNER_NAME
+    assert doc["reconciliation"]["status"] == "UNRESOLVED"
+
+
+def test_targeted_mode_amendment_with_date_of_original_submission_found():
+    accession = f"{fx.ISSUER_CIK}-26-000199"
+    accession_nodash = accession.replace("-", "")
+    from investment_research.collectors.sec_edgar import FILING_INDEX_URL, cik_for_archives
+
+    submissions_payload = {
+        "cik": fx.ISSUER_CIK_INT, "name": fx.ISSUER_NAME, "tickers": [fx.ISSUER_TICKER],
+        "filings": {"recent": {
+            "accessionNumber": [accession], "form": ["4/A"], "primaryDocument": [fx.PRIMARY_DOCUMENT],
+            "filingDate": ["2026-03-01"], "reportDate": ["2026-03-01"],
+        }, "files": []},
+    }
+    directory_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document="index.json")
+    document_url = FILING_INDEX_URL.format(cik=cik_for_archives(fx.ISSUER_CIK_INT), accession_nodash=accession_nodash, document=fx.PRIMARY_DOCUMENT)
+    http = fx.FakeHttpClient(responses={
+        fx.submissions_url(): fx.ok(json.dumps(submissions_payload)),
+        directory_url: fx.ok(json.dumps({"directory": {"item": [{"name": fx.PRIMARY_DOCUMENT, "type": "4/A"}]}})),
+        document_url: fx.ok(fx.fixture_text("amendment_with_date_of_original_submission.xml")),
+    })
+    report = _run_targeted(http, accession)
+    assert report.status == "COMPLETED"
+    doc = report.parsed_documents[0]
+    date_diag = doc["structure_diagnostics"]["date_of_original_submission"]
+    assert date_diag["found"] is True
+    assert date_diag["tag"] == "dateOfOriginalSubmission"
+    assert date_diag["raw_value"] == "2026-02-15"
+    assert doc["reconciliation"]["status"] == "UNRESOLVED"
+
+
+def test_targeted_mode_form3_metadata_is_accession_not_found_never_fetched():
+    """A Form 3 accession is not a Form 4/4-A candidate at all -- targeted
+    mode reports ACCESSION_NOT_FOUND rather than fetching a Form 3 body."""
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    accession = fx.accession("metadata_says_form3")
+    report = _run_targeted(http, accession)
+    assert report.status == "ACCESSION_NOT_FOUND"
+    assert http.requested_urls == [fx.submissions_url()]
+
+
+def test_targeted_mode_cik_mismatch_reported_as_fetch_failure():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    accession = fx.accession("cik_mismatch")
+    report = _run_targeted(http, accession)
+    assert report.status == "LOCATE_FAILED"
+    assert report.fetch_failures
+    assert "issuer CIK mismatch" in report.fetch_failures[0]["reason"]
+
+
+def test_targeted_mode_malformed_xml_is_fetch_failure_not_parsed():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    accession = fx.accession("malformed_xml")
+    report = _run_targeted(http, accession)
+    assert report.status == "LOCATE_FAILED"
+    assert report.fetch_failures
+
+
+def test_targeted_mode_zero_llm_or_web_search_calls():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run_targeted(http, fx.accession("normal_market_purchase"))
+    assert report.anthropic_api_calls == 0
+    assert report.web_search_calls == 0
+    assert report.external_llm_tokens == 0
+
+
+def test_targeted_mode_capture_manifest_diagnostics_never_used_for_evidence_integrity_failures():
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    report = _run_targeted(http, fx.accession("normal_market_purchase"))
+    assert report.capture_manifest_failures == []
+
+
+# --- targeted mode: CLI-level (main()) --------------------------------------
+def test_main_targeted_mode_rejects_malformed_accession():
+    exit_code = live_smoke.main(["--issuer-cik", str(fx.ISSUER_CIK_INT), "--accession", "not-a-real-accession"])
+    assert exit_code == 1
+
+
+def test_main_targeted_mode_marker_not_written_on_missing_user_agent(tmp_path):
+    marker_path = tmp_path / "LAST_RUN.json"
+    poison_factory = _PoisonHttpClientFactory()
+    exit_code = live_smoke.main(
+        [
+            "--issuer-cik", str(fx.ISSUER_CIK_INT), "--accession", fx.accession("normal_market_purchase"),
+            "--marker-path", str(marker_path),
+        ],
+        env={}, http_client_factory=poison_factory,
+    )
+    assert exit_code == 1
+    assert not marker_path.is_file()
+    assert poison_factory.called is False
+
+
+def test_main_targeted_mode_success_writes_marker_and_returns_zero(tmp_path):
+    http = fx.FakeHttpClient(responses=fx.default_responses())
+    accession = fx.accession("normal_market_purchase")
+    marker_path = tmp_path / "LAST_RUN.json"
+    exit_code = live_smoke.main(
+        [
+            "--issuer-cik", str(fx.ISSUER_CIK_INT), "--accession", accession,
+            "--marker-path", str(marker_path), "--out-dir", str(tmp_path / "captures"),
+        ],
+        env={"IRA_SEC_USER_AGENT": USER_AGENT},
+        http_client_factory=lambda user_agent, out_dir, max_requests: http,
+    )
+    assert exit_code == 0
+    assert marker_path.is_file()
     assert http.requested_urls

@@ -44,14 +44,21 @@ LIVE_VERIFIED: nothing here has ever been checked against the real SEC
 EDGAR site, and this Phase deliberately does not add a Form 4 Live Smoke
 entry point (explicit instruction: no Live communication this phase).
 
-**Unverified against a real capture (explicitly flagged, per Phase 3E.1
-requirement 7's "未解決事項" ask):** this session has no live network
-access, so the claim that an issuer's own submissions.json genuinely
-includes Form 3/4/5 entries could not be checked against an actual SEC
-response. It is a documented, well-established EDGAR behavior, not a
-guess invented for this adapter, but it remains unverified from here --
-the natural next step is a Form 4-scoped Live Smoke run (still not
-implemented this phase) confirming it against one real issuer.
+**CONFIRMED against a real capture (Phase 3E.3):** a real Mac Live Smoke
+run (``research/form4_live_smoke.py``, itself never invoked from this
+adapter or from Pipeline) confirmed that a real issuer's own
+submissions.json genuinely includes Form 3/4/5 entries, that a real
+ownership XML's ``primaryDocument`` can be an XSL display path (handled
+by ``collectors/form4.normalize_ownership_primary_document`` since Phase
+3E.2.2), and that ``ownershipDocument``/``documentType``/``issuerCik``
+all resolve exactly as this adapter assumes -- for 3 real, normal
+(non-amendment) Form 4 documents, all Capture-Manifest-``VERIFIED`` with
+zero Evidence Integrity failures. This confirmation is scoped to NORMAL
+Form 4 only; no real Form 4/A instance has yet been observed end-to-end
+this way (see this module's own docstring note on the Live-verification
+scope split, and ``research/form4_live_smoke.py``'s targeted mode, added
+in Phase 3E.3, for verifying one specific accession -- including a
+Form 4/A -- directly).
 
 Safe identification of the acquisition target (Phase 3E/3E.1 requirement
 3): Form 3, Form 4, and Form 5 share the identical ``ownershipDocument``
@@ -67,9 +74,10 @@ Evidence Integrity (Phase 3E/3E.1 requirement 4/6): Form 4 is the
 REPORTING PERSON's own statutory filing (``DocumentAuthority.
 STATUTORY_FILING``, ``Document.is_company_ir=False``). See
 ``collectors/form4.py``'s module docstring for the full transaction-
-semantics boundary and the Rule 10b5-1 checkbox's own documented
-uncertainty. Nothing here generates an investment Action, promotes a
-domain to SUFFICIENT, or interprets a transaction as a judgment about the
+semantics boundary and the Rule 10b5-1 checkbox's real, CONFIRMED (Phase
+3E.3) document-level element name. Nothing here generates an investment
+Action, promotes a domain to SUFFICIENT, or interprets a transaction as a
+judgment about the
 issuer -- and, new in Phase 3E.1, nothing here ever computes a net
 insider-buying/selling figure across an original filing and its
 amendment(s): amendment reconciliation is reported as a STATUS

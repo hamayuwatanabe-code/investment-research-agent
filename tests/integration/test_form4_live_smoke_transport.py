@@ -29,7 +29,11 @@ from investment_research.research.form4_acquisition_adapter import (
     Form4Adapter,
     Form4IssuerReference,
 )
-from investment_research.research.form4_live_smoke import _build_dummy_target, _step
+from investment_research.research.form4_live_smoke import (
+    _build_dummy_target,
+    _step,
+    run_targeted_live_smoke,
+)
 from investment_research.research.sec_live_smoke import AllowlistedHttpClient
 from investment_research.research.source_routing import StepKind, StepStatus
 
@@ -178,6 +182,40 @@ def test_form4_adapter_locate_fetch_parse_over_real_loopback_transport(base_url,
 
     assert client.requests_made == 3  # submissions + directory index + document body
     for url in client.requested_urls:
+        digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+        cached = client._cache[url]
+        read_result = read_manifest(tmp_path, digest, body=cached.body)
+        assert read_result.status.value == "VERIFIED"
+        assert read_result.manifest is not None
+        assert read_result.manifest.source == "form4"
+
+
+def test_targeted_mode_over_real_loopback_transport_uses_exactly_three_gets(base_url, tmp_path, monkeypatch):
+    """Phase 3E.3: run_targeted_live_smoke's own entry point (not the
+    adapter driven by hand) over a real HTTP round trip -- proves the
+    3-GET cap holds for real, and that every capture gets its own
+    verified Capture Manifest."""
+    import investment_research.collectors.sec_edgar as sec_edgar
+    import investment_research.research.form4_live_smoke as form4_live_smoke_mod
+    import investment_research.research.sec_acquisition_adapters as sec_adapters
+
+    monkeypatch.setattr(sec_edgar, "SUBMISSIONS_URL", base_url + "/submissions/CIK{cik:010d}.json")
+    monkeypatch.setattr(sec_edgar, "FILING_INDEX_URL", base_url + "/Archives/edgar/data/{cik}/{accession_nodash}/{document}")
+    monkeypatch.setattr(sec_adapters, "SUBMISSIONS_URL", sec_edgar.SUBMISSIONS_URL)
+    monkeypatch.setattr(sec_adapters, "FILING_INDEX_URL", sec_edgar.FILING_INDEX_URL)
+    monkeypatch.setattr(form4_live_smoke_mod, "SUBMISSIONS_URL", sec_edgar.SUBMISSIONS_URL)
+
+    client = AllowlistedHttpClient(
+        user_agent=_AGENT, allowed_hosts=frozenset({"127.0.0.1"}), timeout=2.0,
+        rate_limit_rps=1000.0, max_retries=0, max_requests=3, out_dir=tmp_path, source="form4",
+    )
+    report = run_targeted_live_smoke(_ISSUER_CIK, _ACCESSION, user_agent=_AGENT, http_client=client)
+    assert report.status == "COMPLETED"
+    assert report.mode == "targeted"
+    assert report.request_count == 3
+    assert report.coverage_complete is True
+
+    for url in report.requested_urls:
         digest = hashlib.sha256(url.encode()).hexdigest()[:24]
         cached = client._cache[url]
         read_result = read_manifest(tmp_path, digest, body=cached.body)
