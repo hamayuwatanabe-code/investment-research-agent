@@ -61,7 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..collectors.http import FetchResult, RateLimiter
+from ..collectors.http import FetchResult, RateLimiter, _sanitize_url, _strip_wire_url
 from ..collectors.sec_edgar import FILING_INDEX_URL, SUBMISSIONS_URL
 from ..logging_setup import SecretRedactingFilter
 from ..schemas.enums import UNKNOWN, FetchOutcome, ResearchDomain
@@ -273,7 +273,13 @@ class AllowlistedHttpClient:
         return self._cache_hits
 
     def get(self, url: str, **_kwargs: Any) -> FetchResult:
-        self.requested_urls.append(url)
+        # Phase 3F.0.3: url is the wire URL (may carry a secret query
+        # param on a future caller, e.g. a literature adapter reusing this
+        # client) -- requested_urls and every raised/returned object below
+        # carry only its sanitized ("public") form. See collectors/http.py's
+        # module docstring for the wire_url/public_url convention this
+        # mirrors.
+        self.requested_urls.append(_sanitize_url(url))
         if url in self._cache:
             self._cache_hits += 1
             cached = self._cache[url]
@@ -285,13 +291,16 @@ class AllowlistedHttpClient:
 
         host = urllib.parse.urlparse(url).hostname
         if host not in self.allowed_hosts:
-            result = FetchResult(url=url, outcome=FetchOutcome.BLOCKED, error=f"refused disallowed host: {host!r}")
+            result = FetchResult(
+                url=_sanitize_url(url), outcome=FetchOutcome.BLOCKED,
+                error=f"refused disallowed host: {host!r}",
+            )
             self._cache[url] = result
             return result
 
         if self._requests_made >= self.max_requests:
             raise MaxRequestsExceededError(
-                f"live GET cap of {self.max_requests} reached; refusing to request {url!r}"
+                f"live GET cap of {self.max_requests} reached; refusing to request {_sanitize_url(url)!r}"
             )
 
         result = self._get_with_retry(url)
@@ -317,6 +326,10 @@ class AllowlistedHttpClient:
         return result
 
     def _do_get(self, url: str, *, attempt: int) -> FetchResult:
+        # Phase 3F.0.3: url is the wire URL, used for exactly the real
+        # request below. public_url is what every FetchResult this returns
+        # carries instead -- mirrors collectors/http.py::HttpClient.get().
+        public_url = _sanitize_url(url)
         request_headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
@@ -336,36 +349,43 @@ class AllowlistedHttpClient:
                     # have refused this, but the FINAL url is re-checked too
                     # (Phase 3C requirement 11).
                     return FetchResult(
-                        url=url, outcome=FetchOutcome.BLOCKED, attempts=attempt,
+                        url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt,
                         error=f"final response host {final_host!r} not allowlisted",
                     )
-                self._final_urls[url] = response.geturl()
+                self._final_urls[url] = _sanitize_url(response.geturl())
                 return FetchResult(
-                    url=url, outcome=FetchOutcome.OK, status=int(response.status), body=body,
+                    url=public_url, outcome=FetchOutcome.OK, status=int(response.status), body=body,
                     headers=dict(response.headers), attempts=attempt,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
             if status == 404:
-                return FetchResult(url=url, outcome=FetchOutcome.NOT_FOUND, status=status, attempts=attempt, error=f"HTTP {status}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.NOT_FOUND, status=status, attempts=attempt, error=f"HTTP {status}")
             if status == 429:
-                return FetchResult(url=url, outcome=FetchOutcome.RATE_LIMITED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.RATE_LIMITED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
             if status in (403, 407):
-                return FetchResult(url=url, outcome=FetchOutcome.BLOCKED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
-            return FetchResult(url=url, outcome=FetchOutcome.ERROR, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+            return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
         except HostAllowlistError as exc:
-            return FetchResult(url=url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
+            return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
         except TimeoutError:
-            return FetchResult(url=url, outcome=FetchOutcome.TIMEOUT, attempts=attempt, error="timed out")
+            return FetchResult(url=public_url, outcome=FetchOutcome.TIMEOUT, attempts=attempt, error="timed out")
         except (urllib.error.URLError, OSError) as exc:
-            return FetchResult(url=url, outcome=FetchOutcome.ERROR, attempts=attempt, error=f"{type(exc).__name__}: {exc}")
+            error = _strip_wire_url(f"{type(exc).__name__}: {exc}", url, public_url)
+            return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, attempts=attempt, error=error)
 
     def _save_response(self, url: str, result: FetchResult) -> None:
         """Body bytes, plus a Capture Manifest recording the real UTC
         retrieval time -- never headers (which could echo request metadata)
         and never the User-Agent/API key/email (Phase 3C requirement 29,
-        Phase 3D.4 requirement 3)."""
+        Phase 3D.4 requirement 3). ``result.url`` is already the sanitized
+        public URL (``_do_get``/the cache-hit path in ``get()`` never
+        construct a ``FetchResult`` with anything else), and
+        ``self._final_urls`` stores only the sanitized final URL too, so
+        the ``CaptureManifest`` written here can never carry a secret query
+        parameter even when ``url`` (the wire URL used only for the digest
+        below) does (Phase 3F.0.3)."""
         assert self.out_dir is not None
         digest = hashlib.sha256(url.encode()).hexdigest()[:24]
         suffix = ".json" if url.endswith(".json") else (".htm" if url.endswith((".htm", ".html")) or "index.htm" in url else ".bin")
@@ -376,8 +396,8 @@ class AllowlistedHttpClient:
             manifest = CaptureManifest(
                 schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
                 source=self.source,
-                requested_url=url,
-                final_url=self._final_urls.get(url, url),
+                requested_url=result.url,
+                final_url=self._final_urls.get(url, result.url),
                 http_status=result.status,
                 # Recorded NOW, at the moment of capture -- never from the
                 # out_dir's name, a file's mtime, or anything the caller

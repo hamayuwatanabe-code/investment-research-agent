@@ -60,10 +60,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/ok")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif path == "/echo":
+            # Phase 3F.0.3: records the RAW request line this loopback
+            # server itself received, so a test can prove a secret query
+            # param really went out over the wire while everything above
+            # this layer (FetchResult, the Capture Manifest) stays sanitized.
+            Handler.last_raw_path = self.path
+            body = json.dumps({"echo": self.path}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
+
+    last_raw_path: str = ""
 
 
 @pytest.fixture(scope="module")
@@ -240,6 +254,36 @@ def test_capture_manifest_source_field_reflects_the_caller_e_g_clinicaltrials(ba
     read_result = read_manifest(tmp_path, digest, body=result.body)
     assert read_result.manifest is not None
     assert read_result.manifest.source == "clinicaltrials"
+
+
+def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path):
+    """Phase 3F.0.3: even when the requested URL itself carries a secret-
+    shaped query parameter (as a future Literature Live Smoke tool reusing
+    this client might pass), the Capture Manifest written to disk -- and
+    the returned FetchResult -- must never contain it. First confirms the
+    loopback server itself DID receive the secret (proving this is
+    sanitization, not simply never sending the value)."""
+    secret = "topsecret-manifest-value"
+    client = _client(out_dir=tmp_path, source="sec")
+    url = f"{base_url}/echo?api_key={secret}&x=1"
+    result = client.get(url)
+    assert result.ok
+    assert secret in Handler.last_raw_path  # the server DID receive it
+
+    assert secret not in result.url
+    assert secret not in result.final_url
+
+    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    manifest_path = tmp_path / f"{digest}.manifest.json"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert secret not in manifest_text
+
+    read_result = read_manifest(tmp_path, digest, body=result.body)
+    manifest = read_result.manifest
+    assert manifest is not None
+    assert secret not in manifest.requested_url
+    assert secret not in manifest.final_url
+    assert "x=1" in manifest.requested_url
 
 
 def test_capture_manifest_read_manifest_missing_for_a_pre_manifest_capture(base_url, tmp_path):
