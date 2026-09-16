@@ -60,43 +60,62 @@ once ``agents/evidence_integrity.py`` classifies it (via the ``unit`` prefix
 ``collectors/literature.py`` applies), which ``schemas/enums.py``'s
 ``DECISION_GRADE_CLASSES`` excludes.
 
-HTTP & safety (Phase 3F requirement 4): ``ALLOWED_HOSTS`` is the complete
-set this module will ever build a request URL against --
-``eutils.ncbi.nlm.nih.gov``, ``www.ebi.ac.uk``, ``europepmc.org`` -- checked
-defensively by ``_require_allowed_host`` even though no live call is ever
-issued this phase. ``MAX_PMIDS_PER_BATCH``/``MAX_REQUESTS_PER_RUN`` bound
-how much even a future Live Smoke run could ever do; NCBI's own documented
-limit without an API key is 3 requests/second -- this module's own
-``DEFAULT_RATE_LIMIT_RPS`` is deliberately more conservative. Europe PMC
-full text is fetched ONLY when a search result's own ``isOpenAccess``/
-``inEPMC`` flags are true; there is no paywall-bypass or PDF-scraping code
-path anywhere in this module, by construction (the only full-text source
-this module reads is Europe PMC's own ``fullTextXML`` REST endpoint for a
-confirmed-OA PMCID). ``IRA_NCBI_TOOL``/``IRA_NCBI_EMAIL``/``IRA_NCBI_API_KEY``
-(``config.Settings``) are future-use only this phase -- this module never
-configures or uses a real value for either, and an email/API key must never
-appear in a displayed request URL, log line, or Capture Manifest (the log
-formatter's/``Settings.secret_values``'s redaction already covers this;
-``_public_request_url`` below additionally strips them from any URL this
-module itself surfaces in diagnostics; ``ExecutionContext.request_cache``
-keys are likewise built from the sanitized URL, never the raw one, so a
-secret never appears there either).
+HTTP & safety (Phase 3F requirement 4, hardened in Phase 3F.0.2):
+``ALLOWED_HOSTS`` is the complete set this module will ever build a request
+URL against -- ``eutils.ncbi.nlm.nih.gov``, ``www.ebi.ac.uk``,
+``europepmc.org`` -- checked defensively by ``_require_allowed_host`` even
+though no live call is ever issued this phase. ``MAX_PMIDS_PER_BATCH``/
+``MAX_REQUESTS_PER_RUN`` bound how much even a future Live Smoke run could
+ever do; NCBI's own documented limit without an API key is 3 requests/
+second -- this module's own ``DEFAULT_RATE_LIMIT_RPS`` is deliberately more
+conservative. Europe PMC full text is fetched ONLY when a search result's
+own ``isOpenAccess``/``inEPMC`` flags are true; there is no paywall-bypass
+or PDF-scraping code path anywhere in this module, by construction (the
+only full-text source this module reads is Europe PMC's own
+``fullTextXML`` REST endpoint for a confirmed-OA PMCID).
+``IRA_NCBI_TOOL``/``IRA_NCBI_EMAIL``/``IRA_NCBI_API_KEY`` (``config.
+Settings``) are future-use only this phase -- this module never configures
+or uses a real value for either.
 
-Request cap (Phase 3F.0.1 requirement 4): ``RequestBudget`` bounds PubMed +
-Europe PMC combined, across the WHOLE ``AcquisitionExecutor.run()`` call
-(one ``PubMedLiteratureAdapter`` instance is shared across every target in
-a run, so its budget is too) -- ``max_search_requests`` (ESearch + Europe
-PMC ``/search`` combined), ``max_articles`` (distinct NEW PMIDs actually
-processed; already-cached PMIDs are free and never count against it),
-``max_fulltext_fetches`` (Europe PMC ``fullTextXML`` GETs), and
-``max_total_requests`` (an overall ceiling across all of the above). A
-candidate PMID list larger than the budget allows is never silently
-fetched in full, and excess is never reported as NOT_FOUND: excluded PMIDs
-are surfaced explicitly in FETCH/PARSE's own payload
-(``budget_excluded_pmids``/``budget_skipped_europepmc_search_pmids``/
+wire_url / public_url (Phase 3F.0.2 requirement 1): a "wire_url" is a URL
+carrying email/api_key when ``Settings`` supplies them, and it is used for
+EXACTLY ONE THING -- the single ``http.get(wire_url)`` call each request
+site makes, always via ``_safe_get`` (the only function in this module
+that touches a wire_url). Every other consumer -- cache keys, failure/
+exception text, ``StepExecutionResult.payload``, ``Document.url``, and (in
+a future Live Smoke phase) a Capture Manifest's ``requested_url``/
+``final_url`` -- sees only the "public_url" ``_public_request_url``
+derives from it (query-parameter stripping) immediately after
+construction, PLUS a second, value-based redaction pass
+(``_sanitize_text``/``_secret_values``) that catches a secret leaking into
+free text that isn't shaped like a URL at all, in both its raw and
+percent-encoded form. ``_safe_get`` also catches and sanitizes any
+exception the transport itself raises, so a raw wire_url embedded in a
+``urllib`` exception message can never propagate outward unsanitized. It
+is fine -- necessary -- for email/api_key to reach the real transport as
+part of a wire_url; it is never fine for a wire_url to be RETAINED
+anywhere else in this module's own diagnostics.
+
+Request cap (Phase 3F.0.1 requirement 4, made run-scoped in Phase 3F.0.2):
+``RequestBudgetLimits`` (immutable caps, held on the adapter instance) and
+``RequestBudgetUsage`` (mutable per-run counters, held in
+``ExecutionContext.adapter_state`` -- see ``_budget_usage_for``) bound
+PubMed + Europe PMC combined, shared across every literature target WITHIN
+one ``AcquisitionExecutor.run()`` call but reset to zero for a NEW
+``run()`` call even when the same adapter instance is reused --
+``max_search_requests`` (ESearch + Europe PMC ``/search`` combined),
+``max_articles`` (distinct NEW PMIDs actually processed; already-cached
+PMIDs are free and never count against it), ``max_fulltext_fetches``
+(Europe PMC ``fullTextXML`` GETs), and ``max_total_requests`` (an overall
+ceiling across all of the above). A candidate PMID list larger than the
+budget allows is never silently fetched in full, and excess is never
+reported as NOT_FOUND: excluded PMIDs are surfaced explicitly in
+FETCH/PARSE's own payload (``budget_excluded_pmids``/
+``budget_skipped_europepmc_search_pmids``/
 ``budget_skipped_fulltext_pmcids``) and ``coverage_complete=False`` is set
 on the PARSE result whenever any budget skip occurred for this target --
 ``True`` only when every candidate was genuinely processed.
+Not thread-safe: see ``RequestBudgetUsage``'s own docstring.
 """
 
 from __future__ import annotations
@@ -104,7 +123,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from ..collectors.documents import Document
 from ..collectors.literature import (
@@ -153,9 +172,10 @@ MAX_PMIDS_PER_BATCH = 20
 MAX_REQUESTS_PER_RUN = 40
 
 #: Phase 3F.0.1 requirement 4: PubMed + Europe PMC combined caps, enforced
-#: by ``RequestBudget`` across a whole ``AcquisitionExecutor.run()`` --
-#: never per-target (a caller that wants a tighter/looser budget passes its
-#: own values to ``PubMedLiteratureAdapter.__init__``).
+#: by ``RequestBudgetLimits``/``RequestBudgetUsage`` across a whole
+#: ``AcquisitionExecutor.run()`` -- never per-target (a caller that wants a
+#: tighter/looser budget passes its own values to
+#: ``PubMedLiteratureAdapter.__init__``).
 DEFAULT_MAX_SEARCH_REQUESTS = 10
 DEFAULT_MAX_ARTICLES = 20
 DEFAULT_MAX_FULLTEXT_FETCHES = 10
@@ -170,65 +190,108 @@ BUDGET_EXCEEDED_PREFIX = "BUDGET_EXCEEDED: "
 MIN_BODY_CHARS = 40
 
 
-@dataclass
-class RequestBudget:
-    """PubMed + Europe PMC combined request cap, shared by ONE
-    ``PubMedLiteratureAdapter`` instance across every target in a run
-    (Phase 3F.0.1 requirement 4). Mutable by design: counters accumulate
-    across the whole ``AcquisitionExecutor.run()`` call, exactly like the
-    executor's own ``request_cache`` does.
-    """
+@dataclass(frozen=True)
+class RequestBudgetLimits:
+    """The CAPS only -- immutable configuration, safe to hold for the
+    lifetime of a ``PubMedLiteratureAdapter`` instance (Phase 3F.0.2
+    requirement 2). Never carries any usage counter; see
+    ``RequestBudgetUsage`` for the run-scoped mutable half."""
 
     max_search_requests: int = DEFAULT_MAX_SEARCH_REQUESTS
     max_articles: int = DEFAULT_MAX_ARTICLES
     max_fulltext_fetches: int = DEFAULT_MAX_FULLTEXT_FETCHES
     max_total_requests: int = DEFAULT_MAX_TOTAL_REQUESTS
+
+
+@dataclass
+class RequestBudgetUsage:
+    """PubMed + Europe PMC combined request USAGE -- mutable, and deliberately
+    never stored on ``self`` by either adapter class (Phase 3F.0.2
+    requirement 2). Instead, one instance is created per
+    ``AcquisitionExecutor.run()`` call and stashed in
+    ``ExecutionContext.adapter_state`` (see ``_budget_usage_for`` below), so
+    it is: shared across every literature target WITHIN one run (that
+    dict is threaded, by the same object reference, through every
+    per-target ``ExecutionContext`` the executor builds); and reset to zero
+    for a brand new run, even when the exact same
+    ``PubMedLiteratureAdapter``/``EuropePmcFullTextAdapter`` instances are
+    reused across two separate ``.run()`` calls, and even when the first
+    run ended in FAILED/an exception (the executor's own ``adapter_state``
+    dict is a fresh local variable each call, never carried over).
+
+    Not thread-safe: ``AcquisitionExecutor.run()`` itself processes targets
+    sequentially in a single thread, and this class assumes the same --
+    concurrent ``.execute()`` calls against the same
+    ``ExecutionContext.adapter_state`` from multiple threads (e.g. two
+    ``run()`` calls sharing one adapter instance concurrently, or a future
+    parallelized executor) are NOT supported and would race on these plain
+    ``int`` counters.
+    """
+
     search_requests_made: int = 0
     fulltext_fetches_made: int = 0
     articles_processed: int = 0
     total_requests_made: int = 0
 
-    def cap_articles(self, pmids: list[str]) -> tuple[list[str], list[str]]:
+    def cap_articles(self, limits: RequestBudgetLimits, pmids: list[str]) -> tuple[list[str], list[str]]:
         """``(allowed, excluded)`` -- bounds how many NEW pmids may be
         processed this run (never fan-out into Europe PMC search/fullText
         without limit merely because a candidate list is large). Reserves
         the allowed slots immediately, so two calls in the same run never
         double-count."""
-        remaining = max(0, self.max_articles - self.articles_processed)
+        remaining = max(0, limits.max_articles - self.articles_processed)
         allowed, excluded = pmids[:remaining], pmids[remaining:]
         self.articles_processed += len(allowed)
         return allowed, excluded
 
-    def reserve_search(self) -> bool:
+    def reserve_search(self, limits: RequestBudgetLimits) -> bool:
         """Call immediately before issuing an ESearch OR Europe PMC
         ``/search`` GET (they share this one budget) -- never after."""
-        if self.search_requests_made >= self.max_search_requests:
+        if self.search_requests_made >= limits.max_search_requests:
             return False
-        if self.total_requests_made >= self.max_total_requests:
+        if self.total_requests_made >= limits.max_total_requests:
             return False
         self.search_requests_made += 1
         self.total_requests_made += 1
         return True
 
-    def reserve_fulltext(self) -> bool:
+    def reserve_fulltext(self, limits: RequestBudgetLimits) -> bool:
         """Call immediately before issuing a Europe PMC ``fullTextXML``
         GET -- never after."""
-        if self.fulltext_fetches_made >= self.max_fulltext_fetches:
+        if self.fulltext_fetches_made >= limits.max_fulltext_fetches:
             return False
-        if self.total_requests_made >= self.max_total_requests:
+        if self.total_requests_made >= limits.max_total_requests:
             return False
         self.fulltext_fetches_made += 1
         self.total_requests_made += 1
         return True
 
-    def reserve_other(self) -> bool:
+    def reserve_other(self, limits: RequestBudgetLimits) -> bool:
         """Call immediately before issuing an EFetch GET -- EFetch has no
         dedicated per-kind cap (one call already covers a whole batch), but
         it still counts toward ``max_total_requests``."""
-        if self.total_requests_made >= self.max_total_requests:
+        if self.total_requests_made >= limits.max_total_requests:
             return False
         self.total_requests_made += 1
         return True
+
+
+#: Private key this module uses to stash its own ``RequestBudgetUsage`` in
+#: ``ExecutionContext.adapter_state`` -- private to this module by
+#: convention (a leading underscore plus the module's own adapter_id), so
+#: it can never collide with another adapter's own state.
+_BUDGET_USAGE_STATE_KEY = "_pubmed_europepmc_request_budget_usage"
+
+
+def _budget_usage_for(context: ExecutionContext) -> RequestBudgetUsage:
+    """The current run's shared ``RequestBudgetUsage``, creating one (and
+    only one, for the whole run) the first time any literature step in
+    this run asks for it (Phase 3F.0.2 requirement 2)."""
+    usage = context.adapter_state.get(_BUDGET_USAGE_STATE_KEY)
+    if usage is None:
+        usage = RequestBudgetUsage()
+        context.adapter_state[_BUDGET_USAGE_STATE_KEY] = usage
+    return usage
 
 
 def _require_allowed_host(url: str) -> None:
@@ -237,11 +300,26 @@ def _require_allowed_host(url: str) -> None:
         raise ValueError(f"refusing to build a request against a non-allow-listed host: {host!r}")
 
 
+#: wire_url / public_url boundary (Phase 3F.0.2 requirement 1). A "wire_url"
+#: is a URL actually handed to ``http.get()`` -- the ONLY place it may ever
+#: be used. A "public_url" (built from a wire_url by ``_public_request_url``
+#: below, immediately after construction) is what every other consumer
+#: sees: cache keys, failure/exception text, ``StepExecutionResult.payload``,
+#: ``Document.url``, and (in a future Live Smoke phase) a Capture Manifest's
+#: ``requested_url``/``final_url``. It is fine -- necessary -- for
+#: email/api_key to reach the real transport as part of a wire_url; it is
+#: never fine for a wire_url itself to be retained anywhere else.
+#: ``_secret_values``/``_sanitize_text`` below add a second, independent
+#: layer that redacts by VALUE (raw and percent-encoded) rather than by
+#: query-parameter name, so a secret that leaked into free text -- an
+#: exception message, a future retry diagnostic -- that isn't shaped like a
+#: URL at all is still caught.
 def _public_request_url(url: str) -> str:
-    """Strips any ``email``/``api_key`` query parameter before this URL is
-    ever placed in a diagnostic, log line, or Capture-Manifest-shaped
-    payload (Phase 3F requirement 4: secrets must never appear in a
-    displayed requested URL)."""
+    """Strips any ``email``/``api_key`` query parameter -- never ``tool``,
+    which carries no personal information and is not treated as a secret
+    (see ``config.Settings.secret_values``, which likewise excludes it) --
+    before this URL is ever placed in a diagnostic, log line, cache key, or
+    Capture-Manifest-shaped payload."""
     if "email=" not in url and "api_key=" not in url:
         return url
     prefix, _, query = url.partition("?")
@@ -251,6 +329,37 @@ def _public_request_url(url: str) -> str:
         if pair and not pair.startswith("email=") and not pair.startswith("api_key=")
     ]
     return prefix + ("?" + "&".join(kept) if kept else "")
+
+
+def _secret_values(settings: Any) -> tuple[str, ...]:
+    """The real secret VALUES (never ``tool``) this module might send this
+    run, for the value-based redaction pass below."""
+    if settings is None:
+        return ()
+    values = [
+        getattr(settings, attr, "") for attr in ("ncbi_email", "ncbi_api_key")
+    ]
+    return tuple(v for v in values if v)
+
+
+def _sanitize_text(text: str, *, settings: Any = None, wire_url: str = "", public_url: str = "") -> str:
+    """Belt-and-braces text sanitizer (Phase 3F.0.2 requirement 1): first
+    replaces a known wire_url substring with its already-computed
+    public_url (covers a transport exception that embeds the full request
+    URL verbatim), then replaces every known secret VALUE -- both raw and
+    percent-encoded, so this catches a secret whether or not it was
+    URL-encoded at the point of leakage -- with a fixed redaction marker.
+    Applied to every string this module returns, raises, caches, or logs
+    that did not already go through ``_public_request_url`` on a
+    freshly-built URL.
+    """
+    result = text
+    if wire_url and public_url and wire_url != public_url:
+        result = result.replace(wire_url, public_url)
+    for secret in _secret_values(settings):
+        result = result.replace(secret, "[REDACTED]")
+        result = result.replace(quote(secret, safe=""), "[REDACTED]")
+    return result
 
 
 def _eutils_params(base: dict[str, str], settings: Any) -> dict[str, str]:
@@ -268,6 +377,24 @@ def _eutils_params(base: dict[str, str], settings: Any) -> dict[str, str]:
     if api_key:
         params["api_key"] = api_key
     return params
+
+
+def _safe_get(http: Any, wire_url: str, public_url: str, settings: Any) -> tuple[Any, str | None]:
+    """The ONLY call site in this module that may ever pass a wire_url to
+    the transport. Calls ``http.get(wire_url)``, catching and sanitizing
+    ANY exception the transport raises before it could propagate a raw
+    wire_url or secret value outward (Phase 3F.0.2 requirement 1: "even if
+    an exception from urllib etc. contains a raw URL, sanitize it before
+    returning it outward"). Returns ``(result, None)`` on a call that
+    completed (including a transport-reported non-OK result, which the
+    caller inspects via ``result.ok`` as before) or
+    ``(None, sanitized_failure_reason)`` if the transport itself raised.
+    """
+    try:
+        return http.get(wire_url), None
+    except Exception as exc:  # noqa: BLE001 - must never leak wire_url/secrets outward
+        sanitized = _sanitize_text(str(exc), settings=settings, wire_url=wire_url, public_url=public_url)
+        return None, f"transport raised {type(exc).__name__}: {sanitized}"
 
 
 @dataclass(frozen=True)
@@ -324,13 +451,15 @@ class EuropePmcFullTextAdapter:
     3/6). Composed by ``PubMedLiteratureAdapter`` -- never registered under
     its own adapter_id (see module docstring)."""
 
-    def __init__(self, http: Any, settings: Any = None, *, budget: RequestBudget | None = None) -> None:
+    def __init__(self, http: Any, settings: Any = None, *, limits: RequestBudgetLimits | None = None) -> None:
         self.http = http
         self.settings = settings
-        #: Shared with the composing ``PubMedLiteratureAdapter`` -- a
-        #: standalone instantiation (e.g. in a test) gets its own private
-        #: budget rather than failing (Phase 3F.0.1 requirement 4).
-        self.budget = budget if budget is not None else RequestBudget()
+        #: Immutable caps only -- safe to share with the composing
+        #: ``PubMedLiteratureAdapter`` across the instance's whole lifetime
+        #: (Phase 3F.0.2 requirement 2). USAGE lives in
+        #: ``ExecutionContext.adapter_state`` instead (``_budget_usage_for``),
+        #: never on ``self``.
+        self.limits = limits if limits is not None else RequestBudgetLimits()
 
     def search(self, pmid: str, context: ExecutionContext) -> tuple[EuropePmcSearchResult | None, int, str | None]:
         """Returns ``(result, http_requests_made, failure_reason)``. Never
@@ -339,9 +468,10 @@ class EuropePmcFullTextAdapter:
         ``BUDGET_EXCEEDED_PREFIX`` when the search budget, not a real
         transport failure, is why this did not run."""
         query = urlencode({"query": f"ext_id:{pmid} AND src:med", "format": "json"})
-        url = f"{EUROPEPMC_SEARCH_URL}?{query}"
-        _require_allowed_host(url)
-        cache_key = f"http_get:{_public_request_url(url)}"
+        wire_url = f"{EUROPEPMC_SEARCH_URL}?{query}"
+        _require_allowed_host(wire_url)
+        public_url = _public_request_url(wire_url)  # Europe PMC never carries email/api_key; kept for consistency
+        cache_key = f"http_get:{public_url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
@@ -349,12 +479,22 @@ class EuropePmcFullTextAdapter:
             results = parse_europepmc_search_response(cached.payload.get("body", ""))
             return (results[0] if results else None), 0, None
 
-        if not self.budget.reserve_search():
+        usage = _budget_usage_for(context)
+        if not usage.reserve_search(self.limits):
             return None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC search budget exhausted for PMID {pmid}"
 
-        fetch = self.http.get(url)
+        fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
+        if transport_error is not None:
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
+                failure_reason=transport_error,
+            )
+            return None, 1, transport_error
         if not fetch.ok:
-            failure = f"Europe PMC search failed for PMID {pmid}: {fetch.outcome} {fetch.error}"
+            failure = _sanitize_text(
+                f"Europe PMC search failed for PMID {pmid}: {fetch.outcome} {fetch.error}",
+                settings=self.settings, wire_url=wire_url, public_url=public_url,
+            )
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
                 failure_reason=failure,
@@ -378,20 +518,33 @@ class EuropePmcFullTextAdapter:
         the caller in ``PubMedLiteratureAdapter._fetch`` is the one place
         that decision is made, so it cannot be bypassed by a second code
         path)."""
-        url = EUROPEPMC_FULLTEXT_URL.format(source="PMC", pmcid=pmcid)
-        _require_allowed_host(url)
-        cache_key = f"http_get:{_public_request_url(url)}"
+        wire_url = EUROPEPMC_FULLTEXT_URL.format(source="PMC", pmcid=pmcid)
+        _require_allowed_host(wire_url)
+        public_url = _public_request_url(wire_url)
+        cache_key = f"http_get:{public_url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.BODY_FETCHED:
                 return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed"
             text = cached.payload.get("text", "")
-        elif not self.budget.reserve_fulltext():
-            return None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC full-text fetch budget exhausted for PMCID {pmcid}"
         else:
-            fetch = self.http.get(url)
+            usage = _budget_usage_for(context)
+            if not usage.reserve_fulltext(self.limits):
+                return None, 0, (
+                    f"{BUDGET_EXCEEDED_PREFIX}Europe PMC full-text fetch budget exhausted for PMCID {pmcid}"
+                )
+            fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
+            if transport_error is not None:
+                context.request_cache[cache_key] = StepExecutionResult(
+                    step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
+                    http_requests_made=1, failure_reason=transport_error,
+                )
+                return None, 1, transport_error
             if not fetch.ok:
-                failure = f"Europe PMC full-text fetch failed for {pmcid}: {fetch.outcome} {fetch.error}"
+                failure = _sanitize_text(
+                    f"Europe PMC full-text fetch failed for {pmcid}: {fetch.outcome} {fetch.error}",
+                    settings=self.settings, wire_url=wire_url, public_url=public_url,
+                )
                 context.request_cache[cache_key] = StepExecutionResult(
                     step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
                     http_requests_made=1, failure_reason=failure,
@@ -415,9 +568,14 @@ class EuropePmcFullTextAdapter:
             return None, (0 if cached is not None else 1), (
                 "Europe PMC full-text body did not match the expected JATS-like <article> shape"
             )
-        doc_id = derive_document_id("literature_europepmc_fulltext", url, text)
+        # public_url only -- this is a genuine Europe PMC URL, never a wire
+        # URL carrying NCBI courtesy params (Europe PMC calls never do), but
+        # routed through the same public_url variable for consistency and
+        # auditability (grep for "wire_url" finds every real secret-bearing
+        # use site; this one is a documented no-op).
+        doc_id = derive_document_id("literature_europepmc_fulltext", public_url, text)
         document = Document(
-            doc_id=doc_id, url=url, title=f"Europe PMC open-access full text (PMCID {pmcid})",
+            doc_id=doc_id, url=public_url, title=f"Europe PMC open-access full text (PMCID {pmcid})",
             publisher="Europe PMC", is_company_ir=False, text=parsed.full_text,
             content_kind=ContentKind.FULL_DOCUMENT, provenance=Provenance.LIVE,
             retrieved_at=utc_now_iso(), authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
@@ -443,14 +601,16 @@ class PubMedLiteratureAdapter:
     ) -> None:
         self.http = http
         self.settings = settings
-        #: Shared with ``self.europepmc`` -- one budget per adapter
-        #: instance, persisting across every target in a run (Phase 3F.0.1
-        #: requirement 4).
-        self.budget = RequestBudget(
+        #: Immutable caps, shared with ``self.europepmc`` -- safe to keep on
+        #: ``self`` for the instance's whole lifetime, since it carries no
+        #: usage counter (Phase 3F.0.2 requirement 2). Actual usage lives in
+        #: ``ExecutionContext.adapter_state`` per run; see
+        #: ``_budget_usage_for``.
+        self.limits = RequestBudgetLimits(
             max_search_requests=max_search_requests, max_articles=max_articles,
             max_fulltext_fetches=max_fulltext_fetches, max_total_requests=max_total_requests,
         )
-        self.europepmc = EuropePmcFullTextAdapter(http, settings, budget=self.budget)
+        self.europepmc = EuropePmcFullTextAdapter(http, settings, limits=self.limits)
 
     def execute(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
         if step.step_kind is StepKind.LOCATE:
@@ -472,21 +632,32 @@ class PubMedLiteratureAdapter:
             {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(max_pmids)},
             self.settings,
         )
-        url = f"{NCBI_ESEARCH_URL}?{urlencode(params)}"
-        _require_allowed_host(url)
-        cache_key = f"http_get:{_public_request_url(url)}"
+        wire_url = f"{NCBI_ESEARCH_URL}?{urlencode(params)}"
+        _require_allowed_host(wire_url)
+        public_url = _public_request_url(wire_url)
+        cache_key = f"http_get:{public_url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
                 return None, 0, cached.failure_reason or "cached ESearch failed"
             return list(cached.payload.get("pmids", [])), 0, None
 
-        if not self.budget.reserve_search():
+        usage = _budget_usage_for(context)
+        if not usage.reserve_search(self.limits):
             return None, 0, f"{BUDGET_EXCEEDED_PREFIX}ESearch budget exhausted for term: {term}"
 
-        fetch = self.http.get(url)
+        fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
+        if transport_error is not None:
+            context.request_cache[cache_key] = StepExecutionResult(
+                step_id="_cache_esearch", status=StepStatus.FAILED, http_requests_made=1,
+                failure_reason=transport_error,
+            )
+            return None, 1, transport_error
         if not fetch.ok:
-            failure = f"ESearch failed: {fetch.outcome} {fetch.error} (url={_public_request_url(url)})"
+            failure = _sanitize_text(
+                f"ESearch failed: {fetch.outcome} {fetch.error} (url={public_url})",
+                settings=self.settings, wire_url=wire_url, public_url=public_url,
+            )
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id="_cache_esearch", status=StepStatus.FAILED, http_requests_made=1,
                 failure_reason=failure,
@@ -505,7 +676,7 @@ class PubMedLiteratureAdapter:
             esearchresult = body.get("esearchresult")
             pmids = esearchresult.get("idlist") if isinstance(esearchresult, dict) else None
         if pmids is None:
-            failure = f"malformed ESearch response (url={_public_request_url(url)})"
+            failure = f"malformed ESearch response (url={public_url})"
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id="_cache_esearch", status=StepStatus.FAILED, http_requests_made=1,
                 failure_reason=failure,
@@ -602,7 +773,7 @@ class PubMedLiteratureAdapter:
         call (never one at a time -- Phase 3F requirement). Returns
         ``pmid -> ParsedPubmedArticle`` for every PMID successfully
         resolved (from cache or this call), plus the list of PMIDs excluded
-        by ``RequestBudget.cap_articles`` (Phase 3F.0.1 requirement 4) --
+        by ``RequestBudgetUsage.cap_articles`` (Phase 3F.0.1 requirement 4) --
         never fetched, never cached as failed, simply not yet processed."""
         resolved: dict[str, ParsedPubmedArticle] = {}
         to_fetch: list[str] = []
@@ -620,22 +791,34 @@ class PubMedLiteratureAdapter:
         # article budget -- already-cached PMIDs above never reach this
         # point at all, so the same-PMID-fan-out dedup guarantee is
         # unaffected by this cap.
-        to_fetch, budget_excluded = self.budget.cap_articles(to_fetch)
+        usage = _budget_usage_for(context)
+        to_fetch, budget_excluded = usage.cap_articles(self.limits, to_fetch)
         if not to_fetch:
             return resolved, 0, None, budget_excluded
 
-        if not self.budget.reserve_other():
+        if not usage.reserve_other(self.limits):
             return resolved, 0, None, budget_excluded + to_fetch
 
         params = _eutils_params(
             {"db": "pubmed", "id": ",".join(to_fetch), "retmode": "xml", "rettype": "abstract"},
             self.settings,
         )
-        url = f"{NCBI_EFETCH_URL}?{urlencode(params)}"
-        _require_allowed_host(url)
-        fetch = self.http.get(url)
+        wire_url = f"{NCBI_EFETCH_URL}?{urlencode(params)}"
+        _require_allowed_host(wire_url)
+        public_url = _public_request_url(wire_url)
+        fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
+        if transport_error is not None:
+            for pmid in to_fetch:
+                context.request_cache[f"literature_pmid:{pmid}"] = StepExecutionResult(
+                    step_id=f"_cache_literature_pmid_{pmid}", status=StepStatus.FAILED,
+                    failure_reason=transport_error,
+                )
+            return (resolved if resolved else None), 1, transport_error, budget_excluded
         if not fetch.ok:
-            failure = f"EFetch failed: {fetch.outcome} {fetch.error} (url={_public_request_url(url)})"
+            failure = _sanitize_text(
+                f"EFetch failed: {fetch.outcome} {fetch.error} (url={public_url})",
+                settings=self.settings, wire_url=wire_url, public_url=public_url,
+            )
             for pmid in to_fetch:
                 context.request_cache[f"literature_pmid:{pmid}"] = StepExecutionResult(
                     step_id=f"_cache_literature_pmid_{pmid}", status=StepStatus.FAILED,
@@ -704,8 +887,15 @@ class PubMedLiteratureAdapter:
                 payload={**upstream},
             )
 
-        pubmed_url_by_pmid = {
-            pmid: f"{NCBI_EFETCH_URL}?{urlencode({'db': 'pubmed', 'id': pmid, 'retmode': 'xml'})}"
+        # Deliberately rebuilt WITHOUT ``_eutils_params`` (no tool/email/
+        # api_key) -- this is a public_url by construction, never a
+        # wire_url, since it identifies the document for Document.url/
+        # derive_document_id, never a real outbound request (the actual
+        # EFetch request already happened above, via the batched wire_url).
+        pubmed_public_url_by_pmid = {
+            pmid: _public_request_url(
+                f"{NCBI_EFETCH_URL}?{urlencode({'db': 'pubmed', 'id': pmid, 'retmode': 'xml'})}"
+            )
             for pmid in articles
         }
         # Composed Europe PMC OA full-text attempt, per PMCID -- only ever
@@ -744,10 +934,10 @@ class PubMedLiteratureAdapter:
         for pmid, article in articles.items():
             cached = context.request_cache.get(f"literature_pmid:{pmid}")
             raw_xml = cached.payload.get("raw_xml", "") if cached is not None else ""
-            url = pubmed_url_by_pmid[pmid]
-            doc_id = derive_document_id("literature_pubmed", url, raw_xml or article.pmid)
+            public_url = pubmed_public_url_by_pmid[pmid]
+            doc_id = derive_document_id("literature_pubmed", public_url, raw_xml or article.pmid)
             document = Document(
-                doc_id=doc_id, url=url,
+                doc_id=doc_id, url=public_url,
                 title=article.article_title if article.article_title != UNKNOWN else f"PMID {pmid}",
                 publisher=article.journal_title if article.journal_title != UNKNOWN else "PubMed",
                 published_date=article.publication_date,
@@ -872,4 +1062,6 @@ __all__ = [
     "LiteratureReference",
     "LiteratureSearchQuery",
     "PubMedLiteratureAdapter",
+    "RequestBudgetLimits",
+    "RequestBudgetUsage",
 ]

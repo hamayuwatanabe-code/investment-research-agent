@@ -20,12 +20,23 @@ from dataclasses import replace
 from typing import Any
 
 from ..schemas.agent_io import Evaluation
+from ..schemas.enums import DocumentAuthority
 from ..schemas.fact import Fact
 
 ANON_LABEL = "Company X"
 
 #: Fields that would identify the company and are therefore rewritten.
 _IDENTIFYING_FACT_FIELDS = ("claim", "notes", "source_title", "value")
+
+#: Phase 3F.0.2 requirement 3: ``FactCollectorAgent._to_fact`` stamps every
+#: fact's ``notes`` with ``"collected_by=<collector>"`` -- a collector/
+#: adapter identity string (e.g. "literature_pubmed", "form4_xml_parser"),
+#: never a company identity marker, so ``_identity_patterns`` alone would
+#: never redact it. The Blind Judge must not see WHICH collector/adapter
+#: produced a fact any more than it should see the company itself: that is
+#: itself a signal about evidence provenance the Judge is meant to weigh
+#: from tier/evidence_class alone, not from being told the producer's name.
+_COLLECTOR_IDENTITY_RE = re.compile(r"collected_by=\S+")
 
 
 def _redact(text: str, patterns: Sequence[re.Pattern[str]]) -> str:
@@ -108,13 +119,32 @@ def anonymize_facts(
             # nothing legitimate for the Judge to do with it, and leaving it
             # untouched would leak the identity marker straight through.
             "document_id": None,
+            # Phase 3F.0.2 requirement 3: source_authority (added for
+            # literature facts, e.g. DocumentAuthority.BIOMEDICAL_LITERATURE)
+            # is collector/adapter provenance, not a fact the Judge is meant
+            # to weigh directly -- mirrors document_id's own nulling
+            # immediately above, for the identical reason. dataclasses.
+            # replace() preserves any field not named in this dict, so a
+            # NEW Fact field added later must be added here explicitly too
+            # if it can ever identify a producer or a company (this is
+            # exactly the gap that let source_authority through
+            # un-redacted before this fix -- see
+            # test_literature_evidence_boundary.py's Blind Judge audit).
+            "source_authority": DocumentAuthority.UNKNOWN,
         }
         for field_name in _IDENTIFYING_FACT_FIELDS:
             if field_name in ("source_title",):
                 continue
             value = getattr(fact, field_name)
             if isinstance(value, str):
-                changes[field_name] = _redact(value, patterns)
+                value = _redact(value, patterns)
+                if field_name == "notes":
+                    # collector/adapter identity (e.g. "collected_by=
+                    # literature_pubmed") is never a ticker/company alias,
+                    # so _redact()'s identity-marker patterns never touch
+                    # it -- stripped separately here.
+                    value = _COLLECTOR_IDENTITY_RE.sub("collected_by=[REDACTED]", value)
+                changes[field_name] = value
         out.append(replace(fact, **changes))
     return tuple(out), ref_map
 

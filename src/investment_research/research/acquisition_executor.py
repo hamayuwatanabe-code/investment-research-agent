@@ -162,6 +162,21 @@ class ExecutionContext:
     #: guessing lives here -- see ``literature_acquisition_adapter.py``'s
     #: module docstring).
     literature_references: Mapping[str, Any] = field(default_factory=dict)
+    #: Phase 3F.0.2: run-scoped (never reset between targets, exactly like
+    #: ``request_cache``), generic scratch space an adapter may use for its
+    #: OWN mutable per-run state -- e.g.
+    #: ``literature_acquisition_adapter.py``'s ``RequestBudgetUsage``, which
+    #: must be shared across every literature target within one ``run()``
+    #: call but must NEVER survive into a second, later ``run()`` call even
+    #: when the same adapter instance is reused. ``AcquisitionExecutor.run()``
+    #: constructs a single fresh dict per call (mirroring ``request_cache``'s
+    #: own construction) and threads it through every per-target
+    #: ``ExecutionContext`` it builds -- an adapter reusing the SAME key
+    #: across calls to this field only ever collides with itself, never with
+    #: another adapter, so each adapter should key its own state with a
+    #: private, adapter-specific string. This executor itself never reads or
+    #: interprets any value stored here.
+    adapter_state: dict[str, Any] = field(default_factory=dict)
 
     def payload_for(self, step_id: str) -> Mapping[str, Any]:
         return self.payloads.get(step_id, {})
@@ -261,6 +276,12 @@ class AcquisitionExecutor:
     ) -> ExecutionReport:
         outcomes: dict[str, StepStatus] = {}
         request_cache: dict[str, StepExecutionResult] = {}
+        #: Fresh every call, exactly like ``request_cache`` above -- this is
+        #: what makes ``ExecutionContext.adapter_state`` (and anything an
+        #: adapter stores there, e.g. a request budget's usage counters)
+        #: reset to empty on every new ``run()`` even when the SAME executor
+        #: or adapter instances are reused (Phase 3F.0.2 requirement 2).
+        adapter_state: dict[str, Any] = {}
         diagnostics = ExecutionDiagnostics(planned_steps=len(graph.steps))
         target_reports: list[TargetExecutionReport] = []
         web_search_uses_made = 0
@@ -277,6 +298,7 @@ class AcquisitionExecutor:
                 study_references=study_references or {},
                 form4_references=form4_references or {},
                 literature_references=literature_references or {},
+                adapter_state=adapter_state,
             )
             step_results: list[StepExecutionResult] = []
 

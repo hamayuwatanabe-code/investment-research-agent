@@ -17,6 +17,7 @@ from investment_research.collectors.literature import (
     LITERATURE_UNIT_PREFIX,
     raw_facts_from_pubmed_article,
 )
+from investment_research.orchestrator.anonymize import anonymize_facts
 from investment_research.research.escalation import _EVIDENCE_FOR_AUTHORITY, _evidence_for_authority
 from investment_research.schemas.agent_io import AgentInput
 from investment_research.schemas.enums import (
@@ -305,7 +306,7 @@ def test_validate_fact_accepts_peer_reviewed_assertion_with_independent_confirma
 
 
 # --- storage round-trip: the new enum value persists and reads back --------
-def test_peer_reviewed_publication_assertion_round_trips_through_sqlite():
+def test_biomedical_publication_assertion_round_trips_through_sqlite():
     conn = open_db(":memory:")
     repo = Repository(conn)
     repo.upsert_company("SAMPB", "Sample Biotech Holdings, Inc.")
@@ -324,6 +325,43 @@ def test_peer_reviewed_publication_assertion_round_trips_through_sqlite():
     assert row is not None
     assert row["evidence_class"] == "BIOMEDICAL_PUBLICATION_ASSERTION"
     assert EvidenceClass(row["evidence_class"]) is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
+
+
+def test_source_authority_round_trips_through_sqlite():
+    """Phase 3F.0.2 requirement 3: a literature fact's source_authority
+    persists and reads back exactly; other fact producers (which never set
+    it) keep reading back the pre-existing UNKNOWN default unaffected --
+    see tests/unit/test_db_migration.py for the additive-column migration
+    (NULL old row -> 'UNKNOWN') itself."""
+    conn = open_db(":memory:")
+    repo = Repository(conn)
+    repo.upsert_company("SAMPB", "Sample Biotech Holdings, Inc.")
+
+    literature_fact = _literature_fact(
+        "Reported result wording", unit="reported_result_wording",
+        source_url="https://eutils.ncbi.nlm.nih.gov/x",
+    )
+    repo.save_source(
+        Source(
+            source_id=literature_fact.source_id, url=literature_fact.source_url,
+            title=literature_fact.source_title, tier=literature_fact.source_tier,
+        )
+    )
+    repo.save_fact(literature_fact)
+    row = repo.latest_fact_row(literature_fact.fact_id)
+    assert row is not None
+    assert row["source_authority"] == "BIOMEDICAL_LITERATURE"
+    assert DocumentAuthority(row["source_authority"]) is DocumentAuthority.BIOMEDICAL_LITERATURE
+
+    other_fact = make_fact("An ordinary SEC-sourced claim", ticker="SAMPB", category=FactCategory.CAPITAL_STRUCTURE)
+    assert other_fact.source_authority is DocumentAuthority.UNKNOWN
+    repo.save_source(
+        Source(source_id=other_fact.source_id, url=other_fact.source_url, title=other_fact.source_title, tier=other_fact.source_tier)
+    )
+    repo.save_fact(other_fact)
+    other_row = repo.latest_fact_row(other_fact.fact_id)
+    assert other_row is not None
+    assert other_row["source_authority"] == "UNKNOWN"
 
 
 # --- retraction: never decision-grade regardless of confirmation status ----
@@ -347,3 +385,87 @@ def test_retracted_article_facts_never_decision_grade():
     assert assessed
     for fact in assessed:
         assert not fact.is_decision_grade
+
+
+# --- Phase 3F.0.2 requirement 3: Blind Judge never sees literature provenance
+def test_blind_judge_input_never_reveals_literature_source_authority_or_identity():
+    """A literature fact converted to a Blind Judge input (anonymize_facts)
+    must never carry source_authority, document_id, a real source URL, or
+    collector/adapter identity -- scanning the FULL serialized payload for
+    every marker string a leak could take."""
+    article = _pubmed_article("structured_abstract.xml")
+    source = Source(
+        source_id=make_source_id("https://eutils.ncbi.nlm.nih.gov/x", "t"),
+        url="https://eutils.ncbi.nlm.nih.gov/x", title="t", tier=SourceTier.TIER_2,
+        content_kind=ContentKind.EXCERPT,
+    )
+    raw_facts = raw_facts_from_pubmed_article("SAMPB", article, source, document_id="doc_lit_blind_test")
+    facts = [FactCollectorAgent._to_fact(r, run_id="r", provenance=r.source.provenance) for r in raw_facts]
+    agent = EvidenceIntegrityAgent(today=TODAY)
+    assessed = list(
+        agent.run(
+            AgentInput(
+                agent_id="evidence_integrity", run_id="r", ticker="SAMPB",
+                company_name="Sample Biotech Holdings, Inc.", facts=tuple(facts),
+            )
+        ).facts
+    )
+    assert assessed
+    assert any(f.evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION for f in assessed)
+    assert any(f.source_authority is DocumentAuthority.BIOMEDICAL_LITERATURE for f in assessed)
+
+    blind_facts, _ref_map = anonymize_facts(
+        assessed, ticker="SAMPB", company_name="Sample Biotech Holdings, Inc.",
+    )
+    assert blind_facts
+
+    # Field NAMES (source_authority=, document_id=) always appear in a
+    # dataclass repr regardless of value -- these markers check the VALUES
+    # that would actually identify the producer/document if leaked.
+    forbidden_markers = (
+        "BIOMEDICAL_LITERATURE",
+        "doc_lit_blind_test",
+        "eutils.ncbi.nlm.nih.gov",
+        "literature_pubmed",
+        "collected_by=literature",
+    )
+    for fact in blind_facts:
+        assert fact.source_authority is DocumentAuthority.UNKNOWN
+        assert fact.document_id is None
+        # The full dataclass repr is the strongest available proxy for "any
+        # serialized payload a Blind Judge prompt-builder might construct
+        # from this object" -- every field, not just the ones this test
+        # happens to name.
+        serialized = repr(fact)
+        for marker in forbidden_markers:
+            assert marker not in serialized, f"{marker!r} leaked into blind fact: {serialized[:400]}"
+
+
+def test_blind_judge_notes_strip_collector_identity_but_keep_other_notes_content():
+    """The collected_by=<collector> fragment is redacted, but the rest of
+    notes (when present) is otherwise preserved/redacted only for identity
+    markers, not wholesale deleted."""
+    fact = _literature_fact(
+        "Reported result wording", unit="reported_result_wording",
+        source_url="https://eutils.ncbi.nlm.nih.gov/y",
+    )
+    fact = Fact(**{**fact.__dict__, "notes": "collected_by=literature_pubmed; some other diagnostic note"})
+    blind_facts, _ref_map = anonymize_facts(
+        [fact], ticker="SAMPB", company_name="Sample Biotech Holdings, Inc.",
+    )
+    assert len(blind_facts) == 1
+    assert "literature_pubmed" not in blind_facts[0].notes
+    assert "collected_by=" not in blind_facts[0].notes or "[REDACTED]" in blind_facts[0].notes
+    assert "some other diagnostic note" in blind_facts[0].notes
+
+
+def test_non_literature_fact_anonymization_is_unaffected_by_source_authority_field():
+    """A pre-existing (non-literature) fact producer, whose source_authority
+    was already UNKNOWN, sees no behavior change from this fix -- the field
+    is simply confirmed UNKNOWN before and after anonymization."""
+    fact = make_fact("The company completed a private placement", category=FactCategory.CAPITAL_STRUCTURE)
+    assert fact.source_authority is DocumentAuthority.UNKNOWN
+    blind_facts, _ref_map = anonymize_facts(
+        [fact], ticker="TEST", company_name="Test Co",
+    )
+    assert blind_facts[0].source_authority is DocumentAuthority.UNKNOWN

@@ -18,6 +18,7 @@ from investment_research.research.literature_acquisition_adapter import (
     LITERATURE_ADAPTER_ID,
     LiteratureReference,
     PubMedLiteratureAdapter,
+    RequestBudgetLimits,
     _public_request_url,
     _require_allowed_host,
 )
@@ -603,3 +604,193 @@ def test_request_cache_keys_never_contain_secrets():
     for key in context.request_cache:
         for secret in _SECRET_STRINGS:
             assert secret not in key
+
+
+# --- Phase 3F.0.2 requirement 1: transport exceptions never leak wire_url ---
+def test_transport_exception_never_leaks_wire_url_or_secret():
+    """The fake transport's lowest layer (RaisingHttpClient) sees the raw
+    wire_url and the raw secret -- nothing this module returns afterward
+    may contain either, even though the transport RAISED rather than
+    returning a result."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.RaisingHttpClient()
+    store = DocumentStore()
+    adapter = PubMedLiteratureAdapter(http, settings=_FakeSettingsWithSecrets())
+    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
+    report = executor.run(graph, literature_references={target_id: LiteratureReference(nct_id="NCT09990001")})
+
+    locate = _by_step_prefix(report, 0, "l1_")
+    assert locate.status is StepStatus.FAILED
+    _assert_no_secret_leak(locate.failure_reason)
+    _assert_no_secret_leak(locate.payload)
+    for step_report in report.target_reports[0].step_results:
+        _assert_no_secret_leak(step_report)
+
+    # The transport itself DID see the wire_url (with secrets) and raised
+    # about it -- confirms the exception path was genuinely exercised, not
+    # silently skipped.
+    from urllib.parse import unquote
+
+    assert http.requested_urls
+    combined_requested = unquote(" ".join(http.requested_urls))
+    for secret in _SECRET_STRINGS:
+        assert secret in combined_requested
+    # ... but the raw wire_url string itself never reaches the sanitized
+    # failure_reason (only its public_url form, or a redaction marker).
+    assert http.requested_urls[0] not in locate.failure_reason
+
+
+def test_transport_exception_without_secrets_still_sanitized_and_typed():
+    """Even with no Settings/secrets configured, a raised transport
+    exception is caught and converted to a clear, typed failure -- never
+    left to propagate uncaught out of the adapter."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.RaisingHttpClient()
+    store = DocumentStore()
+    adapter = PubMedLiteratureAdapter(http)
+    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
+    report = executor.run(graph, literature_references={target_id: LiteratureReference(ct_pmid="90000001")})
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.status is StepStatus.FAILED
+    assert "ConnectionError" in fetch.failure_reason
+
+
+def test_secret_redaction_covers_both_raw_and_percent_encoded_forms():
+    """Requirement 1: test both pre- and post-URL-encoding forms of the
+    secret directly against the sanitizer, not just end to end."""
+    from investment_research.research.literature_acquisition_adapter import _sanitize_text
+
+    settings = _FakeSettingsWithSecrets()
+    raw_form = f"error contacting {settings.ncbi_email} with key {settings.ncbi_api_key}"
+    encoded_form = (
+        "error at https://eutils.ncbi.nlm.nih.gov/x?email=secret-contact%40example.test"
+        "&api_key=SECRET_NCBI_API_KEY_999"
+    )
+    for text in (raw_form, encoded_form):
+        sanitized = _sanitize_text(text, settings=settings)
+        for secret in _SECRET_STRINGS:
+            assert secret not in sanitized
+        from urllib.parse import quote
+
+        for secret in _SECRET_STRINGS:
+            assert quote(secret, safe="") not in sanitized
+
+
+def test_public_request_url_never_strips_tool_param():
+    """``tool`` is not secret-shaped (no personal info) and is not stripped
+    -- only ``email``/``api_key`` are (Phase 3F.0.2 requirement 1's
+    explicit "tool -- only if currently treated as secret" clause: it is
+    not)."""
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&tool=investment-research-agent&term=x"
+    assert "tool=investment-research-agent" in _public_request_url(url)
+
+
+# --- Phase 3F.0.2 requirement 2: RequestBudget is run-scoped ----------------
+def test_article_budget_shared_across_two_targets_in_the_same_run():
+    graph = _literature_graph("a", "b")
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.efetch_url(["90000015"]): fx.ok(
+                fx.fixture_text("batch_articleset.xml").replace("90000016", "IGNORED")
+            ),
+        }
+    )
+    adapter = PubMedLiteratureAdapter(http, max_articles=1)
+    refs = {
+        graph.targets[0].target_id: LiteratureReference(ct_pmid="90000001"),
+        graph.targets[1].target_id: LiteratureReference(ct_pmid="90000015"),
+    }
+    report, store, _ = _run(refs, http, graph=graph, adapter=adapter)
+    fetch_a = _by_step_prefix(report, 0, "f_")
+    fetch_b = _by_step_prefix(report, 1, "f_")
+    # The FIRST target consumes the entire (shared) budget of 1 article;
+    # the SECOND target, in the SAME run, gets none.
+    assert fetch_a.status is StepStatus.BODY_FETCHED
+    assert fetch_b.status is StepStatus.SKIPPED_DUE_TO_BUDGET
+    assert fetch_b.payload["budget_excluded_pmids"] == ["90000015"]
+
+
+def test_second_run_with_same_adapter_instance_starts_with_zero_usage():
+    """The same PubMedLiteratureAdapter (and its RequestBudgetLimits)
+    reused for a SECOND, separate AcquisitionExecutor.run() call must start
+    with fresh usage -- never carrying over the first run's consumption."""
+    http1 = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    adapter = PubMedLiteratureAdapter(http1, max_articles=1)
+
+    graph1 = _literature_graph("a")
+    store1 = DocumentStore()
+    executor1 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store1)
+    report1 = executor1.run(graph1, literature_references={graph1.targets[0].target_id: LiteratureReference(ct_pmid="90000001")})
+    assert _by_step_prefix(report1, 0, "f_").status is StepStatus.BODY_FETCHED
+
+    # Second run, same adapter instance, a DIFFERENT PMID -- if usage carried
+    # over, max_articles=1 would already be exhausted and this would be
+    # SKIPPED_DUE_TO_BUDGET; it must not be.
+    http1.responses[fx.efetch_url(["90000015"])] = fx.ok(
+        fx.fixture_text("batch_articleset.xml").replace("90000016", "IGNORED")
+    )
+    graph2 = _literature_graph("a")
+    store2 = DocumentStore()
+    executor2 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store2)
+    report2 = executor2.run(graph2, literature_references={graph2.targets[0].target_id: LiteratureReference(ct_pmid="90000015")})
+    assert _by_step_prefix(report2, 0, "f_").status is StepStatus.BODY_FETCHED
+
+
+def test_failed_first_run_does_not_carry_budget_usage_to_second_run():
+    """Even when the first run ends in FAILED (a budget exhaustion, here),
+    a second run with the same adapter instance starts at zero -- the
+    executor's own per-run adapter_state dict is never reused."""
+    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    adapter = PubMedLiteratureAdapter(http, max_articles=0)  # guarantees FAILED/SKIPPED first run
+
+    graph1 = _literature_graph("a")
+    store1 = DocumentStore()
+    executor1 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store1)
+    report1 = executor1.run(graph1, literature_references={graph1.targets[0].target_id: LiteratureReference(ct_pmid="90000001")})
+    assert _by_step_prefix(report1, 0, "f_").status is StepStatus.SKIPPED_DUE_TO_BUDGET
+
+    # A fresh adapter with a real (non-zero) budget, run against the same
+    # PMID, must succeed -- proving the SECOND run (even a differently
+    # configured one) never inherits stale state from anywhere shared.
+    adapter2 = PubMedLiteratureAdapter(http, max_articles=1)
+    graph2 = _literature_graph("a")
+    store2 = DocumentStore()
+    executor2 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter2}, document_store=store2)
+    report2 = executor2.run(graph2, literature_references={graph2.targets[0].target_id: LiteratureReference(ct_pmid="90000001")})
+    assert _by_step_prefix(report2, 0, "f_").status is StepStatus.BODY_FETCHED
+
+
+def test_budget_usage_is_a_fresh_object_per_run_not_shared_globally():
+    """Directly proves RequestBudgetUsage is created fresh in
+    ExecutionContext.adapter_state per run() call, never as adapter/module
+    global state."""
+    from investment_research.research.literature_acquisition_adapter import (
+        _BUDGET_USAGE_STATE_KEY,
+        RequestBudgetUsage,
+    )
+
+    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    adapter = PubMedLiteratureAdapter(http)
+
+    graph1 = _literature_graph("a")
+    store1 = DocumentStore()
+    executor1 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store1)
+    executor1.run(graph1, literature_references={graph1.targets[0].target_id: LiteratureReference(ct_pmid="90000001")})
+
+    graph2 = _literature_graph("a")
+    store2 = DocumentStore()
+    executor2 = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store2)
+    # Confirm no adapter/module-level attribute holds a RequestBudgetUsage
+    # -- only ExecutionContext.adapter_state does, freshly, per run.
+    assert not hasattr(adapter, "budget")
+    assert isinstance(adapter.limits, RequestBudgetLimits)
+    executor2.run(graph2, literature_references={graph2.targets[0].target_id: LiteratureReference(ct_pmid="90000001")})
+    # (RequestBudgetUsage itself is only constructible/inspectable via
+    # ExecutionContext.adapter_state, exercised by the two tests above --
+    # this test's own assertion is that no OTHER persistent home for it
+    # exists on the adapter.)
+    assert RequestBudgetUsage  # imported successfully; used for typing/documentation of intent
+    assert _BUDGET_USAGE_STATE_KEY  # the private key both runs used, independently

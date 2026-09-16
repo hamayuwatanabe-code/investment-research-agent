@@ -200,6 +200,7 @@ def test_fresh_database_needs_no_additive_migration():
         ("facts", "content_kind"),
         ("facts", "primary_source_url"),
         ("facts", "document_id"),
+        ("facts", "source_authority"),
         ("kill_assessments", "confirmation"),
         ("thesis_versions", "research_status"),
         ("thesis_versions", "blocking_verification_required"),
@@ -223,3 +224,23 @@ def test_existing_fact_history_survives_migration_with_document_id_null(pre_gate
     assert row is not None
     assert row["claim"] == "A pre-existing claim"
     assert row["document_id"] is None
+
+
+# --- Phase 3F.0.2: source_authority additive migration ----------------------
+def test_migration_adds_source_authority_to_facts(pre_gate_db):
+    assert "source_authority" not in _columns(pre_gate_db, "facts")
+    migrate(pre_gate_db)
+    assert "source_authority" in _columns(pre_gate_db, "facts")
+
+
+def test_existing_fact_history_survives_migration_with_source_authority_unknown(pre_gate_db):
+    """A fact recorded before source_authority existed carries no authority
+    information at all; the migration reads it back as the SAME UNKNOWN
+    sentinel Fact.source_authority itself defaults to -- never a guessed
+    authority, and never NULL (the column is NOT NULL DEFAULT 'UNKNOWN',
+    matching schemas/fact.py's own default exactly)."""
+    migrate(pre_gate_db)
+    row = pre_gate_db.execute("SELECT * FROM facts WHERE fact_id = 'fact_old1'").fetchone()
+    assert row is not None
+    assert row["claim"] == "A pre-existing claim"
+    assert row["source_authority"] == "UNKNOWN"

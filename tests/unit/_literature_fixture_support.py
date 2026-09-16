@@ -111,3 +111,25 @@ class FakeHttpClient:
     def get(self, url: str, **kwargs: object) -> FakeResult:
         self.requested_urls.append(url)
         return self.responses.get(url, not_found("no fake response registered for this URL"))
+
+
+@dataclass
+class RaisingHttpClient:
+    """A fake transport whose ``.get()`` RAISES instead of returning a
+    result -- mirrors what a real ``urllib``-backed transport can do (a
+    connection error, a malformed-response exception whose message embeds
+    the full request URL). This is deliberately "the fake transport's
+    lowest layer" that DOES see the raw wire URL (via ``requested_urls``,
+    recorded before raising) and the exception message it raises -- exactly
+    the layer Phase 3F.0.2's leakage tests are allowed to inspect for the
+    secret; every object/string ABOVE this layer must not carry it."""
+
+    requested_urls: list[str] = field(default_factory=list)
+    #: When set, the exception message embeds this exact URL (as a raw
+    #: ``urllib``-style exception would) -- lets a test assert the raw
+    #: wire_url never survives past ``_safe_get``.
+    exception_message_template: str = "urlopen error for {url}: [Errno -2] Name or service not known"
+
+    def get(self, url: str, **kwargs: object) -> FakeResult:
+        self.requested_urls.append(url)
+        raise ConnectionError(self.exception_message_template.format(url=url))
