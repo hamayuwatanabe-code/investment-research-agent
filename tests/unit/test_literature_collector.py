@@ -21,7 +21,15 @@ from investment_research.collectors.literature import (
     raw_facts_from_europepmc_fulltext,
     raw_facts_from_pubmed_article,
 )
-from investment_research.schemas.enums import UNKNOWN, ContentKind, FactCategory, SourceTier
+from investment_research.schemas.enums import (
+    UNKNOWN,
+    ContentKind,
+    DocumentAuthority,
+    FactCategory,
+    PeerReviewStatus,
+    PublicationStage,
+    SourceTier,
+)
 from investment_research.schemas.fact import Source
 
 from . import _literature_fixture_support as fx
@@ -291,3 +299,120 @@ def test_raw_facts_from_europepmc_fulltext_open_access_vs_not():
     assert availability_non_oa and availability_non_oa[0].value is False
     assert availability_non_oa[0].content_kind is not ContentKind.FULL_DOCUMENT
     assert all(f.company_claim is False for f in facts_non_oa)
+
+
+# --- Phase 3F.0.1: publication_stage / peer_review_status --------------------
+def test_normal_journal_article_peer_review_status_is_unknown_never_confirmed():
+    """Requirement 7: a PubMed 'Journal Article' publication type alone
+    must never set peer_review_status=CONFIRMED."""
+    article = _parse_one("normal_abstract.xml")
+    assert article.publication_stage is PublicationStage.JOURNAL_ARTICLE
+    assert article.peer_review_status is PeerReviewStatus.UNKNOWN
+    assert article.peer_review_status is not PeerReviewStatus.CONFIRMED
+
+
+def test_pubmed_preprint_is_not_peer_reviewed():
+    article = _parse_one("preprint.xml")
+    assert article.publication_stage is PublicationStage.PREPRINT
+    assert article.peer_review_status is PeerReviewStatus.NOT_PEER_REVIEWED
+    facts = raw_facts_from_pubmed_article("TEST", article, _source())
+    status_facts = [f for f in facts if f.unit == f"{LITERATURE_UNIT_PREFIX}peer_review_status"]
+    assert status_facts and status_facts[0].value == "NOT_PEER_REVIEWED"
+
+
+def test_editorial_and_letter_are_not_journal_article_stage():
+    """Requirement 7: an editorial/letter must never be treated as clinical
+    efficacy evidence -- its stage is distinct from JOURNAL_ARTICLE, and
+    its peer_review_status is never CONFIRMED."""
+    editorial = _parse_one("editorial.xml")
+    assert editorial.publication_stage is PublicationStage.EDITORIAL
+    assert editorial.publication_stage is not PublicationStage.JOURNAL_ARTICLE
+    assert editorial.peer_review_status is not PeerReviewStatus.CONFIRMED
+
+    letter = _parse_one("letter.xml")
+    assert letter.publication_stage is PublicationStage.LETTER
+    assert letter.publication_stage is not PublicationStage.JOURNAL_ARTICLE
+    assert letter.peer_review_status is not PeerReviewStatus.CONFIRMED
+
+
+def test_online_book_chapter_is_never_treated_as_peer_reviewed():
+    book = _parse_one("online_book_chapter.xml")
+    assert book.publication_stage is PublicationStage.BOOK_OR_CHAPTER
+    assert book.publication_stage is not PublicationStage.JOURNAL_ARTICLE
+    assert book.peer_review_status is not PeerReviewStatus.CONFIRMED
+
+
+def test_publication_stage_never_confirmed_by_this_module_for_any_fixture():
+    """No fixture in this real-format set, and no code path in this module,
+    ever produces PeerReviewStatus.CONFIRMED (requirement 2's central
+    correction)."""
+    for name in (
+        "normal_abstract.xml", "structured_abstract.xml", "no_abstract.xml",
+        "multiple_authors.xml", "sponsor_funded.xml", "conflict_of_interest.xml",
+        "nct_id_present.xml", "ids_complete.xml", "correction.xml", "erratum.xml",
+        "retracted.xml", "preprint.xml", "editorial.xml", "letter.xml",
+        "online_book_chapter.xml",
+    ):
+        article = _parse_one(name)
+        assert article.peer_review_status is not PeerReviewStatus.CONFIRMED
+
+
+def test_europepmc_preprint_search_result_is_not_peer_reviewed():
+    results = parse_europepmc_search_response(fx.fixture_text("europepmc_search_preprint.json"))
+    assert results is not None and len(results) == 1
+    result = results[0]
+    assert result.source == "PPR"
+    assert result.publication_stage is PublicationStage.PREPRINT
+    assert result.peer_review_status is PeerReviewStatus.NOT_PEER_REVIEWED
+    facts = raw_facts_from_europepmc_fulltext("TEST", "90000022", result, None, _source())
+    status_facts = [f for f in facts if f.unit == f"{LITERATURE_UNIT_PREFIX}peer_review_status"]
+    assert status_facts and status_facts[0].value == "NOT_PEER_REVIEWED"
+
+
+def test_europepmc_medline_source_peer_review_status_stays_unknown():
+    results = parse_europepmc_search_response(fx.fixture_text("europepmc_search_oa.json"))
+    assert results is not None
+    # MEDLINE-sourced ("MED") is not a preprint-server code, but that is
+    # never read as CONFIRMED either -- MEDLINE indexes editorials, letters
+    # and preprints too, so UNKNOWN is the only honest default.
+    assert results[0].source == "MED"
+    assert results[0].peer_review_status is PeerReviewStatus.UNKNOWN
+    assert results[0].peer_review_status is not PeerReviewStatus.CONFIRMED
+
+
+def test_open_access_full_text_acquisition_never_sets_independent_confirmation():
+    """Requirement 7: OA full-text acquisition alone never implies
+    independent_confirmation -- that is enforced downstream by
+    evidence_integrity.py/escalation.py (see
+    test_literature_evidence_boundary.py), but the RawFact itself must
+    also never claim it in its own wording."""
+    search_oa = EuropePmcSearchResult(
+        pmid="90000008", pmcid="PMC9990008", doi="10.9999/fict.2025.00008",
+        title="t", is_open_access=True, in_epmc=True, license="cc by",
+        journal_title="j", pub_year="2025",
+    )
+    parsed_fulltext = parse_europepmc_fulltext_xml(fx.fixture_text("europepmc_fulltext_oa.xml"))
+    facts = raw_facts_from_europepmc_fulltext("TEST", "90000008", search_oa, parsed_fulltext, _source())
+    fulltext_facts = [f for f in facts if f.unit == f"{LITERATURE_UNIT_PREFIX}full_text_availability"]
+    assert fulltext_facts
+    claim_lower = fulltext_facts[0].claim.lower()
+    assert "peer-reviewed" not in claim_lower or "not" in claim_lower or "never" in claim_lower
+    assert "independently confirmed" not in claim_lower or "not" in claim_lower or "never" in claim_lower
+
+
+# --- Phase 3F.0.1: source_authority is set on every literature RawFact -----
+def test_every_raw_fact_carries_biomedical_literature_authority():
+    article = _parse_one("structured_abstract.xml")
+    facts = raw_facts_from_pubmed_article("TEST", article, _source())
+    assert facts
+    for f in facts:
+        assert f.source_authority is DocumentAuthority.BIOMEDICAL_LITERATURE
+
+    search_oa = EuropePmcSearchResult(
+        pmid="90000008", pmcid="PMC9990008", doi="10.9999/fict.2025.00008",
+        title="t", is_open_access=True, in_epmc=True, license="cc by",
+        journal_title="j", pub_year="2025",
+    )
+    epmc_facts = raw_facts_from_europepmc_fulltext("TEST", "90000008", search_oa, None, _source())
+    for f in epmc_facts:
+        assert f.source_authority is DocumentAuthority.BIOMEDICAL_LITERATURE

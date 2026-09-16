@@ -181,4 +181,5 @@ class FactCollectorAgent(Agent):
             content_kind=raw.content_kind,
             primary_source_url=raw.primary_source_url,
             document_id=raw.document_id,
+            source_authority=raw.source_authority,
         )

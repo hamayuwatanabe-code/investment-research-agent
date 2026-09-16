@@ -44,6 +44,11 @@ in any file.
 | `europepmc_search_oa.json` | Europe PMC `/search` response: `isOpenAccess=Y`, `inEPMC=Y`, PMCID `PMC9990008` | Paired with `ids_complete.xml` (same PMID `90000008`) |
 | `europepmc_search_non_oa.json` | Europe PMC `/search` response: `isOpenAccess=N`, `inEPMC=N` | Paired with `normal_abstract.xml` (PMID `90000001`) -- full text must never be marked acquired |
 | `europepmc_fulltext_oa.xml` | A JATS-like `<article><body><sec>...</sec></body></article>` open-access full text | Genuinely distinct sections from any PubMed abstract -- never conflated |
+| `preprint.xml` | A PubMed article with `PublicationType=Preprint` | PMID `90000022`; `publication_stage=PREPRINT`, `peer_review_status=NOT_PEER_REVIEWED` (Phase 3F.0.1) |
+| `editorial.xml` | A PubMed article with `PublicationType=Editorial` | PMID `90000023`; never treated as clinical efficacy evidence |
+| `letter.xml` | A PubMed article with `PublicationType=Letter` | PMID `90000024`; never treated as clinical efficacy evidence |
+| `online_book_chapter.xml` | A PubMed article with `PublicationType=Online Book` | PMID `90000025`; `publication_stage=BOOK_OR_CHAPTER`, never treated as peer-reviewed |
+| `europepmc_search_preprint.json` | Europe PMC `/search` response with `source=PPR` (preprint server) | Paired with `preprint.xml` (PMID `90000022`); `peer_review_status=NOT_PEER_REVIEWED` |
 
 A "duplicate article" scenario (the same PMID requested twice, e.g. via two
 different `EvidenceRequirement`s) deliberately reuses `normal_abstract.xml`

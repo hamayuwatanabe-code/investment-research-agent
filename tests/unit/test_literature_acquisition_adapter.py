@@ -74,10 +74,11 @@ def _literature_graph(*tags: str) -> SourceRoutingGraph:
     return SourceRoutingGraph(requirements=tuple(requirements), targets=tuple(targets), steps=tuple(steps))
 
 
-def _run(refs: dict, http, *, graph=None, store=None):
+def _run(refs: dict, http, *, graph=None, store=None, adapter=None, **adapter_kwargs):
     graph = graph or _literature_graph(*[t.replace("target_", "") for t in refs])
     store = store or DocumentStore()
-    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: PubMedLiteratureAdapter(http)}, document_store=store)
+    adapter = adapter or PubMedLiteratureAdapter(http, **adapter_kwargs)
+    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
     report = executor.run(graph, literature_references=refs)
     return report, store, graph
 
@@ -290,7 +291,7 @@ def test_open_access_europepmc_fulltext_acquired_and_distinguished_from_abstract
     stored = store.get(fulltext_doc_id)
     assert stored is not None
     assert stored.document.content_kind is ContentKind.FULL_DOCUMENT
-    assert stored.document.authority is DocumentAuthority.PEER_REVIEWED_LITERATURE
+    assert stored.document.authority is DocumentAuthority.BIOMEDICAL_LITERATURE
     assert "fictional full-text introduction content" in stored.document.text.lower()
     # The PubMed abstract-only document is a SEPARATE document, never
     # conflated with the Europe PMC full text.
@@ -370,6 +371,93 @@ def test_public_request_url_strips_email_and_api_key():
     assert "term=x" in public
 
 
+# --- Phase 3F.0.1 requirement 4: request caps --------------------------------
+def test_max_articles_caps_fan_out_never_unlimited():
+    """A candidate list larger than max_articles is never fetched in full
+    -- the excess is excluded explicitly, never silently dropped or
+    reported as NOT_FOUND."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    term = "SampleCompound AND FictionalSyndrome"
+    http = fx.FakeHttpClient(
+        responses={
+            fx.esearch_url(term, 20): fx.ok(fx.esearch_response(["90000015", "90000016"])),
+            fx.efetch_url(["90000015"]): fx.ok(fx.fixture_text("normal_abstract.xml").replace("90000001", "90000015")),
+        }
+    )
+    ref = LiteratureReference(alias="SampleCompound", condition="FictionalSyndrome")
+    report, store, _ = _run({target_id: ref}, http, graph=graph, max_articles=1)
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.status is StepStatus.BODY_FETCHED  # one article WAS fetched
+    assert fetch.payload["budget_excluded_pmids"] == ["90000016"]
+    assert fetch.payload["coverage_complete"] is False
+    parse = _by_step_prefix(report, 0, "p_")
+    assert parse.payload["coverage_complete"] is False
+    assert {d["pmid"] for d in parse.payload["parsed_documents"]} == {"90000015"}
+
+
+def test_zero_article_budget_never_reported_as_not_found():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph, max_articles=0)
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.status is StepStatus.SKIPPED_DUE_TO_BUDGET
+    assert fetch.status is not StepStatus.NOT_FOUND
+    assert fetch.status is not StepStatus.FAILED
+    assert fetch.payload["budget_excluded_pmids"] == ["90000001"]
+    assert fetch.payload["coverage_complete"] is False
+    assert http.requested_urls == []  # never even attempted the EFetch GET
+    assert report.outcome_for(target_id) is not TargetAcquisitionOutcome.ACQUIRED
+
+
+def test_zero_search_budget_blocks_esearch_before_any_get():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(responses={})
+    report, store, _ = _run(
+        {target_id: LiteratureReference(nct_id="NCT09990001")}, http, graph=graph, max_search_requests=0,
+    )
+    locate = _by_step_prefix(report, 0, "l1_")
+    assert locate.status is StepStatus.SKIPPED_DUE_TO_BUDGET
+    assert http.requested_urls == []
+
+
+def test_zero_fulltext_budget_skips_europepmc_fetch_but_article_still_acquired():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+        }
+    )
+    report, store, _ = _run(
+        {target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph, max_fulltext_fetches=0,
+    )
+    # The PubMed article itself is still acquired -- only the Europe PMC
+    # full-text enrichment is budget-skipped.
+    assert report.outcome_for(target_id) is TargetAcquisitionOutcome.ACQUIRED
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.payload["budget_skipped_fulltext_pmcids"] == ["PMC9990008"]
+    assert fetch.payload["coverage_complete"] is False
+    assert not any("fullTextXML" in u for u in http.requested_urls)
+    parse = _by_step_prefix(report, 0, "p_")
+    parsed = parse.payload["parsed_documents"][0]
+    assert parsed["full_text_acquired"] is False
+
+
+def test_default_budgets_never_trigger_on_ordinary_single_article_run():
+    """The default caps never interfere with normal, small-scale usage."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
+    parse = _by_step_prefix(report, 0, "p_")
+    assert parse.payload["coverage_complete"] is True
+    assert parse.payload["budget_excluded_pmids"] == []
+
+
 # --- external LLM / Pipeline isolation ----------------------------------------
 def test_no_external_llm_tokens_used():
     graph = _literature_graph("a")
@@ -377,3 +465,141 @@ def test_no_external_llm_tokens_used():
     http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
     report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
     assert report.diagnostics.external_llm_tokens == 0
+
+
+# --- Phase 3F.0.1 requirement 5: secret leakage -------------------------------
+class _FakeSettingsWithSecrets:
+    ncbi_tool = "investment-research-agent"
+    ncbi_email = "secret-contact@example.test"
+    ncbi_api_key = "SECRET_NCBI_API_KEY_999"
+
+
+_SECRET_STRINGS = (
+    _FakeSettingsWithSecrets.ncbi_email,
+    _FakeSettingsWithSecrets.ncbi_api_key,
+)
+
+
+def _assert_no_secret_leak(obj) -> None:
+    text = repr(obj)
+    for secret in _SECRET_STRINGS:
+        assert secret not in text, f"secret {secret!r} leaked into repr(): {text[:500]}"
+
+
+def _esearch_url_with_secrets(term: str, max_pmids: int) -> str:
+    from urllib.parse import urlencode
+
+    from investment_research.research.literature_acquisition_adapter import (
+        NCBI_ESEARCH_URL,
+        _eutils_params,
+    )
+
+    params = _eutils_params(
+        {"db": "pubmed", "term": term, "retmode": "json", "retmax": str(max_pmids)},
+        _FakeSettingsWithSecrets(),
+    )
+    return f"{NCBI_ESEARCH_URL}?{urlencode(params)}"
+
+
+def _efetch_url_with_secrets(pmids: list[str]) -> str:
+    from urllib.parse import urlencode
+
+    from investment_research.research.literature_acquisition_adapter import (
+        NCBI_EFETCH_URL,
+        _eutils_params,
+    )
+
+    params = _eutils_params(
+        {"db": "pubmed", "id": ",".join(pmids), "retmode": "xml", "rettype": "abstract"},
+        _FakeSettingsWithSecrets(),
+    )
+    return f"{NCBI_EFETCH_URL}?{urlencode(params)}"
+
+
+def test_secrets_reach_the_real_request_but_never_the_cache_key_or_document():
+    """The real E-utilities request DOES carry email/api_key (that is how
+    NCBI courtesy identification works) -- but nothing this module stores,
+    caches, or surfaces afterward may ever contain it."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    term = "NCT09990001[si]"
+    http = fx.FakeHttpClient(
+        responses={
+            _esearch_url_with_secrets(term, 20): fx.ok(fx.esearch_response(["90000007"])),
+            _efetch_url_with_secrets(["90000007"]): fx.ok(fx.fixture_text("nct_id_present.xml")),
+        }
+    )
+    store = DocumentStore()
+    adapter = PubMedLiteratureAdapter(http, settings=_FakeSettingsWithSecrets())
+    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
+    report = executor.run(graph, literature_references={target_id: LiteratureReference(nct_id="NCT09990001")})
+    assert report.outcome_for(target_id) is TargetAcquisitionOutcome.ACQUIRED
+
+    # The secrets WERE actually sent on the wire -- proves they weren't
+    # simply omitted everywhere (which would silently break real NCBI
+    # courtesy identification). Decoded, since urlencode percent-escapes
+    # characters like '@' -- a human/log reader would see the decoded form.
+    from urllib.parse import unquote
+
+    combined_requested = unquote(" ".join(http.requested_urls))
+    for secret in _SECRET_STRINGS:
+        assert secret in combined_requested
+
+    # ... but never anywhere this module surfaces to a human/log/manifest.
+    for step_report in report.target_reports[0].step_results:
+        _assert_no_secret_leak(step_report)
+        _assert_no_secret_leak(step_report.payload)
+        _assert_no_secret_leak(step_report.failure_reason)
+    stored_docs = [store.get(d["document_id"]) for d in _by_step_prefix(report, 0, "p_").payload["parsed_documents"]]
+    for stored in stored_docs:
+        _assert_no_secret_leak(stored)
+        assert stored.document.url is not None
+        for secret in _SECRET_STRINGS:
+            assert secret not in stored.document.url
+
+
+def test_secrets_never_leak_through_a_failed_request_diagnostic():
+    """Even a FAILED step's own diagnostics (failure_reason, payload) must
+    never carry the secret -- a transport failure is exactly when a raw
+    request URL is most tempting to log verbatim."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    # No response registered at all -> a 404-shaped FakeResult, exercising
+    # the failure path.
+    http = fx.FakeHttpClient(responses={})
+    store = DocumentStore()
+    adapter = PubMedLiteratureAdapter(http, settings=_FakeSettingsWithSecrets())
+    executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
+    report = executor.run(graph, literature_references={target_id: LiteratureReference(nct_id="NCT09990001")})
+    locate = _by_step_prefix(report, 0, "l1_")
+    assert locate.status is StepStatus.FAILED
+    _assert_no_secret_leak(locate.failure_reason)
+    _assert_no_secret_leak(locate.payload)
+    # The secret WAS still sent on the (failed) request itself.
+    from urllib.parse import unquote
+
+    combined_requested = unquote(" ".join(http.requested_urls))
+    for secret in _SECRET_STRINGS:
+        assert secret in combined_requested
+
+
+def test_request_cache_keys_never_contain_secrets():
+    """ExecutionContext.request_cache is a plain dict whose KEYS could
+    easily end up in a debugger dump or a future diagnostic dump -- they
+    must never carry a secret either."""
+    from investment_research.research.acquisition_executor import ExecutionContext
+    from investment_research.research.source_routing import AcquisitionTarget, TargetKind
+
+    store = DocumentStore()
+    context = ExecutionContext(
+        target=AcquisitionTarget(target_id="t", target_kind=TargetKind.LITERATURE_ARTICLE),
+        document_store=store,
+    )
+    http = fx.FakeHttpClient(
+        responses={fx.esearch_url("NCT09990001[si]", 20): fx.ok(fx.esearch_response(["90000007"]))}
+    )
+    adapter = PubMedLiteratureAdapter(http, settings=_FakeSettingsWithSecrets())
+    adapter._esearch("NCT09990001[si]", 20, context)
+    for key in context.request_cache:
+        for secret in _SECRET_STRINGS:
+            assert secret not in key

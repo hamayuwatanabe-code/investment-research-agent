@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000024</PMID>
+<Article PubModel="Print">
+<Journal>
+<Title>Fictional Journal of Correspondence</Title>
+<ISOAbbreviation>Fict J Corresp</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>2</Issue><PubDate><Year>2025</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional letter to the editor commenting on a prior study</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional letter text raising a methodological question -- never a clinical efficacy finding.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Correspondent</LastName><ForeName>Cleo</ForeName><Initials>C</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList>
+<PublicationType UI="D016422">Letter</PublicationType>
+</PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000024</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

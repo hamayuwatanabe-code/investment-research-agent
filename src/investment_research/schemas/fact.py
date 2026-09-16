@@ -24,6 +24,7 @@ from .enums import (
     UNKNOWN,
     ContentKind,
     DateKind,
+    DocumentAuthority,
     EvidenceClass,
     FactCategory,
     Materiality,
@@ -233,6 +234,16 @@ class RawFact:
     #: fact straight from an API payload) -- never a guessed or best-effort
     #: identity.
     document_id: str | None = None
+    #: Phase 3F.0.1: WHO authored the document this observation came from --
+    #: the same ``DocumentAuthority`` a Document already carries, threaded
+    #: forward so ``EvidenceIntegrityAgent`` can classify by authority
+    #: rather than by guessing from ``category``/``unit`` alone (a category
+    #: like SCIENCE has many producers besides biomedical literature, and a
+    #: producer's own ``unit`` naming convention is an implementation
+    #: detail, not a safety boundary). Left at the default ``UNKNOWN`` by
+    #: every collector that does not explicitly set it -- their facts keep
+    #: being classified exactly as before this field existed.
+    source_authority: DocumentAuthority = DocumentAuthority.UNKNOWN
 
     def fact_id(self) -> str:
         return make_fact_id(
@@ -300,8 +311,20 @@ class Fact:
     #: ``DocumentStore`` -- it does not survive a process restart. A caller
     #: with only a database row and no live ``DocumentStore`` (e.g. a report
     #: generated from a past run) cannot recover authority from
-    #: ``document_id`` alone.
+    #: ``document_id`` alone -- ``source_authority`` below is the field that
+    #: DOES survive a process restart (it is persisted directly, not via a
+    #: DocumentStore lookup), for exactly this reason.
     document_id: str | None = None
+    #: Phase 3F.0.1: carried forward from ``RawFact.source_authority`` by
+    #: ``FactCollectorAgent._to_fact`` -- persisted directly (unlike
+    #: ``Document.authority``, reachable only through a live
+    #: ``DocumentStore``), so a stored fact's authority survives a process
+    #: restart and a report generated from a past run. Defaults to
+    #: ``DocumentAuthority.UNKNOWN`` for every fact whose producer never set
+    #: it -- ``EvidenceIntegrityAgent._classify`` falls back to its
+    #: pre-existing category/tier-based rules whenever this is UNKNOWN, so
+    #: no existing producer's classification changes.
+    source_authority: DocumentAuthority = DocumentAuthority.UNKNOWN
 
     # -- derived -----------------------------------------------------------
     @property
@@ -380,6 +403,7 @@ class Fact:
             "content_kind": str(self.content_kind),
             "primary_source_url": self.primary_source_url,
             "document_id": self.document_id,
+            "source_authority": str(self.source_authority),
         }
 
 

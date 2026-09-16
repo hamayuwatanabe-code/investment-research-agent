@@ -55,7 +55,7 @@ promotes a fact to ``VERIFIED_FACT``, or claims efficacy/safety/endpoint
 acceptance was confirmed. A paper existing is never "the FDA accepted this
 endpoint"; a paper reporting a result is never "the result is true". Every
 RawFact ``collectors/literature.py``'s builder functions produce from this
-module's PARSE output carries ``EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION``
+module's PARSE output carries ``EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION``
 once ``agents/evidence_integrity.py`` classifies it (via the ``unit`` prefix
 ``collectors/literature.py`` applies), which ``schemas/enums.py``'s
 ``DECISION_GRADE_CLASSES`` excludes.
@@ -78,7 +78,25 @@ configures or uses a real value for either, and an email/API key must never
 appear in a displayed request URL, log line, or Capture Manifest (the log
 formatter's/``Settings.secret_values``'s redaction already covers this;
 ``_public_request_url`` below additionally strips them from any URL this
-module itself surfaces in diagnostics).
+module itself surfaces in diagnostics; ``ExecutionContext.request_cache``
+keys are likewise built from the sanitized URL, never the raw one, so a
+secret never appears there either).
+
+Request cap (Phase 3F.0.1 requirement 4): ``RequestBudget`` bounds PubMed +
+Europe PMC combined, across the WHOLE ``AcquisitionExecutor.run()`` call
+(one ``PubMedLiteratureAdapter`` instance is shared across every target in
+a run, so its budget is too) -- ``max_search_requests`` (ESearch + Europe
+PMC ``/search`` combined), ``max_articles`` (distinct NEW PMIDs actually
+processed; already-cached PMIDs are free and never count against it),
+``max_fulltext_fetches`` (Europe PMC ``fullTextXML`` GETs), and
+``max_total_requests`` (an overall ceiling across all of the above). A
+candidate PMID list larger than the budget allows is never silently
+fetched in full, and excess is never reported as NOT_FOUND: excluded PMIDs
+are surfaced explicitly in FETCH/PARSE's own payload
+(``budget_excluded_pmids``/``budget_skipped_europepmc_search_pmids``/
+``budget_skipped_fulltext_pmcids``) and ``coverage_complete=False`` is set
+on the PARSE result whenever any budget skip occurred for this target --
+``True`` only when every candidate was genuinely processed.
 """
 
 from __future__ import annotations
@@ -134,7 +152,83 @@ MAX_PMIDS_PER_BATCH = 20
 #: silent unlimited fetch loop.
 MAX_REQUESTS_PER_RUN = 40
 
+#: Phase 3F.0.1 requirement 4: PubMed + Europe PMC combined caps, enforced
+#: by ``RequestBudget`` across a whole ``AcquisitionExecutor.run()`` --
+#: never per-target (a caller that wants a tighter/looser budget passes its
+#: own values to ``PubMedLiteratureAdapter.__init__``).
+DEFAULT_MAX_SEARCH_REQUESTS = 10
+DEFAULT_MAX_ARTICLES = 20
+DEFAULT_MAX_FULLTEXT_FETCHES = 10
+DEFAULT_MAX_TOTAL_REQUESTS = MAX_REQUESTS_PER_RUN
+
+#: Prefix marking a failure string as "budget exhausted", never "genuinely
+#: not found" -- callers check this prefix to choose
+#: ``StepStatus.SKIPPED_DUE_TO_BUDGET`` over ``StepStatus.FAILED``/
+#: ``NOT_FOUND`` (Phase 3F.0.1 requirement 4).
+BUDGET_EXCEEDED_PREFIX = "BUDGET_EXCEEDED: "
+
 MIN_BODY_CHARS = 40
+
+
+@dataclass
+class RequestBudget:
+    """PubMed + Europe PMC combined request cap, shared by ONE
+    ``PubMedLiteratureAdapter`` instance across every target in a run
+    (Phase 3F.0.1 requirement 4). Mutable by design: counters accumulate
+    across the whole ``AcquisitionExecutor.run()`` call, exactly like the
+    executor's own ``request_cache`` does.
+    """
+
+    max_search_requests: int = DEFAULT_MAX_SEARCH_REQUESTS
+    max_articles: int = DEFAULT_MAX_ARTICLES
+    max_fulltext_fetches: int = DEFAULT_MAX_FULLTEXT_FETCHES
+    max_total_requests: int = DEFAULT_MAX_TOTAL_REQUESTS
+    search_requests_made: int = 0
+    fulltext_fetches_made: int = 0
+    articles_processed: int = 0
+    total_requests_made: int = 0
+
+    def cap_articles(self, pmids: list[str]) -> tuple[list[str], list[str]]:
+        """``(allowed, excluded)`` -- bounds how many NEW pmids may be
+        processed this run (never fan-out into Europe PMC search/fullText
+        without limit merely because a candidate list is large). Reserves
+        the allowed slots immediately, so two calls in the same run never
+        double-count."""
+        remaining = max(0, self.max_articles - self.articles_processed)
+        allowed, excluded = pmids[:remaining], pmids[remaining:]
+        self.articles_processed += len(allowed)
+        return allowed, excluded
+
+    def reserve_search(self) -> bool:
+        """Call immediately before issuing an ESearch OR Europe PMC
+        ``/search`` GET (they share this one budget) -- never after."""
+        if self.search_requests_made >= self.max_search_requests:
+            return False
+        if self.total_requests_made >= self.max_total_requests:
+            return False
+        self.search_requests_made += 1
+        self.total_requests_made += 1
+        return True
+
+    def reserve_fulltext(self) -> bool:
+        """Call immediately before issuing a Europe PMC ``fullTextXML``
+        GET -- never after."""
+        if self.fulltext_fetches_made >= self.max_fulltext_fetches:
+            return False
+        if self.total_requests_made >= self.max_total_requests:
+            return False
+        self.fulltext_fetches_made += 1
+        self.total_requests_made += 1
+        return True
+
+    def reserve_other(self) -> bool:
+        """Call immediately before issuing an EFetch GET -- EFetch has no
+        dedicated per-kind cap (one call already covers a whole batch), but
+        it still counts toward ``max_total_requests``."""
+        if self.total_requests_made >= self.max_total_requests:
+            return False
+        self.total_requests_made += 1
+        return True
 
 
 def _require_allowed_host(url: str) -> None:
@@ -204,6 +298,16 @@ class LiteratureSearchQuery:
     confirmed_same_trial: bool  # Priority C is ALWAYS False -- see module docstring
 
 
+def _status_for_failure(failure: str) -> StepStatus:
+    """Phase 3F.0.1 requirement 4: a budget exhaustion is never reported as
+    a generic FAILED (which reads as "we tried and it broke") or as
+    NOT_FOUND/ZERO_RESULTS (which reads as "we looked and there is
+    nothing") -- it is its own, honest SKIPPED_DUE_TO_BUDGET."""
+    if failure.startswith(BUDGET_EXCEEDED_PREFIX):
+        return StepStatus.SKIPPED_DUE_TO_BUDGET
+    return StepStatus.FAILED
+
+
 def _upstream_payload(step: AcquisitionStep, context: ExecutionContext) -> dict[str, Any]:
     for dep_id in step.depends_on_step_ids:
         payload = context.payload_for(dep_id)
@@ -220,24 +324,33 @@ class EuropePmcFullTextAdapter:
     3/6). Composed by ``PubMedLiteratureAdapter`` -- never registered under
     its own adapter_id (see module docstring)."""
 
-    def __init__(self, http: Any, settings: Any = None) -> None:
+    def __init__(self, http: Any, settings: Any = None, *, budget: RequestBudget | None = None) -> None:
         self.http = http
         self.settings = settings
+        #: Shared with the composing ``PubMedLiteratureAdapter`` -- a
+        #: standalone instantiation (e.g. in a test) gets its own private
+        #: budget rather than failing (Phase 3F.0.1 requirement 4).
+        self.budget = budget if budget is not None else RequestBudget()
 
     def search(self, pmid: str, context: ExecutionContext) -> tuple[EuropePmcSearchResult | None, int, str | None]:
         """Returns ``(result, http_requests_made, failure_reason)``. Never
         raises -- a malformed/failed search leaves OA status simply unknown
-        (never guessed ``True``)."""
+        (never guessed ``True``). ``failure_reason`` is prefixed with
+        ``BUDGET_EXCEEDED_PREFIX`` when the search budget, not a real
+        transport failure, is why this did not run."""
         query = urlencode({"query": f"ext_id:{pmid} AND src:med", "format": "json"})
         url = f"{EUROPEPMC_SEARCH_URL}?{query}"
         _require_allowed_host(url)
-        cache_key = f"http_get:{url}"
+        cache_key = f"http_get:{_public_request_url(url)}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
                 return None, 0, cached.failure_reason or "cached Europe PMC search failed"
             results = parse_europepmc_search_response(cached.payload.get("body", ""))
             return (results[0] if results else None), 0, None
+
+        if not self.budget.reserve_search():
+            return None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC search budget exhausted for PMID {pmid}"
 
         fetch = self.http.get(url)
         if not fetch.ok:
@@ -267,12 +380,14 @@ class EuropePmcFullTextAdapter:
         path)."""
         url = EUROPEPMC_FULLTEXT_URL.format(source="PMC", pmcid=pmcid)
         _require_allowed_host(url)
-        cache_key = f"http_get:{url}"
+        cache_key = f"http_get:{_public_request_url(url)}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.BODY_FETCHED:
                 return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed"
             text = cached.payload.get("text", "")
+        elif not self.budget.reserve_fulltext():
+            return None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC full-text fetch budget exhausted for PMCID {pmcid}"
         else:
             fetch = self.http.get(url)
             if not fetch.ok:
@@ -305,7 +420,7 @@ class EuropePmcFullTextAdapter:
             doc_id=doc_id, url=url, title=f"Europe PMC open-access full text (PMCID {pmcid})",
             publisher="Europe PMC", is_company_ir=False, text=parsed.full_text,
             content_kind=ContentKind.FULL_DOCUMENT, provenance=Provenance.LIVE,
-            retrieved_at=utc_now_iso(), authority=DocumentAuthority.PEER_REVIEWED_LITERATURE,
+            retrieved_at=utc_now_iso(), authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
         )
         return document, (0 if cached is not None else 1), None
 
@@ -316,10 +431,26 @@ class PubMedLiteratureAdapter:
     PMCID) -> PARSE (field extraction + RawFact generation). Registered
     under adapter_id ``"pubmed_europepmc"``."""
 
-    def __init__(self, http: Any, settings: Any = None) -> None:
+    def __init__(
+        self,
+        http: Any,
+        settings: Any = None,
+        *,
+        max_search_requests: int = DEFAULT_MAX_SEARCH_REQUESTS,
+        max_articles: int = DEFAULT_MAX_ARTICLES,
+        max_fulltext_fetches: int = DEFAULT_MAX_FULLTEXT_FETCHES,
+        max_total_requests: int = DEFAULT_MAX_TOTAL_REQUESTS,
+    ) -> None:
         self.http = http
         self.settings = settings
-        self.europepmc = EuropePmcFullTextAdapter(http, settings)
+        #: Shared with ``self.europepmc`` -- one budget per adapter
+        #: instance, persisting across every target in a run (Phase 3F.0.1
+        #: requirement 4).
+        self.budget = RequestBudget(
+            max_search_requests=max_search_requests, max_articles=max_articles,
+            max_fulltext_fetches=max_fulltext_fetches, max_total_requests=max_total_requests,
+        )
+        self.europepmc = EuropePmcFullTextAdapter(http, settings, budget=self.budget)
 
     def execute(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
         if step.step_kind is StepKind.LOCATE:
@@ -343,12 +474,15 @@ class PubMedLiteratureAdapter:
         )
         url = f"{NCBI_ESEARCH_URL}?{urlencode(params)}"
         _require_allowed_host(url)
-        cache_key = f"http_get:{url}"
+        cache_key = f"http_get:{_public_request_url(url)}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
                 return None, 0, cached.failure_reason or "cached ESearch failed"
             return list(cached.payload.get("pmids", [])), 0, None
+
+        if not self.budget.reserve_search():
+            return None, 0, f"{BUDGET_EXCEEDED_PREFIX}ESearch budget exhausted for term: {term}"
 
         fetch = self.http.get(url)
         if not fetch.ok:
@@ -399,7 +533,7 @@ class PubMedLiteratureAdapter:
                 step_id=step.step_id, status=StepStatus.URL_RESOLVED,
                 payload={
                     "pmids": [ref.ct_pmid], "priority": "A", "confirmed_same_trial": True,
-                    "query_log": [],
+                    "query_log": [], "coverage_complete": True,
                 },
             )
 
@@ -409,8 +543,9 @@ class PubMedLiteratureAdapter:
             query_log = [LiteratureSearchQuery(term=term, priority="B", confirmed_same_trial=True).__dict__]
             if failure is not None:
                 return StepExecutionResult(
-                    step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=http_reqs,
-                    failure_reason=failure, payload={"query_log": query_log},
+                    step_id=step.step_id, status=_status_for_failure(failure), http_requests_made=http_reqs,
+                    failure_reason=failure,
+                    payload={"query_log": query_log, "coverage_complete": False},
                 )
             if not pmids:
                 return StepExecutionResult(
@@ -422,7 +557,7 @@ class PubMedLiteratureAdapter:
                 step_id=step.step_id, status=StepStatus.URL_RESOLVED, http_requests_made=http_reqs,
                 payload={
                     "pmids": pmids[: ref.max_pmids], "priority": "B", "confirmed_same_trial": True,
-                    "query_log": query_log,
+                    "query_log": query_log, "coverage_complete": True,
                 },
             )
 
@@ -432,8 +567,9 @@ class PubMedLiteratureAdapter:
             query_log = [LiteratureSearchQuery(term=term, priority="C", confirmed_same_trial=False).__dict__]
             if failure is not None:
                 return StepExecutionResult(
-                    step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=http_reqs,
-                    failure_reason=failure, payload={"query_log": query_log},
+                    step_id=step.step_id, status=_status_for_failure(failure), http_requests_made=http_reqs,
+                    failure_reason=failure,
+                    payload={"query_log": query_log, "coverage_complete": False},
                 )
             if not pmids:
                 return StepExecutionResult(
@@ -449,7 +585,7 @@ class PubMedLiteratureAdapter:
                 step_id=step.step_id, status=StepStatus.URL_RESOLVED, http_requests_made=http_reqs,
                 payload={
                     "pmids": pmids[: ref.max_pmids], "priority": "C", "confirmed_same_trial": False,
-                    "query_log": query_log,
+                    "query_log": query_log, "coverage_complete": True,
                 },
             )
 
@@ -461,11 +597,13 @@ class PubMedLiteratureAdapter:
     # -- FETCH: batched EFetch + composed Europe PMC OA full text --------
     def _efetch_batch(
         self, pmids: list[str], context: ExecutionContext
-    ) -> tuple[dict[str, ParsedPubmedArticle] | None, int, str | None]:
+    ) -> tuple[dict[str, ParsedPubmedArticle] | None, int, str | None, list[str]]:
         """Fetches every PMID not already cached, in exactly ONE EFetch
         call (never one at a time -- Phase 3F requirement). Returns
         ``pmid -> ParsedPubmedArticle`` for every PMID successfully
-        resolved (from cache or this call)."""
+        resolved (from cache or this call), plus the list of PMIDs excluded
+        by ``RequestBudget.cap_articles`` (Phase 3F.0.1 requirement 4) --
+        never fetched, never cached as failed, simply not yet processed."""
         resolved: dict[str, ParsedPubmedArticle] = {}
         to_fetch: list[str] = []
         for pmid in pmids:
@@ -478,8 +616,16 @@ class PubMedLiteratureAdapter:
                 to_fetch.append(pmid)
             # a cached FAILED entry for this pmid is simply left unresolved
 
+        # Phase 3F.0.1 requirement 4: only genuinely NEW PMIDs consume the
+        # article budget -- already-cached PMIDs above never reach this
+        # point at all, so the same-PMID-fan-out dedup guarantee is
+        # unaffected by this cap.
+        to_fetch, budget_excluded = self.budget.cap_articles(to_fetch)
         if not to_fetch:
-            return resolved, 0, None
+            return resolved, 0, None, budget_excluded
+
+        if not self.budget.reserve_other():
+            return resolved, 0, None, budget_excluded + to_fetch
 
         params = _eutils_params(
             {"db": "pubmed", "id": ",".join(to_fetch), "retmode": "xml", "rettype": "abstract"},
@@ -495,7 +641,7 @@ class PubMedLiteratureAdapter:
                     step_id=f"_cache_literature_pmid_{pmid}", status=StepStatus.FAILED,
                     failure_reason=failure,
                 )
-            return (resolved if resolved else None), 1, failure
+            return (resolved if resolved else None), 1, failure, budget_excluded
 
         text = fetch.text
         shape_error, reason = check_pubmed_xml_shape(text)
@@ -506,7 +652,7 @@ class PubMedLiteratureAdapter:
                     step_id=f"_cache_literature_pmid_{pmid}", status=StepStatus.FAILED,
                     failure_reason=failure,
                 )
-            return (resolved if resolved else None), 1, failure
+            return (resolved if resolved else None), 1, failure, budget_excluded
 
         articles = parse_pubmed_articleset(text) or []
         returned_pmids = {a.pmid for a in articles}
@@ -529,7 +675,10 @@ class PubMedLiteratureAdapter:
                 failure_reason=failure,
             )
 
-        return (resolved if resolved else None), 1, (None if resolved else "no requested PMID resolved")
+        return (
+            (resolved if resolved else None), 1,
+            (None if resolved else "no requested PMID resolved"), budget_excluded,
+        )
 
     def _fetch(self, step: AcquisitionStep, context: ExecutionContext) -> StepExecutionResult:
         upstream = _upstream_payload(step, context)
@@ -540,8 +689,15 @@ class PubMedLiteratureAdapter:
                 failure_reason="no PMIDs from the LOCATE step",
             )
 
-        articles, http_reqs, failure = self._efetch_batch(pmids, context)
+        articles, http_reqs, failure, budget_excluded_pmids = self._efetch_batch(pmids, context)
         if not articles:
+            if budget_excluded_pmids and not failure:
+                return StepExecutionResult(
+                    step_id=step.step_id, status=StepStatus.SKIPPED_DUE_TO_BUDGET, http_requests_made=http_reqs,
+                    failure_reason=f"{BUDGET_EXCEEDED_PREFIX}article budget exhausted before any PMID "
+                    f"could be fetched: {budget_excluded_pmids}",
+                    payload={**upstream, "budget_excluded_pmids": budget_excluded_pmids, "coverage_complete": False},
+                )
             return StepExecutionResult(
                 step_id=step.step_id, status=StepStatus.FAILED, http_requests_made=http_reqs,
                 failure_reason=failure or "no PMID could be fetched",
@@ -556,20 +712,27 @@ class PubMedLiteratureAdapter:
         # when the search result's own flags confirm OA + inEPMC (Phase 3F
         # requirement 3/6). A non-OA or missing-PMCID article still counts
         # as successfully FETCHED (its PubMed abstract/metadata), it simply
-        # carries no full-text document.
+        # carries no full-text document. Budget-skipped Europe PMC calls
+        # (Phase 3F.0.1 requirement 4) are recorded, never silently dropped.
         europepmc_by_pmid: dict[str, dict[str, Any]] = {}
         total_epmc_reqs = 0
+        budget_skipped_europepmc_search_pmids: list[str] = []
+        budget_skipped_fulltext_pmcids: list[str] = []
         for pmid, article in articles.items():
-            search_result, search_reqs, _search_failure = self.europepmc.search(pmid, context)
+            search_result, search_reqs, search_failure = self.europepmc.search(pmid, context)
             total_epmc_reqs += search_reqs
             if search_result is None:
+                if search_failure and search_failure.startswith(BUDGET_EXCEEDED_PREFIX):
+                    budget_skipped_europepmc_search_pmids.append(pmid)
                 continue
             fulltext_document = None
             if article.pmcid != UNKNOWN and search_result.is_open_access and search_result.in_epmc:
-                fulltext_document, fetch_reqs, _fetch_failure = self.europepmc.fetch_fulltext(
+                fulltext_document, fetch_reqs, fetch_failure = self.europepmc.fetch_fulltext(
                     article.pmcid, context
                 )
                 total_epmc_reqs += fetch_reqs
+                if fulltext_document is None and fetch_failure and fetch_failure.startswith(BUDGET_EXCEEDED_PREFIX):
+                    budget_skipped_fulltext_pmcids.append(article.pmcid)
             europepmc_by_pmid[pmid] = {
                 "search_result": search_result, "fulltext_document": fulltext_document,
             }
@@ -592,7 +755,7 @@ class PubMedLiteratureAdapter:
                 is_company_ir=False, text=raw_xml,
                 content_kind=ContentKind.EXCERPT if article.has_abstract else ContentKind.METADATA_ONLY,
                 provenance=Provenance.LIVE, retrieved_at=utc_now_iso(),
-                authority=DocumentAuthority.PEER_REVIEWED_LITERATURE,
+                authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
             )
             stored = context.document_store.put(
                 document, document_id=doc_id, document_role=DocumentRole.JOURNAL_ARTICLE,
@@ -609,6 +772,12 @@ class PubMedLiteratureAdapter:
             )
             epmc["fulltext_document_id"] = stored.document_id
 
+        coverage_complete = (
+            upstream.get("coverage_complete", True)
+            and not budget_excluded_pmids
+            and not budget_skipped_europepmc_search_pmids
+            and not budget_skipped_fulltext_pmcids
+        )
         return StepExecutionResult(
             step_id=step.step_id, status=StepStatus.BODY_FETCHED,
             http_requests_made=http_reqs + total_epmc_reqs,
@@ -616,6 +785,10 @@ class PubMedLiteratureAdapter:
                 **upstream,
                 "fetched_pmids": list(articles.keys()),
                 "document_ids": document_ids,
+                "budget_excluded_pmids": budget_excluded_pmids,
+                "budget_skipped_europepmc_search_pmids": budget_skipped_europepmc_search_pmids,
+                "budget_skipped_fulltext_pmcids": budget_skipped_fulltext_pmcids,
+                "coverage_complete": coverage_complete,
                 "europepmc": {
                     pmid: {
                         "is_open_access": v["search_result"].is_open_access,

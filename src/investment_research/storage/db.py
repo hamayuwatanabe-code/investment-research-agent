@@ -32,6 +32,11 @@ ADDITIVE_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         # every existing row (which has no document_id at all) reads back as
         # NULL rather than a guessed or invented value.
         ("document_id", "TEXT"),
+        # Phase 3F.0.1: WHO authored the document (schemas.enums.
+        # DocumentAuthority), persisted directly. An existing row predates
+        # this field entirely, so it reads back 'UNKNOWN' -- the same
+        # sentinel Fact.source_authority defaults to, never a guessed value.
+        ("source_authority", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
     ),
     "kill_assessments": (("confirmation", "TEXT NOT NULL DEFAULT 'PROVISIONAL'"),),
     "thesis_versions": (

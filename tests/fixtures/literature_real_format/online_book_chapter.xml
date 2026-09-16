@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="Publisher" Owner="NLM">
+<PMID Version="1">90000025</PMID>
+<Article PubModel="Electronic">
+<Journal>
+<Title>Fictional Online Book of Medicine</Title>
+<ISOAbbreviation>Fict Online Book Med</ISOAbbreviation>
+<JournalIssue><PubDate><Year>2024</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional chapter from an online book, never a peer-reviewed trial report</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional book-chapter text summarizing background knowledge -- never a clinical efficacy finding from a reviewed trial.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Author</LastName><ForeName>Bea</ForeName><Initials>B</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList>
+<PublicationType UI="D064886">Online Book</PublicationType>
+</PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000025</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

@@ -43,22 +43,27 @@ class EvidenceClass(StrEnum):
     #: DECISION_GRADE_CLASSES (see below) -- never VERIFIED_FACT and never
     #: promotable to it by anything downstream.
     REPORTING_PERSON_STATUTORY_ASSERTION = "REPORTING_PERSON_STATUTORY_ASSERTION"
-    #: Phase 3F: a claim asserted BY a peer-reviewed publication's own
-    #: authors (a reported result, an endpoint definition, a study-design
-    #: statement) -- distinct from INDEPENDENT_EVIDENCE, which this system's
-    #: existing escalation mapping treats as carrying
-    #: ``independent_confirmation=True``. That is exactly wrong for
-    #: literature: peer review is editorial review of methodology, not
-    #: independent confirmation that a reported result is true, and the
-    #: authors themselves may be sponsor employees or investigators paid by
-    #: the company under study. A paper existing, and even being published
-    #: in a reputable journal, is never itself "efficacy confirmed" or
-    #: "safety confirmed" -- see requirement 6 of the Phase 3F literature
-    #: adapters. Deliberately excluded from DECISION_GRADE_CLASSES: never
-    #: VERIFIED_FACT and never promotable to it by anything downstream.
-    #: Independence of the specific authors/funding/COI is a SEPARATE,
-    #: later-stage assessment this class does not perform or imply.
-    PEER_REVIEWED_PUBLICATION_ASSERTION = "PEER_REVIEWED_PUBLICATION_ASSERTION"
+    #: Phase 3F, renamed and corrected in Phase 3F.0.1: a claim asserted BY
+    #: a PubMed/Europe PMC-indexed document's own authors (a reported
+    #: result, an endpoint definition, a study-design statement) --
+    #: distinct from INDEPENDENT_EVIDENCE, which this system's existing
+    #: escalation mapping treats as carrying ``independent_confirmation=
+    #: True``. That is exactly wrong here: PubMed/Europe PMC indexing is
+    #: not itself proof of peer review (a preprint, an online book chapter,
+    #: an editorial, or a letter can be indexed too -- see
+    #: ``PublicationStage``/``PeerReviewStatus``), and even genuine peer
+    #: review is editorial review of methodology, not independent
+    #: confirmation that a reported result is true; the authors themselves
+    #: may be sponsor employees or investigators paid by the company under
+    #: study. A document existing, and even being indexed by these APIs, is
+    #: never itself "efficacy confirmed" or "safety confirmed" -- see
+    #: requirement 6 of the Phase 3F literature adapters. Deliberately
+    #: excluded from DECISION_GRADE_CLASSES: never VERIFIED_FACT and never
+    #: promotable to it by anything downstream, regardless of
+    #: ``PeerReviewStatus``. Independence of the specific authors/funding/
+    #: COI is a SEPARATE, later-stage assessment this class does not
+    #: perform or imply.
+    BIOMEDICAL_PUBLICATION_ASSERTION = "BIOMEDICAL_PUBLICATION_ASSERTION"
 
 
 #: Evidence classes that may, on their own, support a material investment
@@ -67,7 +72,7 @@ class EvidenceClass(StrEnum):
 #: 3E.4 requirement 11) -- a reporting person's own statutory assertion is
 #: never decision-grade on its own, however primary the venue it was filed
 #: through.
-#: PEER_REVIEWED_PUBLICATION_ASSERTION (Phase 3F) is likewise deliberately
+#: BIOMEDICAL_PUBLICATION_ASSERTION (Phase 3F) is likewise deliberately
 #: NOT a member: see its own docstring above.
 DECISION_GRADE_CLASSES = frozenset(
     {EvidenceClass.VERIFIED_FACT, EvidenceClass.INDEPENDENT_EVIDENCE}
@@ -198,18 +203,71 @@ class DocumentAuthority(StrEnum):
     #: reporting person's unconfirmed assertion inherit an issuer
     #: statement's evidentiary weight merely because SEC hosts both.
     REPORTING_PERSON_FILING = "REPORTING_PERSON_FILING"
-    #: Phase 3F: a peer-reviewed journal article (PubMed/Europe PMC) --
-    #: authored by the study's investigators, not by the issuer, a
-    #: regulator, or a registry. Kept structurally distinct from
-    #: INDEPENDENT (whose escalation mapping is company_claim=False,
-    #: independent_confirmation=True): a published paper's authors may be
-    #: company employees, paid investigators, or otherwise non-independent
-    #: of the subject under study, and peer review checks methodology, not
-    #: truth. Never conflated with REGISTRY (a ClinicalTrials.gov record is
-    #: the sponsor's own structured entry, not a published paper) or with
-    #: COMPANY_IR (a journal is not the issuer's own investor-relations
-    #: channel merely because a company employee co-authored the paper).
-    PEER_REVIEWED_LITERATURE = "PEER_REVIEWED_LITERATURE"
+    #: Phase 3F, corrected in Phase 3F.0.1: a document indexed by PubMed or
+    #: Europe PMC -- authored by the study's investigators, not by the
+    #: issuer, a regulator, or a registry. Deliberately NOT named
+    #: "peer-reviewed": PubMed indexes far more than MEDLINE-reviewed
+    #: journal articles (online books, editorials, letters, and -- via NIH's
+    #: Preprint Pilot -- preprints), and Europe PMC's own search explicitly
+    #: covers preprint servers. Being retrievable through either API is
+    #: never itself proof that peer review happened; see ``PublicationStage``/
+    #: ``PeerReviewStatus`` below for the fields that actually carry that
+    #: distinction, always defaulting to UNKNOWN rather than assumed true.
+    #: Kept structurally distinct from INDEPENDENT (whose escalation mapping
+    #: is company_claim=False, independent_confirmation=True): a document's
+    #: authors may be company employees, paid investigators, or otherwise
+    #: non-independent of the subject under study, and even genuine peer
+    #: review checks methodology, not truth. Never conflated with REGISTRY
+    #: (a ClinicalTrials.gov record is the sponsor's own structured entry,
+    #: not a published document) or with COMPANY_IR (indexing is not the
+    #: issuer's own investor-relations channel merely because a company
+    #: employee co-authored the piece).
+    BIOMEDICAL_LITERATURE = "BIOMEDICAL_LITERATURE"
+    UNKNOWN = "UNKNOWN"
+
+
+class PublicationStage(StrEnum):
+    """What KIND of document this is, as declared by the source's own
+    structured metadata (a PubMed ``PublicationType``, an Europe PMC
+    ``source`` code) -- never inferred from prose, and never itself a claim
+    about peer review (see ``PeerReviewStatus``). A journal that has since
+    retracted or corrected an article is tracked by
+    ``ParsedPubmedArticle.is_retracted``/``is_correction_or_erratum``
+    (``collectors/literature.py``) when the ORIGINAL article merely
+    references its own correction/retraction; the CORRECTION/ERRATUM/
+    RETRACTION members here are for the rarer case where the fetched
+    document IS itself the correction/erratum/retraction notice.
+    """
+
+    JOURNAL_ARTICLE = "JOURNAL_ARTICLE"
+    PREPRINT = "PREPRINT"
+    BOOK_OR_CHAPTER = "BOOK_OR_CHAPTER"
+    EDITORIAL = "EDITORIAL"
+    LETTER = "LETTER"
+    CORRECTION = "CORRECTION"
+    ERRATUM = "ERRATUM"
+    RETRACTION = "RETRACTION"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class PeerReviewStatus(StrEnum):
+    """Whether a document actually underwent peer review -- structurally
+    separate from ``PublicationStage`` and from mere PubMed/Europe PMC
+    indexing (``DocumentAuthority.BIOMEDICAL_LITERATURE``'s own docstring).
+
+    Phase 3F.0.1's central correction: nothing in ``collectors/literature.py``
+    may ever set this to CONFIRMED merely because a document is indexed by
+    PubMed, or merely because its ``PublicationType`` says "Journal
+    Article" -- neither is evidence that review actually happened.
+    NOT_PEER_REVIEWED is set only from an explicit negative signal (a
+    PubMed "Preprint" publication type, or a Europe PMC preprint-server
+    ``source`` code). Absent either signal, this stays UNKNOWN -- never
+    filled with a guess (CLAUDE.md rule 7).
+    """
+
+    CONFIRMED = "CONFIRMED"
+    NOT_PEER_REVIEWED = "NOT_PEER_REVIEWED"
     UNKNOWN = "UNKNOWN"
 
 

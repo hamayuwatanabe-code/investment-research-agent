@@ -37,21 +37,38 @@ Real PubMed XML structure modeled (element names, unabbreviated)::
                 CommentsCorrectionsList / CommentsCorrections*
                     (RefType: RetractionIn/ErratumIn/CorrectionIn/...; PMID; RefSource)
 
-Evidence boundary (Phase 3F requirement 6, CRITICAL -- mirrors
-``collectors/form4.py``'s own precedent for a different evidence class): a
-peer-reviewed publication existing, and even a specific sentence it
-contains, is NEVER itself "efficacy confirmed", "safety confirmed",
-"endpoint accepted by the FDA", independent confirmation, or a
-``VERIFIED_FACT``. Every RawFact this module builds carries
-``FactCategory.SCIENCE`` with a ``unit`` prefixed ``"literature_"`` (the
-discriminator ``agents/evidence_integrity.py`` uses to route these facts to
-``EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION``, which is excluded
-from ``DECISION_GRADE_CLASSES``) and ``company_claim=False`` always -- never
-inferred from author affiliation alone, however many authors are
-company-employed or company-funded. A "reported result" RawFact's claim is
-always the PAPER'S OWN wording (a sentence drawn from its abstract/full
-text), never converted into a confirmed-efficacy statement at this stage --
-that conversion never happens anywhere in this system (CLAUDE.md rule 1/7).
+Evidence boundary (Phase 3F requirement 6, corrected in Phase 3F.0.1,
+CRITICAL -- mirrors ``collectors/form4.py``'s own precedent for a
+different evidence class): a document being retrievable through PubMed or
+Europe PMC, and even a specific sentence it contains, is NEVER itself
+"peer-reviewed", "efficacy confirmed", "safety confirmed", "endpoint
+accepted by the FDA", independent confirmation, or a ``VERIFIED_FACT``.
+PubMed indexes far more than MEDLINE-reviewed journal articles -- online
+books, editorials, letters, and (via NIH's Preprint Pilot) preprints all
+carry a PMID -- and Europe PMC's own search explicitly covers preprint
+servers. This module therefore NEVER infers peer review from indexing
+alone or from a "Journal Article" publication type alone: every parsed
+article/search result carries its own ``PublicationStage`` (what KIND of
+document this is, from the source's own structured metadata) and
+``PeerReviewStatus`` (``UNKNOWN`` unless an explicit negative signal --
+e.g. a "Preprint" publication type or a Europe PMC preprint-server source
+code -- says otherwise; NEVER set to ``CONFIRMED`` by this module).
+``ContentKind.FULL_DOCUMENT`` on an Europe PMC open-access fetch means
+only "the full text was retrieved" -- it carries no implication about peer
+review, quality, or independent confirmation.
+
+Every RawFact this module builds carries ``FactCategory.SCIENCE``,
+``RawFact.source_authority=DocumentAuthority.BIOMEDICAL_LITERATURE`` (the
+PRIMARY signal ``agents/evidence_integrity.py`` uses to route these facts
+to ``EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION``, which is excluded
+from ``DECISION_GRADE_CLASSES`` -- the ``unit`` prefix below is retained
+only as auxiliary, human-readable grouping, never as the classification
+key itself), and ``company_claim=False`` always -- never inferred from
+author affiliation alone, however many authors are company-employed or
+company-funded. A "reported result" RawFact's claim is always the
+DOCUMENT'S OWN wording (a sentence drawn from its abstract/full text),
+never converted into a confirmed-efficacy statement at this stage -- that
+conversion never happens anywhere in this system (CLAUDE.md rule 1/7).
 
 Retracted articles: ``retracted=True`` is kept structurally, but this
 module does NOT delete, hide, or renumber anything about the article --
@@ -70,7 +87,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ..schemas.enums import UNKNOWN, ContentKind, FactCategory
+from ..schemas.enums import (
+    UNKNOWN,
+    ContentKind,
+    DocumentAuthority,
+    FactCategory,
+    PeerReviewStatus,
+    PublicationStage,
+)
 from ..schemas.fact import RawFact, Source
 
 #: NCBI's own DataBankName for a ClinicalTrials.gov cross-reference --
@@ -205,6 +229,16 @@ class ParsedPubmedArticle:
     nct_ids: tuple[str, ...]
     comments_corrections: tuple[CommentCorrection, ...]
     article_status: str  # PublicationStatus, e.g. "ppublish", "epublish", "aheadofprint"
+    #: Phase 3F.0.1: what KIND of document this is, from PubMed's own
+    #: PublicationTypeList -- never inferred from title/abstract wording.
+    #: See ``_publication_stage_from_types`` for the exact mapping.
+    publication_stage: PublicationStage = PublicationStage.UNKNOWN
+    #: Phase 3F.0.1: whether peer review is actually confirmed. This module
+    #: NEVER sets this to CONFIRMED (indexing, and even "Journal Article",
+    #: are not evidence of peer review) -- only ever UNKNOWN or, for an
+    #: explicit negative signal (a "Preprint" publication type),
+    #: NOT_PEER_REVIEWED. See ``_peer_review_status_from_stage``.
+    peer_review_status: PeerReviewStatus = PeerReviewStatus.UNKNOWN
 
     @property
     def has_abstract(self) -> bool:
@@ -300,6 +334,54 @@ def _parse_article_ids(pubmed_data_el: ET.Element | None) -> tuple[str, str]:
     return pmcid, doi
 
 
+#: Real NLM PublicationType values mapped to PublicationStage, checked in
+#: priority order (most specific first). Structured-metadata-only -- never
+#: inferred from title/abstract text (Phase 3F.0.1 requirement 2). These
+#: are NLM's own controlled-vocabulary strings, matched exactly (case-
+#: sensitive); an unrecognized or absent type never defaults to
+#: JOURNAL_ARTICLE (see ``_publication_stage_from_types``).
+_PUBLICATION_TYPE_STAGE_PRIORITY: tuple[tuple[str, PublicationStage], ...] = (
+    ("Preprint", PublicationStage.PREPRINT),
+    ("Retraction of Publication", PublicationStage.RETRACTION),
+    ("Published Erratum", PublicationStage.ERRATUM),
+    ("Corrected and Republished Article", PublicationStage.CORRECTION),
+    ("Editorial", PublicationStage.EDITORIAL),
+    ("Letter", PublicationStage.LETTER),
+    ("Books and Documents", PublicationStage.BOOK_OR_CHAPTER),
+    ("Book Chapter", PublicationStage.BOOK_OR_CHAPTER),
+    ("Online Book", PublicationStage.BOOK_OR_CHAPTER),
+    ("Journal Article", PublicationStage.JOURNAL_ARTICLE),
+)
+
+
+def _publication_stage_from_types(publication_types: tuple[str, ...]) -> PublicationStage:
+    """The FIRST matching entry in ``_PUBLICATION_TYPE_STAGE_PRIORITY``
+    (most specific type first) wins -- e.g. an erratum notice that is ALSO
+    tagged "Journal Article" is still classified ERRATUM, never
+    JOURNAL_ARTICLE. ``OTHER`` when ``publication_types`` is non-empty but
+    nothing recognized matches (e.g. "Review", "Comment"); ``UNKNOWN`` when
+    the source supplied no publication type at all -- never guessed."""
+    for candidate, stage in _PUBLICATION_TYPE_STAGE_PRIORITY:
+        if candidate in publication_types:
+            return stage
+    return PublicationStage.OTHER if publication_types else PublicationStage.UNKNOWN
+
+
+#: PublicationStage values that are themselves an explicit "not peer
+#: reviewed" signal (Phase 3F.0.1 requirement 2). Deliberately narrow: this
+#: module never infers NOT_PEER_REVIEWED from any other stage, and never
+#: infers CONFIRMED from ANY stage, including JOURNAL_ARTICLE -- PubMed
+#: indexing a document as a "Journal Article" is not evidence that peer
+#: review happened, only that the piece is journal-shaped.
+_NOT_PEER_REVIEWED_STAGES = frozenset({PublicationStage.PREPRINT})
+
+
+def _peer_review_status_from_stage(stage: PublicationStage) -> PeerReviewStatus:
+    if stage in _NOT_PEER_REVIEWED_STAGES:
+        return PeerReviewStatus.NOT_PEER_REVIEWED
+    return PeerReviewStatus.UNKNOWN
+
+
 def _parse_pubmed_article(article_el: ET.Element) -> ParsedPubmedArticle:
     citation = article_el.find("MedlineCitation")
     article = citation.find("Article") if citation is not None else None
@@ -328,6 +410,8 @@ def _parse_pubmed_article(article_el: ET.Element) -> ParsedPubmedArticle:
         if dn.text and dn.text.strip()
     )
     pmcid, doi = _parse_article_ids(pubmed_data)
+    publication_stage = _publication_stage_from_types(publication_types)
+    peer_review_status = _peer_review_status_from_stage(publication_stage)
 
     return ParsedPubmedArticle(
         pmid=_text(citation, "PMID"),
@@ -351,6 +435,8 @@ def _parse_pubmed_article(article_el: ET.Element) -> ParsedPubmedArticle:
         nct_ids=_parse_nct_ids(article) if article is not None else (),
         comments_corrections=_parse_comments_corrections(pubmed_data),
         article_status=_text(pubmed_data, "PublicationStatus"),
+        publication_stage=publication_stage,
+        peer_review_status=peer_review_status,
     )
 
 
@@ -372,6 +458,13 @@ def parse_pubmed_articleset(xml_text: str) -> list[ParsedPubmedArticle] | None:
 # -- Europe PMC ---------------------------------------------------------
 
 
+#: Europe PMC's own ``source`` code for its aggregated preprint servers
+#: (bioRxiv, medRxiv, Research Square, ...) -- the one explicit, structured
+#: "not peer reviewed" signal this module reads from Europe PMC (Phase
+#: 3F.0.1 requirement 2's "Europe PMC preprintはNOT_PEER_REVIEWED").
+_EUROPEPMC_PREPRINT_SOURCE_CODES = frozenset({"PPR"})
+
+
 @dataclass(frozen=True)
 class EuropePmcSearchResult:
     """One ``resultList.result[]`` entry from Europe PMC's ``/search``
@@ -387,6 +480,27 @@ class EuropePmcSearchResult:
     license: str
     journal_title: str
     pub_year: str
+    #: Europe PMC's own result-source code (e.g. "MED" = MEDLINE, "PPR" =
+    #: preprint server, "PMC" = PMC-only, "AGR"/"CBA" = other aggregated
+    #: sources). ``UNKNOWN`` when the response omitted it.
+    source: str = UNKNOWN
+
+    @property
+    def publication_stage(self) -> PublicationStage:
+        if self.source in _EUROPEPMC_PREPRINT_SOURCE_CODES:
+            return PublicationStage.PREPRINT
+        return PublicationStage.UNKNOWN
+
+    @property
+    def peer_review_status(self) -> PeerReviewStatus:
+        """Phase 3F.0.1 requirement 2: NOT_PEER_REVIEWED only for a
+        confirmed preprint-server source; otherwise UNKNOWN -- Europe PMC
+        listing a result under "MED" (MEDLINE) is still not, by itself,
+        proof that peer review happened (it may be an editorial, a letter,
+        or a MEDLINE-indexed preprint)."""
+        if self.source in _EUROPEPMC_PREPRINT_SOURCE_CODES:
+            return PeerReviewStatus.NOT_PEER_REVIEWED
+        return PeerReviewStatus.UNKNOWN
 
 
 def parse_europepmc_search_response(payload_text: str) -> list[EuropePmcSearchResult] | None:
@@ -418,6 +532,7 @@ def parse_europepmc_search_response(payload_text: str) -> list[EuropePmcSearchRe
                 license=str(entry.get("license", "")),
                 journal_title=str(entry.get("journalTitle", UNKNOWN)),
                 pub_year=str(entry.get("pubYear", UNKNOWN)),
+                source=str(entry.get("source", UNKNOWN)),
             )
         )
     return results
@@ -489,11 +604,12 @@ def parse_europepmc_fulltext_xml(xml_text: str) -> ParsedEuropePmcFullText | Non
 
 # -- RawFact generation ---------------------------------------------------
 
-#: Every literature RawFact's ``unit`` is prefixed with this -- the
-#: discriminator ``agents/evidence_integrity.py::_classify`` uses to route
-#: these (and only these) SCIENCE-category facts to
-#: ``EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION``, since
-#: FactCategory.SCIENCE alone has many other, non-literature producers.
+#: Every literature RawFact's ``unit`` is prefixed with this -- auxiliary,
+#: human-readable grouping ONLY (Phase 3F.0.1). The actual classification
+#: signal ``agents/evidence_integrity.py::_classify`` uses is
+#: ``RawFact.source_authority=DocumentAuthority.BIOMEDICAL_LITERATURE``,
+#: set unconditionally by ``_make_raw_fact`` below -- renaming or dropping
+#: this prefix would change no evidence-class outcome.
 LITERATURE_UNIT_PREFIX = "literature_"
 
 _ENDPOINT_SENTENCE_RE = re.compile(r"[^.]*\bendpoint\b[^.]*\.", re.IGNORECASE)
@@ -530,6 +646,10 @@ def _make_raw_fact(
         collector=collector,
         document_id=document_id,
         content_kind=content_kind,
+        # Phase 3F.0.1: the PRIMARY signal agents/evidence_integrity.py
+        # uses to classify this fact -- set unconditionally on every
+        # literature RawFact, regardless of unit/content_kind.
+        source_authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
     )
 
 
@@ -590,6 +710,27 @@ def raw_facts_from_pubmed_article(
                 collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
             )
         )
+    # Phase 3F.0.1 requirement 2: publication_stage/peer_review_status are
+    # ALWAYS their own explicit facts, kept separate from "publication
+    # type" above -- a downstream reader must never have to re-derive
+    # "was this peer reviewed" from a raw NLM type string itself.
+    facts.append(
+        _make_raw_fact(
+            ticker,
+            f"Publication stage (PMID {parsed.pmid}): {parsed.publication_stage.value}",
+            source, unit="publication_stage", value=parsed.publication_stage.value,
+            collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
+        )
+    )
+    facts.append(
+        _make_raw_fact(
+            ticker,
+            f"Peer review status (PMID {parsed.pmid}): {parsed.peer_review_status.value} "
+            "(PubMed/Europe PMC indexing alone is never treated as confirmation of peer review)",
+            source, unit="peer_review_status", value=parsed.peer_review_status.value,
+            collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
+        )
+    )
     for nct_id in parsed.nct_ids:
         facts.append(
             _make_raw_fact(
@@ -677,7 +818,14 @@ def raw_facts_from_europepmc_fulltext(
     """Open-access status and full-text availability are always their own,
     SEPARATE facts (Phase 3F requirement 3/8's "must clearly separate
     metadata-only, abstract-only, and open-access-full-text" and
-    requirement 6's non-OA-never-full-text-acquired boundary)."""
+    requirement 6's non-OA-never-full-text-acquired boundary).
+
+    Phase 3F.0.1: ``ContentKind.FULL_DOCUMENT`` on the full-text-acquired
+    fact below means only "the full text was retrieved" -- it carries no
+    implication about peer review, and ``search_result.peer_review_status``
+    is surfaced as its own, separate fact so nothing downstream can read
+    "full text acquired" as "peer-reviewed and confirmed".
+    """
     facts = [
         _make_raw_fact(
             ticker,
@@ -685,14 +833,24 @@ def raw_facts_from_europepmc_fulltext(
             f"{search_result.is_open_access}, license={search_result.license or UNKNOWN}",
             source, unit="open_access_status", value=search_result.is_open_access,
             collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
-        )
+        ),
+        _make_raw_fact(
+            ticker,
+            f"Peer review status (PMID {pmid}, Europe PMC source={search_result.source}): "
+            f"{search_result.peer_review_status.value} (full-text acquisition, if any, is a "
+            "separate fact and never itself confirms peer review)",
+            source, unit="peer_review_status", value=search_result.peer_review_status.value,
+            collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
+        ),
     ]
     if parsed_fulltext is not None and parsed_fulltext.sections:
         facts.append(
             _make_raw_fact(
                 ticker,
                 f"Europe PMC open-access full text acquired (PMID {pmid}, "
-                f"{len(parsed_fulltext.sections)} section(s))",
+                f"{len(parsed_fulltext.sections)} section(s)); this means only that the full "
+                "text was retrieved, not that it is peer-reviewed, high-quality, or "
+                "independently confirmed",
                 source, unit="full_text_availability", value=True,
                 collector=collector, document_id=document_id, content_kind=ContentKind.FULL_DOCUMENT,
             )

@@ -479,7 +479,7 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     req_id, target_id = f"req_{tag}", f"target_{tag}"
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
-        direct_adapter=_LITERATURE_ADAPTER_ID, direct_authority=DocumentAuthority.PEER_REVIEWED_LITERATURE,
+        direct_adapter=_LITERATURE_ADAPTER_ID, direct_authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
         direct_locate_completion=StepStatus.URL_RESOLVED,
         direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
         fetch_adapter_id=_LITERATURE_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
@@ -488,7 +488,7 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"peer-reviewed literature signal for: {key}",
-        required_authorities=(DocumentAuthority.PEER_REVIEWED_LITERATURE,),
+        required_authorities=(DocumentAuthority.BIOMEDICAL_LITERATURE,),
     )
     target = AcquisitionTarget(
         target_id=target_id, target_kind=TargetKind.LITERATURE_ARTICLE,

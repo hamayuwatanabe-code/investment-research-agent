@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS facts (
     -- reloaded after the process that produced it ends (see
     -- research/document_store.py's module docstring).
     document_id                 TEXT,
+    -- Phase 3F.0.1 addition: WHO authored the document (schemas.enums.
+    -- DocumentAuthority), persisted directly rather than only reachable via
+    -- a live DocumentStore lookup through document_id. See storage/db.py's
+    -- ADDITIVE_COLUMNS for the same column applied to an existing database.
+    source_authority             TEXT NOT NULL DEFAULT 'UNKNOWN',
     created_at                  TEXT NOT NULL,
     PRIMARY KEY (fact_id, version)
 );

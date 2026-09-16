@@ -24,6 +24,7 @@ from ..collectors.tiering import is_reprint
 from ..schemas.agent_io import AgentInput, AgentOutput
 from ..schemas.enums import (
     UNKNOWN,
+    DocumentAuthority,
     EvidenceClass,
     FactCategory,
     Materiality,
@@ -161,7 +162,7 @@ class EvidenceIntegrityAgent(Agent):
             # unconditionally, regardless of what the generic corroboration
             # path computed.
             confirmed, corroborating = False, ()
-        elif evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION:
+        elif evidence_class == EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION:
             # Phase 3F requirement 6: peer review alone must never set
             # independent_confirmation=True, including two papers'
             # coincidentally similar wording "confirming" each other --
@@ -213,6 +214,17 @@ class EvidenceIntegrityAgent(Agent):
                 if fact.company_claim
                 else EvidenceClass.UNVERIFIED_CLAIM
             )
+        # Phase 3F.0.1: source_authority is the PRIMARY classification key
+        # for any fact that carries a non-UNKNOWN value -- never a fallback
+        # keyed on category/unit naming, which a producer could change (or
+        # which another, unrelated producer could coincidentally share)
+        # without that being a safety-relevant fact. A fact whose document
+        # was authored via PubMed/Europe PMC indexing is never independently
+        # confirmed merely by being classified here, whatever its category
+        # or unit say -- see collectors/literature.py's module docstring for
+        # why "indexed" is never "peer-reviewed" is never "confirmed".
+        if fact.source_authority == DocumentAuthority.BIOMEDICAL_LITERATURE:
+            return EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
         tier = fact.source_tier
         if fact.company_claim:
             return (
@@ -228,24 +240,6 @@ class EvidenceIntegrityAgent(Agent):
             return EvidenceClass.UNVERIFIED_CLAIM
         if fact.category == FactCategory.MICROSTRUCTURE:
             return EvidenceClass.MARKET_INFERENCE
-        if fact.category == FactCategory.SCIENCE and fact.unit.startswith("literature_"):
-            # Phase 3F: a RawFact built from a PubMed/Europe PMC article
-            # (collectors/literature.py) uses FactCategory.SCIENCE, the same
-            # category many other non-literature producers also use -- so,
-            # unlike FactCategory.INSIDER's near-exclusive use by Form 4,
-            # category alone cannot discriminate "this came from a peer-
-            # reviewed publication" from any other SCIENCE fact. The
-            # ``unit`` field carries that discriminator instead (mirroring
-            # Form4's own convention of differentiating within one shared
-            # category by ``unit``, e.g. ``f"{kind}_transaction"``):
-            # research/literature_acquisition_adapter.py prefixes every
-            # literature RawFact's ``unit`` with ``"literature_"``. A
-            # publication's own claim about its own study is never
-            # independently confirmed merely by being published --
-            # PEER_REVIEWED_PUBLICATION_ASSERTION is excluded from
-            # DECISION_GRADE_CLASSES (schemas/enums.py), so this can never
-            # alone be decision-grade.
-            return EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
         if fact.category == FactCategory.INSIDER:
             # Phase 3E.1 finding, given its own EvidenceClass in Phase
             # 3E.4: the tier==TIER_1 branch below assumes a Tier-1-hosted,
@@ -312,7 +306,7 @@ class EvidenceIntegrityAgent(Agent):
             # confirmed is always False here (forced in _assess) -- always
             # NOT_VERIFIED, never PARTIALLY_VERIFIED/VERIFIED.
             return VerifiedStatus.NOT_VERIFIED
-        if evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION:
+        if evidence_class == EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION:
             # confirmed is always False here (forced in _assess) -- a
             # publication's own reported result is never, by this class
             # alone, VERIFIED or PARTIALLY_VERIFIED (Phase 3F requirement 6).

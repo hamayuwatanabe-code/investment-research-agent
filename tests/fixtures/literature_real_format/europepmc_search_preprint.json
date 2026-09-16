@@ -1,0 +1,29 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "request": {
+    "queryString": "ext_id:90000022 AND src:ppr",
+    "resultType": "lite",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "sort": "",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "PPR90000022",
+        "source": "PPR",
+        "pmid": "90000022",
+        "pmcid": "",
+        "doi": "10.9999/fict.preprint.00022",
+        "title": "A fictional preprint reporting an unreviewed result",
+        "authorString": "Preprinter P.",
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "inPMC": "N",
+        "license": "cc by"
+      }
+    ]
+  }
+}

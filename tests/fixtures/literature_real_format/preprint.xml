@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="Publisher" Owner="NLM">
+<PMID Version="1">90000022</PMID>
+<Article PubModel="Electronic">
+<Journal>
+<Title>Fictional Preprint Server</Title>
+<ISOAbbreviation>Fict Preprint</ISOAbbreviation>
+<JournalIssue><PubDate><Year>2025</Year><Month>Aug</Month></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional preprint reporting an unreviewed result</ArticleTitle>
+<Abstract>
+<AbstractText>This fictional preprint has not undergone peer review. Its reported result must never be treated as confirmed.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Preprinter</LastName><ForeName>Pat</ForeName><Initials>P</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList>
+<PublicationType UI="D000076942">Preprint</PublicationType>
+</PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>aheadofprint</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000022</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

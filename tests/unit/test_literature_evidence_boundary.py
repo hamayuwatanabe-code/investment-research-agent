@@ -1,5 +1,5 @@
-"""Phase 3F: the PEER_REVIEWED_PUBLICATION_ASSERTION EvidenceClass /
-PEER_REVIEWED_LITERATURE DocumentAuthority boundary -- audited across every
+"""Phase 3F: the BIOMEDICAL_PUBLICATION_ASSERTION EvidenceClass /
+BIOMEDICAL_LITERATURE DocumentAuthority boundary -- audited across every
 consumer (evidence_integrity.py, escalation.py, fact_collector.py,
 validation.py, storage round-trip), proving no path promotes a literature
 fact to VERIFIED_FACT or independent_confirmation=True, and that ordinary
@@ -45,15 +45,15 @@ def _pubmed_article(name: str = "normal_abstract.xml"):
 
 # --- schemas/enums.py: the new values exist and are correctly excluded -----
 def test_peer_reviewed_publication_assertion_excluded_from_decision_grade():
-    assert EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION not in DECISION_GRADE_CLASSES
+    assert EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION not in DECISION_GRADE_CLASSES
     assert EvidenceClass.VERIFIED_FACT in DECISION_GRADE_CLASSES
     assert EvidenceClass.INDEPENDENT_EVIDENCE in DECISION_GRADE_CLASSES
 
 
 def test_peer_reviewed_literature_is_distinct_from_independent_and_registry():
-    assert DocumentAuthority.PEER_REVIEWED_LITERATURE != DocumentAuthority.INDEPENDENT
-    assert DocumentAuthority.PEER_REVIEWED_LITERATURE != DocumentAuthority.REGISTRY
-    assert DocumentAuthority.PEER_REVIEWED_LITERATURE != DocumentAuthority.COMPANY_IR
+    assert DocumentAuthority.BIOMEDICAL_LITERATURE != DocumentAuthority.INDEPENDENT
+    assert DocumentAuthority.BIOMEDICAL_LITERATURE != DocumentAuthority.REGISTRY
+    assert DocumentAuthority.BIOMEDICAL_LITERATURE != DocumentAuthority.COMPANY_IR
 
 
 # --- research/escalation.py: complete mapping, correct triple --------------
@@ -65,9 +65,9 @@ def test_escalation_evidence_for_authority_covers_every_documentauthority_value(
 
 def test_escalation_peer_reviewed_literature_maps_to_the_dedicated_class():
     evidence_class, company_claim, independent_confirmation = _evidence_for_authority(
-        DocumentAuthority.PEER_REVIEWED_LITERATURE
+        DocumentAuthority.BIOMEDICAL_LITERATURE
     )
-    assert evidence_class is EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+    assert evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
     assert company_claim is False
     assert independent_confirmation is False
 
@@ -93,12 +93,15 @@ def test_fact_collector_initial_classification_of_a_literature_fact_is_never_ver
     for raw in raw_facts:
         fact = FactCollectorAgent._to_fact(raw, run_id="test_run", provenance=raw.source.provenance)
         assert fact.evidence_class is not EvidenceClass.VERIFIED_FACT
-        assert fact.evidence_class is not EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+        assert fact.evidence_class is not EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
         assert fact.company_claim is False
 
 
 # --- agents/evidence_integrity.py: classification + forced non-confirmation
-def _literature_fact(claim: str, *, unit: str, source_url: str, event_date: str = "2025-06-01") -> Fact:
+def _literature_fact(
+    claim: str, *, unit: str, source_url: str, event_date: str = "2025-06-01",
+    source_authority: DocumentAuthority = DocumentAuthority.BIOMEDICAL_LITERATURE,
+) -> Fact:
     return Fact(
         fact_id=f"fact_{abs(hash((claim, source_url, unit)))}",
         ticker="SAMPB",
@@ -113,6 +116,7 @@ def _literature_fact(claim: str, *, unit: str, source_url: str, event_date: str 
         company_claim=False,
         unit=f"{LITERATURE_UNIT_PREFIX}{unit}",
         content_kind=ContentKind.EXCERPT,
+        source_authority=source_authority,
     )
 
 
@@ -128,7 +132,7 @@ def test_literature_fact_classified_as_peer_reviewed_publication_assertion():
     )
     assessed = list(agent.run(agent_input).facts)
     assert len(assessed) == 1
-    assert assessed[0].evidence_class is EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+    assert assessed[0].evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
     assert assessed[0].independent_confirmation is False
     assert assessed[0].verified_status is VerifiedStatus.NOT_VERIFIED
     assert not assessed[0].is_decision_grade
@@ -151,7 +155,7 @@ def test_two_literature_facts_with_identical_claim_text_never_confirm_each_other
     for fact in assessed:
         assert fact.independent_confirmation is False
         assert fact.corroborating_source_ids == ()
-        assert fact.evidence_class is EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+        assert fact.evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
 
 
 def test_non_literature_science_fact_classification_is_unaffected():
@@ -172,8 +176,68 @@ def test_non_literature_science_fact_classification_is_unaffected():
         facts=(fact,),
     )
     assessed = list(agent.run(agent_input).facts)[0]
-    assert assessed.evidence_class is not EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+    assert assessed.evidence_class is not EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
     assert assessed.evidence_class is EvidenceClass.INDEPENDENT_EVIDENCE
+
+
+def test_classification_keyed_on_authority_survives_a_renamed_unit():
+    """Phase 3F.0.1 requirement 3: unit naming is auxiliary only -- a
+    literature fact classifies correctly even under a unit name the
+    collector has never used, as long as source_authority is set."""
+    fact = _literature_fact(
+        "Reported result wording: some finding", unit="some_brand_new_unit_name",
+        source_url="https://eutils.ncbi.nlm.nih.gov/renamed",
+    )
+    agent = EvidenceIntegrityAgent(today=TODAY)
+    agent_input = AgentInput(
+        agent_id="evidence_integrity", run_id="r", ticker="SAMPB", company_name="Sample Biotech Holdings, Inc.",
+        facts=(fact,),
+    )
+    assessed = list(agent.run(agent_input).facts)[0]
+    assert assessed.evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
+
+
+def test_literature_shaped_unit_name_from_a_different_authority_never_auto_classifies():
+    """Phase 3F.0.1 requirement 3: a fact carrying a 'literature_'-prefixed
+    unit but a DIFFERENT (or UNKNOWN) source_authority must never be
+    classified as BIOMEDICAL_PUBLICATION_ASSERTION -- unit name alone
+    proves nothing."""
+    fact = _literature_fact(
+        "Reported result wording: some finding", unit="reported_result_wording",
+        source_url="https://example.test/not-actually-literature",
+        source_authority=DocumentAuthority.UNKNOWN,
+    )
+    agent = EvidenceIntegrityAgent(today=TODAY)
+    agent_input = AgentInput(
+        agent_id="evidence_integrity", run_id="r", ticker="SAMPB", company_name="Sample Biotech Holdings, Inc.",
+        facts=(fact,),
+    )
+    assessed = list(agent.run(agent_input).facts)[0]
+    assert assessed.evidence_class is not EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
+
+
+def test_open_access_full_text_derived_fact_never_gets_independent_confirmation():
+    """Phase 3F.0.1 requirement 7/10: even a fact drawn from an actually-
+    retrieved Europe PMC OPEN-ACCESS full text (ContentKind.FULL_DOCUMENT,
+    so it clears the ``is_search_derived`` gate and reaches the authority
+    check) still ends up independent_confirmation=False -- full-text
+    acquisition is never independent confirmation."""
+    fact = _literature_fact(
+        "Europe PMC open-access full text acquired (PMID 90000008, 3 section(s)); this means only "
+        "that the full text was retrieved, not that it is peer-reviewed, high-quality, or "
+        "independently confirmed",
+        unit="full_text_availability", source_url="https://www.ebi.ac.uk/europepmc/x",
+    )
+    fact = Fact(**{**fact.__dict__, "content_kind": ContentKind.FULL_DOCUMENT})
+    agent = EvidenceIntegrityAgent(today=TODAY)
+    agent_input = AgentInput(
+        agent_id="evidence_integrity", run_id="r", ticker="SAMPB", company_name="Sample Biotech Holdings, Inc.",
+        facts=(fact,),
+    )
+    assessed = list(agent.run(agent_input).facts)[0]
+    assert assessed.evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
+    assert assessed.independent_confirmation is False
+    assert not assessed.is_decision_grade
 
 
 def test_sponsor_funding_alone_never_infers_company_claim_through_evidence_integrity():
@@ -223,7 +287,7 @@ def test_non_science_company_claim_confirmation_path_is_unaffected():
 def test_validate_fact_rejects_peer_reviewed_assertion_with_independent_confirmation_true():
     fact = make_fact(
         "Reported result wording", category=FactCategory.SCIENCE,
-        evidence_class=EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION,
+        evidence_class=EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION,
         company_claim=False, independent_confirmation=True, tier=SourceTier.TIER_2,
     )
     with pytest.raises(SchemaError, match="independent_confirmation=True"):
@@ -233,7 +297,7 @@ def test_validate_fact_rejects_peer_reviewed_assertion_with_independent_confirma
 def test_validate_fact_accepts_peer_reviewed_assertion_with_independent_confirmation_false():
     fact = make_fact(
         "Reported result wording", category=FactCategory.SCIENCE,
-        evidence_class=EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION,
+        evidence_class=EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION,
         company_claim=False, independent_confirmation=False, tier=SourceTier.TIER_2,
         verified=VerifiedStatus.NOT_VERIFIED,
     )
@@ -247,7 +311,7 @@ def test_peer_reviewed_publication_assertion_round_trips_through_sqlite():
     repo.upsert_company("SAMPB", "Sample Biotech Holdings, Inc.")
     fact = make_fact(
         "Reported result wording", ticker="SAMPB", category=FactCategory.SCIENCE,
-        evidence_class=EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION,
+        evidence_class=EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION,
         company_claim=False, independent_confirmation=False, tier=SourceTier.TIER_2,
         verified=VerifiedStatus.NOT_VERIFIED,
     )
@@ -258,8 +322,8 @@ def test_peer_reviewed_publication_assertion_round_trips_through_sqlite():
 
     row = repo.latest_fact_row(fact.fact_id)
     assert row is not None
-    assert row["evidence_class"] == "PEER_REVIEWED_PUBLICATION_ASSERTION"
-    assert EvidenceClass(row["evidence_class"]) is EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+    assert row["evidence_class"] == "BIOMEDICAL_PUBLICATION_ASSERTION"
+    assert EvidenceClass(row["evidence_class"]) is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
 
 
 # --- retraction: never decision-grade regardless of confirmation status ----

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000023</PMID>
+<Article PubModel="Print">
+<Journal>
+<Title>Fictional Journal of Opinion</Title>
+<ISOAbbreviation>Fict J Opin</ISOAbbreviation>
+<JournalIssue><Volume>1</Volume><Issue>1</Issue><PubDate><Year>2025</Year></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional editorial commenting on the field</ArticleTitle>
+<Abstract>
+<AbstractText>Fictional editorial opinion text -- not a clinical efficacy finding, and never to be treated as one.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y"><LastName>Editorialist</LastName><ForeName>Eli</ForeName><Initials>E</Initials></Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList>
+<PublicationType UI="D016420">Editorial</PublicationType>
+</PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000023</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

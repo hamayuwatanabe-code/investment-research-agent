@@ -265,11 +265,11 @@ def validate_fact(fact: Fact, *, facts_only: bool = True) -> None:
     # agents/evidence_integrity.py forcing this False at classification
     # time and research/escalation.py's own mapping never setting it True.
     if (
-        fact.evidence_class == EvidenceClass.PEER_REVIEWED_PUBLICATION_ASSERTION
+        fact.evidence_class == EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
         and fact.independent_confirmation
     ):
         raise SchemaError(
-            "a PEER_REVIEWED_PUBLICATION_ASSERTION fact cannot have "
+            "a BIOMEDICAL_PUBLICATION_ASSERTION fact cannot have "
             "independent_confirmation=True: peer review is not independent "
             "confirmation of a reported result"
         )
