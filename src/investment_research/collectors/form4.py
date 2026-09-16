@@ -38,17 +38,26 @@ wrapper is present via ``_text()`` for the handful of fields that are NOT
 value-wrapped (``documentType``, ``periodOfReport``, CIKs, names, dates on
 issuer/reportingOwner/signature elements).
 
-Evidence Integrity (Phase 3E requirement 6): Form 4 is a REPORTING OWNER's
-own statutory filing (``DocumentAuthority.STATUTORY_FILING``) -- it is
+Evidence Integrity (Phase 3E requirement 6, CONFIRMED and given its own
+EvidenceClass in Phase 3E.4): Form 4 is a REPORTING OWNER's own statutory
+filing (``DocumentAuthority.REPORTING_PERSON_FILING`` -- a dedicated
+value, distinct from the issuer's own ``STATUTORY_FILING``) -- it is
 NEVER a company claim (the issuer did not author or file it), never an
 independent third-party confirmation, and never converted into either.
-What a successful parse confirms is limited to what the reporting owner
-itself asserted on the form: a transaction occurred as coded, on the
-stated date, at the stated price/share count, changing beneficial
-ownership as stated. It confirms NONE of: the filer's trading intent,
-whether a transaction was "bullish" or "bearish", or anything about the
-issuer's business, regulatory standing, or clinical/financial condition
-(Phase 3E requirement 5's last point).
+Every Fact derived from a Form 4/4-A carries
+``EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION``,
+``company_claim=False``, ``independent_confirmation=False`` -- enforced
+in ``agents/evidence_integrity.py`` (classification) and
+``research/escalation.py`` (the same mapping for a document fetched as a
+would-be "confirming source"), and never in
+``schemas.enums.DECISION_GRADE_CLASSES``, so a Form 4 fact can never
+alone be decision-grade. What a successful parse confirms is limited to
+what the reporting owner itself asserted on the form: a transaction
+occurred as coded, on the stated date, at the stated price/share count,
+changing beneficial ownership as stated. It confirms NONE of: the
+filer's trading intent, whether a transaction was "bullish" or "bearish",
+or anything about the issuer's business, regulatory standing, or
+clinical/financial condition (Phase 3E requirement 5's last point).
 
 Transaction semantics (Phase 3E requirement 5) -- all enforced by what this
 module does NOT do:
@@ -355,6 +364,19 @@ def _read_checkbox(el: ET.Element, paths: tuple[str, ...]) -> bool | None:
     return None
 
 
+def _relationship_fields_inconsistent(is_officer: bool | None, officer_title: str) -> bool:
+    """Phase 3E.4: a real Mac Live Smoke capture found a reporting owner
+    with ``isOfficer=0`` (False) yet a genuinely non-empty
+    ``officerTitle``. Both raw values are kept EXACTLY as SEC reported
+    them -- ``is_officer`` is never "corrected" to ``True`` by inferring
+    it from ``officer_title`` being present, in either direction. This
+    function only NAMES the disagreement as a diagnostic flag; it is
+    never treated as a transaction fact, never used to set
+    ``independent_confirmation``, and never fed back into either raw
+    field (requirement 17)."""
+    return is_officer is False and officer_title not in (UNKNOWN, "")
+
+
 def _extract_plan_adoption_date(remarks: str, footnotes: dict[str, str]) -> str:
     """Only from text that BOTH mentions "10b5-1" AND states an explicit
     adoption date -- never inferred from a transaction date, a filing
@@ -467,15 +489,22 @@ def parse_ownership_document(xml_text: str) -> dict[str, Any] | None:
     for ro in root.findall("reportingOwner"):
         owner_id = ro.find("reportingOwnerId")
         rel = ro.find("reportingOwnerRelationship")
+        is_officer = _bool01(rel, "isOfficer")
+        officer_title = _text(rel, "officerTitle")
         reporting_owners.append(
             {
                 "reporting_owner_cik": _text(owner_id, "rptOwnerCik"),
                 "reporting_owner_name": _text(owner_id, "rptOwnerName"),
                 "is_director": _bool01(rel, "isDirector"),
-                "is_officer": _bool01(rel, "isOfficer"),
-                "officer_title": _text(rel, "officerTitle"),
+                # Kept EXACTLY as SEC reported -- never "corrected" from
+                # officer_title (Phase 3E.4 requirement 15).
+                "is_officer": is_officer,
+                "officer_title": officer_title,
                 "is_ten_percent_owner": _bool01(rel, "isTenPercentOwner"),
                 "is_other": _bool01(rel, "isOther"),
+                # Diagnostic only -- never a transaction fact, never used
+                # to set independent_confirmation (requirement 16/17).
+                "relationship_fields_inconsistent": _relationship_fields_inconsistent(is_officer, officer_title),
             }
         )
 
@@ -526,6 +555,16 @@ def parse_ownership_document(xml_text: str) -> dict[str, Any] | None:
         # requirement 3; see research/form4_acquisition_adapter.py's
         # reconciliation logic for how this is actually used).
         "remarks_referenced_accession": extract_referenced_accession(remarks),
+        # Phase 3E.4: CONFIRMED against a real Form 4/A capture (a real
+        # document-level <dateOfOriginalSubmission><value>...</value>
+        # element, direct child of ownershipDocument) -- read directly,
+        # UNKNOWN when genuinely absent (a normal Form 4 need not carry
+        # it at all). Never used, on its own, to determine an amendment's
+        # original accession (requirement 19) -- that determination stays
+        # exclusively remarks-based, in
+        # research/form4_acquisition_adapter.py's own reconciliation
+        # logic, which this field does not feed.
+        "date_of_original_submission": _value(root, "dateOfOriginalSubmission"),
     }
 
 

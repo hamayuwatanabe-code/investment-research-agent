@@ -491,10 +491,15 @@ def _build_parsed_document_entry(doc: dict[str, Any], fetched_by_accession: dict
     discovery mode's loop and targeted mode's single-document report, so
     the two never drift apart (Phase 3E.3).
 
-    ``remarks``/``reporting_owners`` are populated only for a Form 4/A
-    (``UNKNOWN``/``[]`` for a normal Form 4, never guessed either way) --
-    Phase 3E.3 requirement 9's amendment-specific diagnostics; every other
-    field the requirement lists (``documentType``, the real
+    ``remarks`` is populated only for a Form 4/A (``UNKNOWN`` for a normal
+    Form 4, never guessed either way) -- Phase 3E.3 requirement 9's
+    amendment-specific diagnostic. ``reporting_owners`` (Phase 3E.4) is
+    populated for EVERY document, normal Form 4 included -- the real
+    Mac Live Smoke run's relationship_fields_inconsistent finding (an
+    is_officer=False reporting owner with a genuinely non-empty
+    officer_title) was observed on a normal Form 4, so gating it to
+    amendments only would have hidden it. Every other field the
+    requirement lists (``documentType``, the real
     ``dateOfOriginalSubmission`` tag/parent/raw value, issuer CIK) is
     already covered by ``structure_diagnostics``, and reconciliation
     status by the ``reconciliation`` dict below -- never recomputed here.
@@ -515,6 +520,10 @@ def _build_parsed_document_entry(doc: dict[str, Any], fetched_by_accession: dict
         },
         "parsed_ten_b5_1_checkbox": parsed.get("ten_b5_1_checkbox"),
         "parsed_ten_b5_1_plan_adoption_date": parsed.get("ten_b5_1_plan_adoption_date"),
+        # Phase 3E.4: the production-parsed field, kept visible alongside
+        # (never in place of) structure_diagnostics's own independent
+        # raw-XML scan of the same element, so the two can be compared.
+        "parsed_date_of_original_submission": parsed.get("date_of_original_submission", UNKNOWN),
         "structure_diagnostics": structure_diagnostics(xml_text) if xml_text else None,
         # Phase 3E.2.2 requirement 4: the ownership primaryDocument
         # normalization/verification diagnostics, per candidate --
@@ -528,7 +537,7 @@ def _build_parsed_document_entry(doc: dict[str, Any], fetched_by_accession: dict
         "ownership_document_verified": fetched_entry.get("ownership_document_verified", False),
         "issuer_cik_verified": fetched_entry.get("issuer_cik_verified", False),
         "remarks": parsed.get("remarks", UNKNOWN) if is_amendment else UNKNOWN,
-        "reporting_owners": parsed.get("reporting_owners", []) if is_amendment else [],
+        "reporting_owners": parsed.get("reporting_owners", []),
     }
 
 

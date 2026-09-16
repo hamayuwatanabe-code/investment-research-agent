@@ -327,13 +327,15 @@ def test_form4_raw_fact_never_promoted_to_independent_evidence_via_real_pipeline
     """The REAL RawFact -> Fact pipeline (EvidenceIntegrityAgent), not
     merely the RawFact's own fields, must never promote a Form 4 fact to
     independent_confirmation=True or EvidenceClass.INDEPENDENT_EVIDENCE
-    (Phase 3E.1 requirement 4)."""
+    (Phase 3E.1 requirement 4). Phase 3E.4: it must land on the dedicated
+    REPORTING_PERSON_STATUTORY_ASSERTION class, never COMPANY_CLAIM
+    either, and never be decision-grade on its own."""
     from datetime import date
 
     from investment_research.agents.evidence_integrity import EvidenceIntegrityAgent
     from investment_research.collectors.form4 import parse_ownership_document, raw_facts_from_form4
     from investment_research.schemas.agent_io import AgentInput
-    from investment_research.schemas.enums import EvidenceClass, SourceTier
+    from investment_research.schemas.enums import DECISION_GRADE_CLASSES, EvidenceClass, SourceTier
     from investment_research.schemas.fact import Fact, Source, make_source_id
 
     parsed = parse_ownership_document(fx.fixture_xml("normal_market_purchase"))
@@ -372,10 +374,20 @@ def test_form4_raw_fact_never_promoted_to_independent_evidence_via_real_pipeline
             f"Form 4 fact wrongly classified VERIFIED_FACT -- a reporting person's own statutory "
             f"filing is not the regulator's own statement: {assessed.claim}"
         )
+        assert assessed.evidence_class is not EvidenceClass.COMPANY_CLAIM, (
+            f"Form 4 fact wrongly classified COMPANY_CLAIM -- the reporting person is not the "
+            f"issuer (Phase 3E.4): {assessed.claim}"
+        )
+        assert assessed.evidence_class is EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION
+        assert assessed.evidence_class not in DECISION_GRADE_CLASSES
+        assert assessed.is_decision_grade is False
 
 
-# --- Document/authority basics unchanged from Phase 3E ---------------------
-def test_every_stored_form4_document_is_statutory_filing_never_company_ir():
+# --- Document/authority basics ----------------------------------------------
+def test_every_stored_form4_document_is_reporting_person_filing_never_company_ir():
+    """Phase 3E.4: Form 4/4-A documents carry their OWN dedicated
+    DocumentAuthority (REPORTING_PERSON_FILING), distinct from the
+    issuer's own STATUTORY_FILING -- never a company statement."""
     http = fx.FakeHttpClient(responses=fx.default_responses())
     ref = Form4IssuerReference(issuer_cik=fx.ISSUER_CIK_INT, max_candidates=50)
     report, store, target = _run(ref, http)
@@ -383,7 +395,8 @@ def test_every_stored_form4_document_is_statutory_filing_never_company_ir():
     for doc in parse_result.payload["parsed_documents"]:
         stored = store.get(doc["document_id"])
         assert stored is not None
-        assert stored.authority is DocumentAuthority.STATUTORY_FILING
+        assert stored.authority is DocumentAuthority.REPORTING_PERSON_FILING
+        assert stored.authority is not DocumentAuthority.STATUTORY_FILING
         assert stored.document.is_company_ir is False
         assert stored.document.content_kind is ContentKind.FULL_DOCUMENT
         assert stored.document_role is DocumentRole.PRIMARY_DOCUMENT

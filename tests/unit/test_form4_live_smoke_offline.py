@@ -595,6 +595,35 @@ def test_checkbox_false_raw_value_parses_to_false_never_none():
     assert doc["structure_diagnostics"]["date_of_original_submission"]["found"] is False
 
 
+# --- confirmed relationship inconsistency on a NORMAL Form 4 ---------------
+def test_relationship_fields_inconsistent_surfaces_for_a_normal_form4():
+    """Phase 3E.4: the real Mac Live Smoke finding (isOfficer=False with a
+    genuinely non-empty officer_title) was observed on a NORMAL Form 4 --
+    reporting_owners must not be hidden behind the Form-4/A-only gate that
+    remarks still uses."""
+    http, accession = _single_candidate_client("officer_title_inconsistent.xml")
+    report = _run(http)
+    doc = next(d for d in report.parsed_documents if d["accession"] == accession)
+    assert doc["form"] == "4"
+    owner = doc["reporting_owners"][0]
+    assert owner["is_officer"] is False
+    assert owner["officer_title"] == "Chief Financial Officer"
+    assert owner["relationship_fields_inconsistent"] is True
+    assert doc["remarks"] == "UNKNOWN"  # remarks stays amendment-only
+
+
+# --- dateOfOriginalSubmission promoted to a real parsed field --------------
+def test_parsed_date_of_original_submission_visible_alongside_raw_scan():
+    http, accession = _single_candidate_client("amendment_with_date_of_original_submission.xml")
+    report = _run(http)
+    doc = next(d for d in report.parsed_documents if d["accession"] == accession)
+    assert doc["parsed_date_of_original_submission"] == "2026-02-15"
+    assert doc["structure_diagnostics"]["date_of_original_submission"]["raw_value"] == "2026-02-15"
+    # A genuinely present dateOfOriginalSubmission never substitutes for a
+    # remarks-based accession reference (requirement 19/20).
+    assert doc["reconciliation"]["status"] == "UNRESOLVED"
+
+
 # --- smoke_run_completed vs coverage_complete (requirement 5) --------------
 def test_smoke_run_completed_true_coverage_complete_false_when_capped():
     http = fx.FakeHttpClient(responses=fx.default_responses())

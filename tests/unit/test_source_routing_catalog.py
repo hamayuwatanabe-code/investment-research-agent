@@ -224,11 +224,12 @@ def test_building_graph_raises_if_a_real_group_is_left_unclassified(monkeypatch)
 # =========================== Phase 3A: implementation status ===============
 def test_pubmed_adapter_remains_declared_not_yet_coded():
     """PubMed/Europe PMC remains honestly DECLARED -- untouched by Phase
-    3A/3D/3E (requirement 1: never promote to an unearned level). Form 4
-    XML parsing was DECLARED through Phase 3D but is promoted to
-    OFFLINE_VERIFIED as of Phase 3E, once its own adapter genuinely
-    existed and was proven against a fake HTTP double -- see
-    ``test_form4_direct_adapter_is_offline_verified``."""
+    3A/3D/3E/3E.4 (requirement 1: never promote to an unearned level).
+    Form 4 XML parsing was DECLARED through Phase 3D, OFFLINE_VERIFIED as
+    of Phase 3E once its own adapter genuinely existed and was proven
+    against a fake HTTP double, and LIVE_VERIFIED as of Phase 3E.4 once a
+    real Mac Live Smoke run confirmed it against a real issuer -- see
+    ``test_form4_direct_adapter_is_live_verified``."""
     graph = build_source_routing_graph()
     declared_adapters = {
         s.adapter_id
@@ -238,43 +239,49 @@ def test_pubmed_adapter_remains_declared_not_yet_coded():
     assert declared_adapters == {"pubmed_europepmc"}
 
 
-def test_only_sec_clinicaltrials_and_form4_direct_adapters_are_offline_verified():
-    """Phase 3A requirement 1/5/6, extended by Phase 3D and Phase 3E:
-    AcquisitionExecutor plus the SEC primary/exhibit adapters,
-    ClinicalTrialsStudyAdapter's structured (known-NCT-ID) path, AND
-    (Phase 3E) Form4Adapter's LOCATE/FETCH/PARSE are built and proven
-    against a fake HTTP double, so (and only so) their steps earn
-    OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
-    structured-or-web archetype's PARSE step for ANY direct source (SEC
-    and Form 4 use their own dedicated adapter id for PARSE too, but
-    ClinicalTrials' structured chain reuses the generic "local_parser" id
-    for its PARSE step) shares that id with every other still-
-    unimplemented structured archetype's PARSE step -- this set only ever
-    contains the ids of steps actually AT OFFLINE_VERIFIED, never steps at
-    a lower rung that happen to share the same generic id. Web search and
+def test_only_sec_and_clinicaltrials_direct_adapters_are_offline_verified():
+    """Phase 3A requirement 1/5/6, extended by Phase 3D: AcquisitionExecutor
+    plus the SEC primary/exhibit adapters and ClinicalTrialsStudyAdapter's
+    structured (known-NCT-ID) path are built and proven against a fake
+    HTTP double, so (and only so) their steps earn OFFLINE_VERIFIED.
+    ``"local_parser"`` also appears here now: the structured-or-web
+    archetype's PARSE step for ANY direct source (SEC uses its own
+    dedicated adapter id for PARSE too, but ClinicalTrials' structured
+    chain reuses the generic "local_parser" id for its PARSE step) shares
+    that id with every other still-unimplemented structured archetype's
+    PARSE step -- this set only ever contains the ids of steps actually AT
+    OFFLINE_VERIFIED, never steps at a lower (or, since Phase 3E.4,
+    higher) rung that happen to share the same generic id.
+    ``form4_xml_parser`` is EXCLUDED from this set as of Phase 3E.4 -- its
+    3 direct steps are now LIVE_VERIFIED, not OFFLINE_VERIFIED (see
+    ``test_form4_direct_adapter_is_live_verified``). Web search and
     PubMed/Europe PMC are untouched and stay below is_executor_ready --
-    EXECUTOR_WIRED/PIPELINE_WIRED/LIVE_VERIFIED must never appear anywhere
-    in this catalog at all."""
+    EXECUTOR_WIRED/PIPELINE_WIRED must never appear anywhere in this
+    catalog at all, and LIVE_VERIFIED must appear ONLY on Form4's 3 steps."""
     graph = build_source_routing_graph()
     offline_verified_adapters = {
         s.adapter_id for s in graph.steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
     }
     assert offline_verified_adapters == {
-        "sec_primary_document_adapter", "sec_exhibit_enumeration", "clinicaltrials_api",
-        "form4_xml_parser", "local_parser",
+        "sec_primary_document_adapter", "sec_exhibit_enumeration", "clinicaltrials_api", "local_parser",
     }
+    live_verified_steps = [s for s in graph.steps if s.implementation_status is ImplementationStatus.LIVE_VERIFIED]
+    assert {s.adapter_id for s in live_verified_steps} == {"form4_xml_parser"}
+    assert len(live_verified_steps) == 3
     executor_ready_ids = {s.adapter_id for s in graph.steps if s.implementation_status.is_executor_ready}
-    assert executor_ready_ids == offline_verified_adapters
+    assert executor_ready_ids == offline_verified_adapters | {"form4_xml_parser"}
     assert not any(s.implementation_status is ImplementationStatus.EXECUTOR_WIRED for s in graph.steps)
     assert not any(s.implementation_status is ImplementationStatus.PIPELINE_WIRED for s in graph.steps)
-    assert not any(s.implementation_status is ImplementationStatus.LIVE_VERIFIED for s in graph.steps)
 
 
-def test_form4_direct_adapter_is_offline_verified():
-    """Dedicated Phase 3E check: every step of the form4 archetype's
-    direct chain (LOCATE -> FETCH -> PARSE) is OFFLINE_VERIFIED -- never
-    merely the LOCATE step, which is all Phase 3A's ``_document_chain``
-    defaults would promote without an explicit fetch/parse override."""
+def test_form4_direct_adapter_is_live_verified():
+    """Phase 3E.4: every step of the form4 archetype's direct chain
+    (LOCATE -> FETCH -> PARSE) -- exactly 3 steps -- is LIVE_VERIFIED,
+    never merely the LOCATE step, and never any OTHER route/step in this
+    catalog (the DISABLED web-search LOCATE alternative stays DISABLED).
+    Earned by a real Mac Live Smoke run against a real issuer; see
+    research/form4_live_smoke.py and research/source_routing_catalog.py's
+    _form4() for the full provenance."""
     graph = build_source_routing_graph()
     form4_targets = [t for t in graph.targets if t.target_kind is TargetKind.FORM4_FILING]
     assert form4_targets
@@ -284,7 +291,15 @@ def test_form4_direct_adapter_is_offline_verified():
             if s.adapter_id == "form4_xml_parser"
         ]
         assert {s.step_kind for s in direct_steps} == {StepKind.LOCATE, StepKind.FETCH, StepKind.PARSE}
-        assert all(s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED for s in direct_steps)
+        assert len(direct_steps) == 3
+        assert all(s.implementation_status is ImplementationStatus.LIVE_VERIFIED for s in direct_steps)
+
+        other_steps = [
+            s for s in graph.steps_for_target(target.target_id)
+            if s.adapter_id != "form4_xml_parser"
+        ]
+        assert other_steps  # the web-search LOCATE alternative genuinely exists
+        assert all(s.implementation_status is not ImplementationStatus.LIVE_VERIFIED for s in other_steps)
 
 
 def test_real_catalog_plan_status_is_executable_bounded_incomplete():
@@ -376,20 +391,22 @@ def test_fda_regulator_confirmation_is_conditional_blocking_not_required():
 
 def test_routing_coverage_counts_reports_implementation_ladder_split():
     counts = routing_coverage_counts()
-    assert counts.declared_steps > 0  # Form 4 / PubMed -- untouched this phase
+    assert counts.declared_steps > 0  # PubMed -- untouched this phase
     assert counts.primitive_available_steps > 0  # generic web-fallback fetch/parse
     # Phase 3D promoted ClinicalTrials' structured direct fetch/parse from
     # ADAPTER_IMPLEMENTED to OFFLINE_VERIFIED (a real adapter now exists AND
     # is proven against a fake transport) -- nothing else in this catalog
     # still sits at ADAPTER_IMPLEMENTED (every other archetype's direct
-    # path is either OFFLINE_VERIFIED (SEC, ClinicalTrials) or explicitly
-    # DECLARED (Form 4, PubMed/Europe PMC)), so this rung is legitimately
-    # empty now.
+    # path is either OFFLINE_VERIFIED (SEC, ClinicalTrials) or LIVE_VERIFIED
+    # (Form 4, Phase 3E.4) or explicitly DECLARED (PubMed/Europe PMC)), so
+    # this rung is legitimately empty now.
     assert counts.adapter_implemented_steps == 0
     assert counts.executor_wired_steps == 0  # no step is wired-but-unverified
     assert counts.pipeline_wired_steps == 0  # Pipeline.run() connection forbidden this phase
     assert counts.offline_verified_steps > 0  # the SEC + ClinicalTrials direct chains, proven this phase
-    assert counts.live_verified_steps == 0  # no real network call was ever made
+    # Phase 3E.4: exactly Form4's own LOCATE/FETCH/PARSE, earned by a real
+    # Mac Live Smoke run -- see test_form4_direct_adapter_is_live_verified.
+    assert counts.live_verified_steps == 3
     ladder_total = (
         counts.declared_steps + counts.primitive_available_steps + counts.adapter_implemented_steps
         + counts.executor_wired_steps + counts.pipeline_wired_steps + counts.offline_verified_steps

@@ -33,10 +33,24 @@ class EvidenceClass(StrEnum):
     MARKET_INFERENCE = "MARKET_INFERENCE"
     MODEL_INFERENCE = "MODEL_INFERENCE"
     UNVERIFIED_CLAIM = "UNVERIFIED_CLAIM"
+    #: Phase 3E.4: a REPORTING PERSON's own statutory assertion (a Form
+    #: 4/4-A transaction or relationship claim) -- distinct from
+    #: COMPANY_CLAIM (the issuer's own statement) and from
+    #: INDEPENDENT_EVIDENCE. The filer is neither the issuer speaking about
+    #: itself nor an independent third party confirming anything; they are
+    #: an interested party making a statutorily-compelled assertion about
+    #: their own transaction. Deliberately excluded from
+    #: DECISION_GRADE_CLASSES (see below) -- never VERIFIED_FACT and never
+    #: promotable to it by anything downstream.
+    REPORTING_PERSON_STATUTORY_ASSERTION = "REPORTING_PERSON_STATUTORY_ASSERTION"
 
 
 #: Evidence classes that may, on their own, support a material investment
 #: conclusion.  See :func:`investment_research.scoring.evidence_confidence`.
+#: REPORTING_PERSON_STATUTORY_ASSERTION is deliberately NOT a member (Phase
+#: 3E.4 requirement 11) -- a reporting person's own statutory assertion is
+#: never decision-grade on its own, however primary the venue it was filed
+#: through.
 DECISION_GRADE_CLASSES = frozenset(
     {EvidenceClass.VERIFIED_FACT, EvidenceClass.INDEPENDENT_EVIDENCE}
 )
@@ -158,6 +172,14 @@ class DocumentAuthority(StrEnum):
     #: An independent publication: wire/trade press, peer-reviewed journal,
     #: or similar -- authored by neither the issuer nor a regulator.
     INDEPENDENT = "INDEPENDENT"
+    #: Phase 3E.4: a REPORTING PERSON's own statutory filing (e.g. a Form
+    #: 4/4-A) -- filed THROUGH the issuer's own SEC EDGAR filing
+    #: infrastructure, but authored by the individual insider, not the
+    #: issuer. Kept structurally distinct from STATUTORY_FILING (the
+    #: issuer's OWN required disclosure): conflating the two would let a
+    #: reporting person's unconfirmed assertion inherit an issuer
+    #: statement's evidentiary weight merely because SEC hosts both.
+    REPORTING_PERSON_FILING = "REPORTING_PERSON_FILING"
     UNKNOWN = "UNKNOWN"
 
 

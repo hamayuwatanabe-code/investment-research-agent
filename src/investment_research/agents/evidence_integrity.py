@@ -151,6 +151,16 @@ class EvidenceIntegrityAgent(Agent):
     def _assess(self, fact: Fact, group: list[Fact]) -> Fact:
         confirmed, corroborating = self._independent_confirmation(fact, group)
         evidence_class = self._classify(fact, confirmed)
+        if evidence_class == EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION:
+            # Phase 3E.4 requirement 10/11: a reporting person's own
+            # statutory assertion is NEVER independent confirmation of
+            # anything -- including of itself. _independent_confirmation()
+            # above only checks company_claim/tier, not category, so two
+            # Form 4 facts with coincidentally similar claim text could
+            # otherwise "confirm" each other. Forced False here,
+            # unconditionally, regardless of what the generic corroboration
+            # path computed.
+            confirmed, corroborating = False, ()
         stale, effective = self._staleness(fact)
         status = self._status(fact, evidence_class, confirmed)
         materiality = self._materiality(fact)
@@ -211,21 +221,21 @@ class EvidenceIntegrityAgent(Agent):
         if fact.category == FactCategory.MICROSTRUCTURE:
             return EvidenceClass.MARKET_INFERENCE
         if fact.category == FactCategory.INSIDER:
-            # Phase 3E.1 finding: the tier==TIER_1 branch below assumes a
-            # Tier-1-hosted, non-company-claim fact is "the regulator's or
-            # exchange's own statement" -- true for every fact producer
-            # that existed before Form 4 (research/form4_acquisition_
-            # adapter.py), but false here. A Form 4/4-A is the REPORTING
-            # PERSON's own statutory assertion about their own
-            # transaction, filed THROUGH SEC EDGAR -- never SEC's own
-            # statement, and never independently confirmed merely by
-            # being Tier-1 hosted. Routed to COMPANY_CLAIM (the closest
-            # existing "interested party's own unconfirmed assertion"
-            # class, despite its name) rather than a new EvidenceClass
-            # value, which would be a much larger schema change; see
-            # collectors/form4.py's module docstring for the full
-            # evidence-semantics boundary this exists to protect.
-            return EvidenceClass.COMPANY_CLAIM
+            # Phase 3E.1 finding, given its own EvidenceClass in Phase
+            # 3E.4: the tier==TIER_1 branch below assumes a Tier-1-hosted,
+            # non-company-claim fact is "the regulator's or exchange's own
+            # statement" -- true for every fact producer that existed
+            # before Form 4 (research/form4_acquisition_adapter.py), but
+            # false here. A Form 4/4-A is the REPORTING PERSON's own
+            # statutory assertion about their own transaction, filed
+            # THROUGH SEC EDGAR -- never SEC's own statement, and never
+            # independently confirmed merely by being Tier-1 hosted.
+            # REPORTING_PERSON_STATUTORY_ASSERTION is excluded from
+            # DECISION_GRADE_CLASSES (schemas/enums.py), so this can never
+            # alone be decision-grade; see collectors/form4.py's module
+            # docstring for the full evidence-semantics boundary this
+            # exists to protect.
+            return EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION
         if tier == SourceTier.TIER_1:
             # A regulator's or exchange's own statement of its own position.
             return EvidenceClass.VERIFIED_FACT
@@ -272,6 +282,10 @@ class EvidenceIntegrityAgent(Agent):
             return VerifiedStatus.PARTIALLY_VERIFIED
         if evidence_class == EvidenceClass.COMPANY_CLAIM:
             return VerifiedStatus.PARTIALLY_VERIFIED if confirmed else VerifiedStatus.NOT_VERIFIED
+        if evidence_class == EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION:
+            # confirmed is always False here (forced in _assess) -- always
+            # NOT_VERIFIED, never PARTIALLY_VERIFIED/VERIFIED.
+            return VerifiedStatus.NOT_VERIFIED
         if evidence_class in (EvidenceClass.ANALYST_OPINION, EvidenceClass.UNVERIFIED_CLAIM):
             return VerifiedStatus.INSUFFICIENT_EVIDENCE
         return VerifiedStatus.NOT_VERIFIED

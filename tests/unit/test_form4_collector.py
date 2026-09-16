@@ -326,3 +326,61 @@ def test_raw_facts_never_contain_buy_sell_words():
         assert "sold" not in lowered
         assert "bullish" not in lowered
         assert "bearish" not in lowered
+
+
+# =============================================================================
+# Phase 3E.4: relationship field inconsistency (real Mac Live Smoke finding)
+# =============================================================================
+def test_relationship_fields_inconsistent_true_when_officer_false_but_title_present():
+    """A real capture found isOfficer=False with a genuinely non-empty
+    officerTitle -- flagged, never 'corrected' in either direction."""
+    parsed = parse_ownership_document(fx.fixture_text("officer_title_inconsistent.xml"))
+    owner = parsed["reporting_owners"][0]
+    assert owner["is_officer"] is False
+    assert owner["officer_title"] == "Chief Financial Officer"
+    assert owner["relationship_fields_inconsistent"] is True
+
+
+def test_relationship_fields_inconsistent_false_on_ordinary_fixtures():
+    for scenario in ("normal_market_purchase", "footnote_10b5_1", "multiple_transactions"):
+        parsed = parse_ownership_document(fx.fixture_xml(scenario))
+        for owner in parsed["reporting_owners"]:
+            assert owner["relationship_fields_inconsistent"] is False
+
+
+def test_relationship_inconsistency_never_promoted_to_a_transaction_or_confirmation_fact():
+    """The inconsistency flag lives only on the parsed reporting_owners
+    record -- raw_facts_from_form4 never emits a fact about it, and never
+    sets company_claim=True because of it (requirement 17)."""
+    parsed = parse_ownership_document(fx.fixture_text("officer_title_inconsistent.xml"))
+    facts = raw_facts_from_form4("SAMPB", parsed, _source())
+    assert facts
+    for f in facts:
+        assert "inconsistent" not in f.claim.lower()
+        assert f.company_claim is False
+
+
+# =============================================================================
+# Phase 3E.4: dateOfOriginalSubmission promoted to a real parsed field
+# =============================================================================
+def test_date_of_original_submission_unknown_when_absent():
+    for scenario in ("normal_market_purchase", "form4a_amendment", "reconciled_amendment"):
+        parsed = parse_ownership_document(fx.fixture_xml(scenario))
+        assert parsed["date_of_original_submission"] == UNKNOWN
+
+
+def test_date_of_original_submission_read_when_genuinely_present():
+    parsed = parse_ownership_document(fx.fixture_text("amendment_with_date_of_original_submission.xml"))
+    assert parsed["date_of_original_submission"] == "2026-02-15"
+    assert parsed["document_type"] == "4/A"
+
+
+def test_date_of_original_submission_never_used_to_infer_original_accession():
+    """Requirement 19/20: a genuinely present dateOfOriginalSubmission,
+    with no accession named in remarks, still leaves
+    remarks_referenced_accession UNKNOWN -- the date is never consulted
+    as a substitute (this module's own extract_referenced_accession is
+    remarks-text-only and has no date parameter at all)."""
+    parsed = parse_ownership_document(fx.fixture_text("amendment_with_date_of_original_submission.xml"))
+    assert parsed["date_of_original_submission"] == "2026-02-15"
+    assert parsed["remarks_referenced_accession"] == UNKNOWN

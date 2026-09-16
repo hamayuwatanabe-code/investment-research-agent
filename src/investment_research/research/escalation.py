@@ -47,12 +47,25 @@ from .provider import ResearchProvider, ResearchQuery
 #: genuine regulator-issued document would be. A company press release stays
 #: COMPANY_CLAIM and never becomes decision-grade merely because its body
 #: was fetched.
+#:
+#: REPORTING_PERSON_FILING (Phase 3E.4) is its OWN entry, deliberately
+#: separate from STATUTORY_FILING: a Form 4/4-A fetched here as a would-be
+#: "confirming source" for some other claim must never inherit
+#: STATUTORY_FILING's (company_claim=True, decision-grade-eligible)
+#: treatment merely because it is also SEC-hosted -- it is a reporting
+#: person's own assertion, never the issuer's, and never independent
+#: confirmation of anything. This closes a path that would otherwise be
+#: reachable if Form 4 is ever Pipeline-wired: every KEY of DocumentAuthority
+#: must have an entry here or _evidence_for_authority raises KeyError.
 _EVIDENCE_FOR_AUTHORITY: dict[DocumentAuthority, tuple[EvidenceClass, bool, bool]] = {
     DocumentAuthority.REGULATOR: (EvidenceClass.INDEPENDENT_EVIDENCE, False, True),
     DocumentAuthority.STATUTORY_FILING: (EvidenceClass.VERIFIED_FACT, True, False),
     DocumentAuthority.REGISTRY: (EvidenceClass.VERIFIED_FACT, True, False),
     DocumentAuthority.COMPANY_IR: (EvidenceClass.COMPANY_CLAIM, True, False),
     DocumentAuthority.INDEPENDENT: (EvidenceClass.INDEPENDENT_EVIDENCE, False, True),
+    DocumentAuthority.REPORTING_PERSON_FILING: (
+        EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION, False, False,
+    ),
     DocumentAuthority.UNKNOWN: (EvidenceClass.UNVERIFIED_CLAIM, False, False),
 }
 

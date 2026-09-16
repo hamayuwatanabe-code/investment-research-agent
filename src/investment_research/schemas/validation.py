@@ -245,6 +245,20 @@ def validate_fact(fact: Fact, *, facts_only: bool = True) -> None:
         raise SchemaError(
             f"tier {fact.source_tier} cannot alone establish a VERIFIED_FACT (requirement 2)"
         )
+    # Phase 3E.4 requirement 11: a reporting person's own statutory
+    # assertion (a Form 4/4-A claim) is never independent confirmation of
+    # anything, including of itself -- defense in depth on top of
+    # agents/evidence_integrity.py forcing this False at classification
+    # time and research/escalation.py's own mapping never setting it True.
+    if (
+        fact.evidence_class == EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION
+        and fact.independent_confirmation
+    ):
+        raise SchemaError(
+            "a REPORTING_PERSON_STATUTORY_ASSERTION fact cannot have "
+            "independent_confirmation=True: a reporting person's own statutory "
+            "assertion is never independent confirmation of anything"
+        )
 
 
 def validate_facts(facts: Iterable[Fact], **kwargs: Any) -> None:

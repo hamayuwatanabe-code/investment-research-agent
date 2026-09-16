@@ -70,12 +70,15 @@ REQUESTED issuer CIK at FETCH time -- a mismatch excludes that candidate
 from being stored as ACQUIRED evidence, never silently accepted (Phase
 3E.1 requirement 1's CIK-mismatch guard).
 
-Evidence Integrity (Phase 3E/3E.1 requirement 4/6): Form 4 is the
-REPORTING PERSON's own statutory filing (``DocumentAuthority.
-STATUTORY_FILING``, ``Document.is_company_ir=False``). See
-``collectors/form4.py``'s module docstring for the full transaction-
-semantics boundary and the Rule 10b5-1 checkbox's real, CONFIRMED (Phase
-3E.3) document-level element name. Nothing here generates an investment
+Evidence Integrity (Phase 3E/3E.1 requirement 4/6, EvidenceClass split in
+Phase 3E.4): Form 4 is the REPORTING PERSON's own statutory filing
+(``DocumentAuthority.REPORTING_PERSON_FILING`` -- a dedicated value,
+distinct from the issuer's own ``STATUTORY_FILING``, since Phase 3E.4;
+``Document.is_company_ir=False``). See ``collectors/form4.py``'s module
+docstring for the full transaction-semantics boundary, the
+``EvidenceClass.REPORTING_PERSON_STATUTORY_ASSERTION`` mapping, and the
+Rule 10b5-1 checkbox's real, CONFIRMED (Phase 3E.3) document-level
+element name. Nothing here generates an investment
 Action, promotes a domain to SUFFICIENT, or interprets a transaction as a
 judgment about the
 issuer -- and, new in Phase 3E.1, nothing here ever computes a net
@@ -552,7 +555,7 @@ class Form4Adapter:
             content_kind=ContentKind.FULL_DOCUMENT,
             provenance=Provenance.LIVE,
             retrieved_at=utc_now_iso(),
-            authority=DocumentAuthority.STATUTORY_FILING,
+            authority=DocumentAuthority.REPORTING_PERSON_FILING,
         )
         stored = context.document_store.put(
             document, document_id=doc_id, accession=accession,

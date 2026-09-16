@@ -471,24 +471,44 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
 def _form4(index, need_ids, domain, subject_scope, key) -> SourceRoutingGraph:
     tag = f"{index:03d}a"
     req_id, target_id = f"req_{tag}", f"target_{tag}"
-    # Phase 3E: research/form4_acquisition_adapter.py's Form4Adapter now
-    # exists as code and is proven, in this repository's own test suite,
-    # against an injected fake HTTP double -- genuinely OFFLINE_VERIFIED,
-    # never LIVE_VERIFIED (no real network call was ever made). An earned
-    # promotion for LOCATE/FETCH/PARSE alike, mirroring exactly how Phase
-    # 3A promoted the SEC primary-document/exhibit adapters' own three
-    # steps together.
+    # Phase 3E: research/form4_acquisition_adapter.py's Form4Adapter
+    # existed as code, proven in this repository's own test suite against
+    # an injected fake HTTP double -- OFFLINE_VERIFIED.
+    #
+    # Phase 3E.4: promoted to LIVE_VERIFIED for exactly these 3 steps
+    # (direct LOCATE, FETCH, PARSE) -- never the DISABLED web-search
+    # LOCATE alternative, and never any other route/step in this catalog.
+    # Earned by a real Mac Live Smoke run (research/form4_live_smoke.py,
+    # never Pipeline-connected) that fetched and parsed 3 real, normal
+    # Form 4 documents AND 1 real Form 4/A from one real issuer, all
+    # Capture-Manifest-VERIFIED with zero Evidence Integrity failures --
+    # confirming submissions discovery, the xslF345X##/<basename>.xml
+    # primaryDocument shape, directory-index-verified raw XML fetch,
+    # ownershipDocument/documentType/issuerCik matching, the real
+    # aff10b5One checkbox element, and (for the Form 4/A) a real
+    # dateOfOriginalSubmission -- for BOTH document types this catalog
+    # entry's steps parse. This is NOT a claim that every SEC ownership-
+    # filing edge case is covered (never "全SEC形式を網羅した"): amendment
+    # reconciliation remains UNRESOLVED whenever remarks name no
+    # co-discovered original accession, exactly as before.
+    #
+    # No real capture, real person, real transaction detail, or
+    # User-Agent value is committed anywhere in this repository -- this
+    # promotion rests on the run's diagnostics (Capture Manifest status,
+    # structure-verification booleans), never on the captured content
+    # itself, which was never saved to git (see research/form4_live_smoke.py's
+    # module docstring: data/live_smoke/ is gitignored).
     steps, required, alt_groups = _document_chain(
         tag, target_id, direct_method=AcquisitionMethod.NEW_DIRECT_ADAPTER,
-        direct_adapter="form4_xml_parser", direct_authority=DocumentAuthority.STATUTORY_FILING,
-        direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-        fetch_adapter_id="form4_xml_parser", fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-        parse_adapter_id="form4_xml_parser", parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        direct_adapter="form4_xml_parser", direct_authority=DocumentAuthority.REPORTING_PERSON_FILING,
+        direct_implementation_status=ImplementationStatus.LIVE_VERIFIED,
+        fetch_adapter_id="form4_xml_parser", fetch_implementation_status=ImplementationStatus.LIVE_VERIFIED,
+        parse_adapter_id="form4_xml_parser", parse_implementation_status=ImplementationStatus.LIVE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,
         claim_scope=f"insider transaction filing for: {key}",
-        required_authorities=(DocumentAuthority.STATUTORY_FILING,),
+        required_authorities=(DocumentAuthority.REPORTING_PERSON_FILING,),
     )
     target = AcquisitionTarget(
         target_id=target_id, target_kind=TargetKind.FORM4_FILING,
