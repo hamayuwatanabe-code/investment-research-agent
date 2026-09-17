@@ -135,22 +135,57 @@ def test_credential_values_never_appear_in_the_printed_plan():
     assert "ncbi_api_key_configured: True" in printed
 
 
-def test_format_report_for_print_redacts_a_configured_secret_shaped_raw_value():
-    """FakeHttpClient (unlike the real AllowlistedHttpClient) does not
-    sanitize requested_urls -- the plan/report's own credential fields stay
-    boolean-only either way (see test_credential_values_never_appear_in_
-    the_printed_plan), but a raw secret VALUE surfacing elsewhere (a
-    transport error message, in this fake's case the tool value appearing
-    unencoded in the URL) is still caught by format_report_for_print's own
-    _safe()-based scrubbing -- a genuine second, independent line of
-    defense on top of transport-layer sanitization, not a substitute for
-    it (see the loopback integration suite for proof that the REAL
-    transport strips email/api_key -- including their percent-encoded
-    form -- before either ever reaches a FetchResult at all)."""
+def test_collect_transport_diagnostics_strips_the_tool_param_even_from_an_unsanitized_fake():
+    """_collect_transport_diagnostics applies its own _strip_ncbi_tool_param
+    pass regardless of transport -- this module's stricter no-tool-value
+    policy holds even against a FakeHttpClient that (unlike the real
+    AllowlistedHttpClient) does not sanitize requested_urls at all
+    (Phase 3F.1 correction requirement 2)."""
     http = FakeHttpClient(responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml"))
     report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV)
-    assert "tool=test-tool" in "".join(report.requested_urls)  # confirms the fake really is unsanitized
-    printed = live.format_report_for_print(report, secrets=["test-tool"])
+    assert "tool=" not in "".join(report.requested_urls)
+    # email IS still present in requested_urls (percent-encoded) with this
+    # fake transport -- _collect_transport_diagnostics only strips `tool`;
+    # email/api_key sanitization is the REAL AllowlistedHttpClient's own
+    # job (see the loopback integration suite for proof it does that,
+    # including for the percent-encoded form, before a FetchResult even
+    # exists). This documents that boundary rather than pretending a fake
+    # transport gets the same guarantee.
+    assert "email=test%40example.test" in "".join(report.requested_urls)
+
+
+def test_adapter_level_errors_never_contain_a_raw_email_regardless_of_transport():
+    """literature_acquisition_adapter.py's own _sanitize_text (Phase 3F.0.2)
+    redacts email/api_key (raw AND percent-encoded) from every failure
+    message it constructs, using the SAME NcbiCredentials object passed as
+    `settings` -- this holds even for a RaisingHttpClient that never
+    sanitizes anything on its own, since the sanitization here happens at
+    the adapter layer, not the transport layer. `tool` is deliberately
+    NOT included in that adapter-level redaction (matching
+    config.Settings.secret_values()'s own exclusion) -- see the next test
+    for how THIS module's stricter no-tool-value policy is enforced at
+    print time instead."""
+    http = RaisingHttpClient()
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert report.errors
+    assert "test@example.test" not in " ".join(report.errors)
+
+
+def test_format_report_for_print_redacts_the_tool_value_from_an_adapter_error_message():
+    """A RaisingHttpClient's exception message embeds the adapter's own
+    public_url substitution, which (unlike this module's stricter
+    diagnostics-level stripping of tool= from requested_urls) still
+    includes `tool=<value>` -- literature_acquisition_adapter.py's own
+    _sanitize_text never touches it (see previous test). This is exactly
+    the raw, non-percent-encoded case format_report_for_print's own
+    _safe() scrub is good at: proven here by confirming the RAW error text
+    DOES carry it before printing, and the PRINTED text does not after
+    (Phase 3F.1 correction requirement 2)."""
+    http = RaisingHttpClient()
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert report.errors
+    assert "tool=test-tool" in " ".join(report.errors)  # confirms this leak path is real before the print-time fix
+    printed = live.format_report_for_print(report, secrets=["test-tool", "test@example.test"])
     assert "test-tool" not in printed
 
 
@@ -844,3 +879,208 @@ def test_no_id_is_hardcoded_as_a_default_anywhere():
     sig = inspect.signature(live.run_live_smoke)
     assert sig.parameters["nct_id"].default is None
     assert sig.parameters["pmid"].default is None
+
+
+# --- Phase 3F.1 correction requirement 4: CLI communication boundary -------
+def test_plan_text_states_live_mode_will_perform_real_communication():
+    status = live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False)
+    plan = live.build_plan(
+        mode="discovery", nct_id="NCT09990001", pmid=None, max_articles=3, max_fulltext_fetches=1, status=status,
+    )
+    printed = live.format_plan_for_print(plan)
+    assert "nothing sent yet" in printed
+    assert "OFFLINE this phase" not in printed
+    assert "LIVE mode" in printed
+    assert "will make real" in printed.lower() or "will perform real" in printed.lower()
+
+
+def test_module_docstring_never_claims_live_mode_itself_is_offline():
+    assert "OFFLINE this phase" not in (live.__doc__ or "")
+    assert "LIVE mode" in (live.__doc__ or "")
+
+
+def test_cli_help_states_live_mode_will_perform_real_communication(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit):
+        live.main(["--help"])
+    # argparse wraps the description across lines -- normalize before
+    # substring-checking so wrap points never cause a false failure.
+    printed = capsys.readouterr().out.replace("\n", " ")
+    assert "LIVE" in printed
+    assert "WILL make real" in printed
+    assert "network requests" in printed
+
+
+def test_analyze_capture_help_still_says_fully_offline(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit):
+        live.main(["--help"])
+    printed = capsys.readouterr().out.replace("\n", " ")
+    assert "no credentials" in printed.lower() or "no network" in printed.lower()
+
+
+# --- Phase 3F.1 correction requirement 5: marker exception-safety ----------
+def test_pre_send_refusal_never_calls_the_transport_and_never_completes():
+    report = live.run_live_smoke(mode="discovery", nct_id="not-an-nct-id", http_client=_PoisonHttpClient(), env=_ENV)
+    assert report.refused
+    assert report.smoke_run_completed is False
+
+
+def test_sent_then_failed_is_never_a_refusal():
+    http = RaisingHttpClient()
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert not report.refused
+    assert report.smoke_run_completed is True
+    assert report.status is live.LiveSmokeStatus.FAILED
+    assert report.errors
+
+
+def test_main_writes_marker_even_when_run_live_smoke_raises_unexpectedly(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv(live.NCBI_TOOL_ENV_VAR, "test-tool")
+    monkeypatch.setenv(live.NCBI_EMAIL_ENV_VAR, "test@example.test")
+    marker = tmp_path / "marker.json"
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated failure mid-run")
+
+    monkeypatch.setattr(live, "run_live_smoke", _boom)
+    with pytest.raises(RuntimeError):
+        live.main(["--nct-id", "NCT09990001", "--marker-path", str(marker)])
+    assert marker.is_file()
+    state = live._marker_state(marker)
+    assert state is not None
+    assert state["refused"] is False
+
+
+def test_main_still_never_writes_marker_on_missing_credentials_even_with_the_new_try_except(tmp_path, monkeypatch):
+    for var in (live.NCBI_TOOL_ENV_VAR, live.NCBI_EMAIL_ENV_VAR, live.NCBI_API_KEY_ENV_VAR):
+        monkeypatch.delenv(var, raising=False)
+    marker = tmp_path / "marker.json"
+    exit_code = live.main(["--nct-id", "NCT09990001", "--marker-path", str(marker)])
+    assert exit_code == 2
+    assert not marker.exists()
+
+
+# --- Phase 3F.1 correction requirement 6: output contract -------------------
+def test_report_status_completed_on_a_clean_run():
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert report.status is live.LiveSmokeStatus.COMPLETED
+    assert report.smoke_run_completed is True
+
+
+def test_report_status_failed_when_a_transport_exception_occurs():
+    http = RaisingHttpClient()
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert report.status is live.LiveSmokeStatus.FAILED
+
+
+def test_report_status_refused_when_pre_send_rejected():
+    report = live.run_live_smoke(mode="discovery", nct_id="garbage", http_client=_PoisonHttpClient(), env=_ENV)
+    assert report.status is live.LiveSmokeStatus.REFUSED
+
+
+def test_report_status_rate_limited_when_a_429_occurs():
+    http = FakeHttpClient(responses={_esearch_wire_url("NCT09990021[si]"): fx.failed(FetchOutcome.RATE_LIMITED, "429")})
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990021", http_client=http, env=_ENV)
+    assert report.status is live.LiveSmokeStatus.RATE_LIMITED
+
+
+def test_status_priority_blocked_over_failed():
+    """A run whose errors mention BOTH a BLOCKED and a generic failure
+    reason is reported as BLOCKED -- the more specific, more severe
+    classification wins."""
+    report = live.LiveSmokeReport(
+        plan=live.build_plan(
+            mode="targeted", nct_id=None, pmid="90000001", max_articles=3, max_fulltext_fetches=1,
+            status=live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False),
+        ),
+        errors=["f: StepStatus.FAILED -- transport raised BLOCKED somehow"],
+    )
+    assert report.status is live.LiveSmokeStatus.BLOCKED
+
+
+def test_output_contract_fields_all_present_in_text_and_json():
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            _epmc_search_url("90000001"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    printed = live.format_report_for_print(report, secrets=[])
+    for label in (
+        "status:", "smoke_run_completed:", "coverage_complete:", "logical_request_count:", "physical_attempt_count:",
+    ):
+        assert label in printed, f"missing {label!r} in printed report"
+    jsonable = live.report_to_jsonable(report)
+    for key in (
+        "status", "smoke_run_completed", "coverage_complete", "logical_request_count", "physical_attempt_count",
+    ):
+        assert key in jsonable, f"missing {key!r} in report_to_jsonable output"
+    assert jsonable["status"] == report.status.value
+    assert isinstance(jsonable["status"], str)
+
+
+def test_budget_skip_never_reported_as_not_found_status():
+    """A budget-induced skip must never surface as StepStatus.NOT_FOUND --
+    exercised here via the article-budget-exceeded scenario (already
+    proven not to emit a NOT_FOUND error string elsewhere); this test
+    additionally confirms the overall status still reflects COMPLETED
+    (never FAILED) when the only "error-shaped" entries are budget skips
+    reported through coverage_complete, not report.errors."""
+    http = FakeHttpClient(
+        responses={
+            _esearch_wire_url("NCT09990022[si]"): fx.ok(fx.esearch_response(["90000015", "90000016"])),
+            _efetch_wire_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
+            _epmc_search_url("90000015"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990022", max_articles=1, http_client=http, env=_ENV)
+    assert report.coverage_complete is False
+    assert not any("NOT_FOUND" in e for e in report.errors)
+
+
+# --- Phase 3F.1 correction requirement 7: targeted-mode plan consistency ---
+def test_targeted_mode_build_plan_clamps_the_field_itself_not_just_the_formula():
+    status = live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False)
+    plan = live.build_plan(
+        mode="targeted", nct_id=None, pmid="90000001", max_articles=3, max_fulltext_fetches=99, status=status,
+    )
+    assert plan.max_fulltext_fetches == live.TARGETED_MAX_FULLTEXT_FETCHES_CAP
+    assert str(live.TARGETED_MAX_FULLTEXT_FETCHES_CAP) in plan.max_requests_formula
+
+
+def test_displayed_plan_matches_the_plan_run_live_smoke_actually_executes():
+    """The plan main() prints BEFORE running and the plan attached to the
+    final report (built inside run_live_smoke) must show the SAME clamped
+    max_fulltext_fetches -- this was the exact bug the Phase 3F.1
+    correction fixes: main() used to build its own upfront plan from the
+    raw, un-clamped CLI value while run_live_smoke built a separately-
+    clamped one."""
+    status = live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False)
+    upfront_plan = live.build_plan(
+        mode="targeted", nct_id=None, pmid="90000001", max_articles=3, max_fulltext_fetches=99, status=status,
+    )
+    http = FakeHttpClient(responses={_efetch_wire_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", max_fulltext_fetches=99, http_client=http, env=_ENV)
+    assert upfront_plan.max_fulltext_fetches == report.plan.max_fulltext_fetches
+    assert report.plan.max_fulltext_fetches == live.TARGETED_MAX_FULLTEXT_FETCHES_CAP
+
+
+def test_discovery_mode_never_clamps_max_fulltext_fetches():
+    status = live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False)
+    plan = live.build_plan(
+        mode="discovery", nct_id="NCT09990001", pmid=None, max_articles=3, max_fulltext_fetches=99, status=status,
+    )
+    assert plan.max_fulltext_fetches == 99

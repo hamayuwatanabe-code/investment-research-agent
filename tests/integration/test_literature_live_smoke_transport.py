@@ -2,27 +2,38 @@
 ``AllowlistedHttpClient`` and the shared Capture Manifest -- exercised
 against real loopback sockets, never the real internet.
 
-Why this file cannot drive ``literature_live_smoke.run_live_smoke()``
-end-to-end: ``research/literature_acquisition_adapter.py`` hardcodes its
-own real NCBI/Europe PMC hostnames (``NCBI_ESEARCH_URL``, ``ALLOWED_HOSTS``,
-...) with no injection point for a test host, so the adapter itself can
-never be pointed at a loopback server without either monkeypatching module
-constants or a real DNS trick -- neither of which this suite does. Instead,
-this file proves the actual transport/replay MACHINERY
-``literature_live_smoke.py`` depends on -- ``AllowlistedHttpClient`` (the
-SAME class ``run_live_smoke`` constructs in production) and
-``literature_live_smoke.analyze_capture`` (which reads whatever
-``AllowlistedHttpClient`` actually wrote) -- against real sockets, using
-literature-shaped URLs (NCBI/Europe-PMC-style paths and courtesy query
-params) so the write-then-replay cycle is proven genuinely end-to-end.
+Most tests here exercise ``AllowlistedHttpClient`` (the SAME class
+``run_live_smoke`` constructs in production) and
+``literature_live_smoke.analyze_capture`` directly, without going through
+``PubMedLiteratureAdapter`` at all, because
+``research/literature_acquisition_adapter.py`` hardcodes its own real
+NCBI/Europe PMC hostnames (``NCBI_ESEARCH_URL``, ``ALLOWED_HOSTS``, ...)
+with no PRODUCTION injection point for a test host.
+
+``test_run_live_smoke_full_orchestration_and_secret_sweep_over_a_real_loopback_server``
+(Phase 3F.1 correction requirement 8) is the exception: it drives
+``run_live_smoke()``'s FULL orchestration (LOCATE via ESearch -> FETCH via
+EFetch + Europe PMC search/full-text -> PARSE) end-to-end over real
+sockets, by monkeypatching ``literature_acquisition_adapter``'s
+module-level URL/``ALLOWED_HOSTS`` constants for the duration of that one
+test. Python resolves a module global at CALL time, so this requires no
+production code change or DI seam -- it is a test-only technique, reverted
+automatically by pytest's ``monkeypatch`` fixture, never a claim that the
+production adapter is actually configurable. That same test also performs
+the comprehensive secret-non-leakage sweep Phase 3F.1 correction
+requirement 2 asks for (text output, JSON output, ``repr()``, error
+strings, Capture Manifest files, and the transport's own cache-key set)
+against a REAL end-to-end run, since only a real run populates every one
+of those surfaces meaningfully.
 
 Every scenario Phase 3F.1 requirement 8 asks for that ``AllowlistedHttpClient``
 itself is responsible for (pre-connect redirect validation, an explicit
-redirect-count cap, secret sanitization) is ALSO covered generically by
-``tests/integration/test_sec_live_smoke_transport.py`` -- the tests here
-are not a second from-scratch proof of that machinery, but a proof that
-THIS module's own choices (which host/path shapes it builds, how
-``analyze_capture`` classifies and replays them) compose with it correctly.
+redirect-count cap, the physical attempt cap, secret sanitization) is ALSO
+covered generically by ``tests/integration/test_sec_live_smoke_transport.py``
+-- the other tests in this file are not a second from-scratch proof of
+that machinery, but a proof that THIS module's own choices (which
+host/path shapes it builds, how ``analyze_capture`` classifies and
+replays them) compose with it correctly.
 """
 
 from __future__ import annotations
@@ -30,12 +41,13 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 
 import pytest
 
 from investment_research.research import literature_live_smoke as live
 from investment_research.research.capture_manifest import read_manifest
-from investment_research.research.sec_live_smoke import AllowlistedHttpClient
+from investment_research.research.sec_live_smoke import AllowlistedHttpClient, _safe
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +67,7 @@ class Handler(BaseHTTPRequestHandler):
         counts = Handler.state.setdefault("counts", {})
         counts[path] = counts.get(path, 0) + 1
         Handler.state["last_raw_path"] = self.path
+        Handler.state.setdefault("raw_paths", []).append(self.path)
 
         if path == "/entrez/eutils/esearch.fcgi":
             self._send(200, json.dumps({"esearchresult": {"idlist": ["90000008"]}}).encode())
@@ -184,7 +197,10 @@ def test_secret_raw_and_percent_encoded_values_never_leak_past_the_transport(bas
 
     import hashlib
 
-    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    # The capture digest is derived from the PUBLIC url (Phase 3F.1
+    # correction requirement 1), never the wire url that carried the
+    # secret -- so it is computed here from result.url, not `url` itself.
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
     manifest_text = (tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8")
     for leaked in (_SECRET_API_KEY, _SECRET_EMAIL, encoded_email):
         assert leaked not in manifest_text
@@ -278,3 +294,101 @@ def test_offline_replay_of_a_corrupted_capture_is_reported_as_an_evidence_integr
     replay = live.analyze_capture(tmp_path)
     statuses = {f["status"] for f in replay["evidence_integrity_failures"]}
     assert "HASH_MISMATCH" in statuses
+
+
+# --- Phase 3F.1 correction requirements 2 + 8: full orchestration over a
+# real loopback server, PLUS the comprehensive secret-non-leakage sweep ----
+def test_run_live_smoke_full_orchestration_and_secret_sweep_over_a_real_loopback_server(base_url, tmp_path, monkeypatch):
+    """Monkeypatches literature_acquisition_adapter's module-level URL/
+    ALLOWED_HOSTS constants (restored automatically after this test) so
+    run_live_smoke()'s FULL LOCATE->FETCH->PARSE orchestration runs against
+    the real loopback server, using a REAL AllowlistedHttpClient end to
+    end -- then sweeps every output surface (text, JSON, repr, error
+    strings, Capture Manifest files, transport cache keys) for a
+    configured secret, in both raw and percent-encoded form."""
+    import investment_research.research.literature_acquisition_adapter as adapter_module
+
+    loopback_hosts = frozenset({"127.0.0.1"})
+    monkeypatch.setattr(adapter_module, "ALLOWED_HOSTS", loopback_hosts)
+    monkeypatch.setattr(adapter_module, "NCBI_ESEARCH_URL", f"{base_url}/entrez/eutils/esearch.fcgi")
+    monkeypatch.setattr(adapter_module, "NCBI_EFETCH_URL", f"{base_url}/entrez/eutils/efetch.fcgi")
+    monkeypatch.setattr(adapter_module, "EUROPEPMC_SEARCH_URL", f"{base_url}/europepmc/webservices/rest/search")
+    monkeypatch.setattr(
+        adapter_module, "EUROPEPMC_FULLTEXT_URL", f"{base_url}/europepmc/webservices/rest/{{source}}/{{pmcid}}/fullTextXML",
+    )
+    # literature_live_smoke.py imported ALLOWED_HOSTS into its OWN
+    # namespace (`from .literature_acquisition_adapter import ALLOWED_HOSTS`)
+    # -- a separate bound name, so it must be patched too, for the client
+    # run_live_smoke() constructs ITSELF (never injected below, so this
+    # test exercises the exact production client-construction call,
+    # additional_secret_query_params included).
+    monkeypatch.setattr(live, "ALLOWED_HOSTS", loopback_hosts)
+
+    secret_email = "sweep-secret@example.test"
+    secret_api_key = "sweep-api-key-12345"
+    secret_tool = "sweep-tool-value"
+    env = {"IRA_NCBI_TOOL": secret_tool, "IRA_NCBI_EMAIL": secret_email, "IRA_NCBI_API_KEY": secret_api_key}
+
+    report = live.run_live_smoke(
+        mode="discovery", nct_id="NCT09990001", max_articles=3, max_fulltext_fetches=1,
+        out_dir=tmp_path, env=env,
+    )
+
+    # 1. Full orchestration actually happened, end to end, over real sockets.
+    assert not report.refused, report.refused_reason
+    assert report.smoke_run_completed is True
+    assert report.status is live.LiveSmokeStatus.COMPLETED
+    assert report.pmids_located == ["90000008"]
+    assert report.articles and report.articles[0]["full_text_acquired"] is True
+    assert report.attempt_count >= report.request_count > 0
+
+    # 2. The loopback server itself DID receive the secret, raw and
+    # percent-encoded -- confirms every check below is sanitization, not
+    # simply never sending the value.
+    all_raw_paths = " ".join(Handler.state.get("raw_paths", []))
+    assert secret_api_key in all_raw_paths
+
+    encoded_email = quote(secret_email, safe="")
+    secrets_to_check = [secret_email, secret_api_key, secret_tool, encoded_email]
+
+    # -- text output --
+    printed_text = live.format_report_for_print(report, secrets=[secret_tool, secret_email, secret_api_key])
+    for value in secrets_to_check:
+        assert value not in printed_text, f"{value!r} leaked into text output"
+
+    # -- JSON output, through the SAME _safe() scrub main() applies --
+    printed_json = _safe(
+        json.dumps(live.report_to_jsonable(report), default=str),
+        [secret_tool, secret_email, secret_api_key],
+    )
+    for value in secrets_to_check:
+        assert value not in printed_json, f"{value!r} leaked into json output"
+
+    # -- repr() --
+    for value in secrets_to_check:
+        assert value not in repr(report), f"{value!r} leaked into repr(report)"
+
+    # -- error strings --
+    combined_errors = " ".join(report.errors)
+    for value in secrets_to_check:
+        assert value not in combined_errors, f"{value!r} leaked into an error string"
+
+    # -- Capture Manifest files on disk --
+    manifest_paths = list(tmp_path.glob("*.manifest.json"))
+    assert manifest_paths
+    for manifest_path in manifest_paths:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        for value in secrets_to_check:
+            assert value not in manifest_text, f"{value!r} leaked into {manifest_path.name}"
+
+    # -- the transport's own internal cache-key set -- report.requested_urls
+    # is populated (via _collect_transport_diagnostics) directly from the
+    # client's own requested_urls list, which is exactly the set of keys
+    # used in the client's internal `_cache` dict (Phase 3F.1 correction
+    # requirement 1: cache is keyed by public_url) -- so this is the same
+    # check as inspecting the private _cache dict itself, without reaching
+    # into the client run_live_smoke() builds and never exposes.
+    assert report.requested_urls
+    for cache_key in report.requested_urls:
+        for value in secrets_to_check:
+            assert value not in cache_key, f"{value!r} leaked into a cache key"

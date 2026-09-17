@@ -1,19 +1,26 @@
 """Phase 3F.1: a manual, human-run Literature (PubMed/Europe PMC) Live Smoke
-tool -- OFFLINE this phase.
+tool.
 
-**No real NCBI/Europe PMC network call is made or intended in this phase,
-and nothing here promotes any step to ``ImplementationStatus.LIVE_VERIFIED``.**
-This module exists to build out the plan/CLI/credential-gating/Capture-
-Manifest/offline-replay surface a FUTURE live-communication phase would
-need, and to prove -- against a fake transport and a real loopback server,
-never the real internet -- that surface behaves correctly before that real
-communication is ever attempted. Every test in
-``tests/unit/test_literature_live_smoke_offline.py`` /
-``tests/integration/test_literature_live_smoke_transport.py`` exercises
-this module's logic against a fake transport or a local loopback test
-server, exactly like ``sec_live_smoke.py``/``clinicaltrials_live_smoke.py``.
-
-**NEVER imported by ``cli.py``/``pipeline.py``/any production code path.**
+**``--nct-id``/``--pmid`` are a LIVE mode**: running either against a real
+environment (real ``IRA_NCBI_TOOL``/``IRA_NCBI_EMAIL`` configured, real
+network access) WILL make real outbound GET requests to NCBI E-utilities/
+Europe PMC. Nothing in this module's code disables that -- there is no
+offline/dry-run switch on the live path itself. What IS offline, and
+exhaustively so (Phase 3F.1 correction requirement 4, correcting this
+docstring's own earlier, misleading wording): this module's automated test
+suite (every test in ``tests/unit/test_literature_live_smoke_offline.py``
+exercises a ``FakeHttpClient``; every test in
+``tests/integration/test_literature_live_smoke_transport.py`` exercises a
+local loopback server -- never the real internet, and no test in this
+repository has ever invoked the real NCBI/Europe PMC hosts), and
+``--analyze-capture`` (below), which makes zero network calls by
+construction, always, with no exception. This phase's own author never ran
+this tool against the real internet either; that is a fact about how this
+code was developed and tested, not a property the CODE itself enforces on
+a future operator who runs it for real. Nothing here promotes any step to
+``ImplementationStatus.LIVE_VERIFIED`` -- that stays a manual/reporting
+decision outside this module, regardless of whether a real run ever
+happens.
 
 Deliberately reuses ``sec_live_smoke.AllowlistedHttpClient`` (a purpose-
 built, read-only, host-allowlisted GET client with Phase 3F.0.4's
@@ -26,6 +33,8 @@ PARSE adapter and request-budget machinery) rather than reimplementing
 ESearch/EFetch/Europe-PMC-search/full-text acquisition logic a second
 time -- only the CLI surface, credential gating, plan/report shape, and
 Capture Manifest replay are new here.
+
+**NEVER imported by ``cli.py``/``pipeline.py``/any production code path.**
 
 Credentials (Phase 3F.1 requirement 3): ``IRA_NCBI_TOOL`` and
 ``IRA_NCBI_EMAIL`` are REQUIRED for this tool -- unlike
@@ -71,21 +80,38 @@ carry ``EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION``, excluded from
 ``external_llm_tokens`` are always ``0`` -- this module makes none of
 those calls.
 
-Capture Manifest replay (Phase 3F.1 requirement 7): a live request's wire
-URL carries ``email``/``api_key`` (NCBI's own courtesy-identification
-convention), so the digest ``AllowlistedHttpClient._save_response`` names
-each saved file with (``sha256(wire_url)[:24]``) cannot be recomputed
-offline without knowing those secret values -- and ``analyze_capture``
-below must work with ZERO credentials configured. It therefore scans every
-``*.manifest.json`` actually present in the capture directory and
-classifies each by its manifest's own (already-sanitized) ``requested_url``
-shape, rather than guessing a filename. Every manifest is resolved through
-the SHARED ``capture_manifest.read_manifest`` (never a reimplementation),
-so ``VERIFIED``/``MISSING``/``BODY_MISSING``/``MALFORMED``/
+Capture Manifest replay (Phase 3F.1 requirement 7, corrected in the Phase
+3F.1 correction pass): ``AllowlistedHttpClient._save_response`` now names
+each saved file's digest from the SANITIZED public URL
+(``sha256(public_url)[:24]``), never the wire URL that actually carried
+``email``/``api_key`` -- so, unlike before that correction,
+``analyze_capture`` COULD in principle recompute an expected digest
+directly. It still scans every ``*.manifest.json`` actually present in the
+capture directory instead, because that remains simpler and more robust
+than reconstructing an exact query-parameter set/order to match against
+(and because ``analyze_capture`` must work with ZERO credentials
+configured, which a from-scratch URL reconstruction would only
+coincidentally need anyway now that the digest excludes secrets).
+Classification is by each manifest's own (already-sanitized)
+``requested_url`` shape. Every manifest is resolved through the SHARED
+``capture_manifest.read_manifest`` (never a reimplementation), so
+``VERIFIED``/``MISSING``/``BODY_MISSING``/``MALFORMED``/
 ``UNSUPPORTED_SCHEMA``/``HASH_MISMATCH``/``CONTENT_LENGTH_MISMATCH``/
 ``IO_ERROR`` are resolved identically to every other Live Smoke tool, and
 every non-``VERIFIED``, non-``MISSING`` status is surfaced explicitly as an
 Evidence Integrity failure.
+
+Loopback verification scope (Phase 3F.1 correction requirement 8): a real
+loopback-server test drives ``run_live_smoke()``'s FULL orchestration
+(LOCATE via ESearch -> FETCH via EFetch + Europe PMC search/full-text ->
+PARSE) end-to-end, by monkeypatching ``literature_acquisition_adapter``'s
+module-level URL/``ALLOWED_HOSTS`` constants for the duration of that one
+test -- Python resolves a module global at call time, so this requires no
+production code change or DI seam in that module, which still hardcodes
+its real NCBI/Europe PMC hostnames for every other caller. Every other
+loopback test in this suite exercises ``AllowlistedHttpClient`` and the
+Capture Manifest write/replay cycle directly, without going through
+``PubMedLiteratureAdapter`` at all.
 """
 
 from __future__ import annotations
@@ -95,6 +121,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +265,19 @@ def _discovery_budget(max_articles: int, max_fulltext_fetches: int) -> tuple[Req
     return limits, max_total_requests, formula
 
 
+def _effective_max_fulltext_fetches(mode: str, max_fulltext_fetches: int) -> int:
+    """The ACTUAL ``max_fulltext_fetches`` value that will govern
+    execution -- the single source of truth every caller (``build_plan``,
+    ``run_live_smoke``) must derive from, so a caller-displayed plan and
+    the plan actually executed can never silently disagree (Phase 3F.1
+    correction requirement 7). Targeted mode clamps to
+    ``TARGETED_MAX_FULLTEXT_FETCHES_CAP`` regardless of what was requested;
+    discovery mode never clamps."""
+    if mode == "targeted":
+        return min(max_fulltext_fetches, TARGETED_MAX_FULLTEXT_FETCHES_CAP)
+    return max_fulltext_fetches
+
+
 def _targeted_budget(max_fulltext_fetches: int) -> tuple[RequestBudgetLimits, int, str]:
     """A single PMID (Priority A ``ct_pmid`` direct path) skips ESearch
     entirely. ``max_fulltext_fetches`` is clamped to
@@ -279,6 +319,37 @@ class LiveSmokePlan:
     ncbi_api_key_configured: bool
 
 
+class LiveSmokeStatus(str, Enum):
+    """Overall run outcome -- mirrors ``schemas.enums.FetchOutcome``'s own
+    naming convention (BLOCKED/RATE_LIMITED/...) at the whole-run level
+    rather than the single-request level, since no existing enum in this
+    repository already models "how did an entire Live Smoke run go"
+    (Phase 3F.1 correction requirement 6). Priority when computing this
+    from a report, most severe first: REFUSED > BLOCKED > RATE_LIMITED >
+    FAILED > COMPLETED."""
+
+    #: The run reached the point of making (or attempting) real requests,
+    #: and every step that ran completed without a FAILED/NOT_FOUND/
+    #: ZERO_RESULTS/SKIPPED_DUE_TO_BUDGET outcome. Note this is compatible
+    #: with coverage_complete=False from a budget skip that never itself
+    #: produced a step-level failure entry.
+    COMPLETED = "COMPLETED"
+    #: At least one request in this run was rate-limited (HTTP 429) --
+    #: never auto-retried (see AllowlistedHttpClient), reported here as its
+    #: own status rather than folded into the generic FAILED.
+    RATE_LIMITED = "RATE_LIMITED"
+    #: At least one request in this run was blocked -- a disallowed host,
+    #: a rejected redirect, or an egress policy denial (403/407).
+    BLOCKED = "BLOCKED"
+    #: The run made (or attempted) real requests, and at least one step
+    #: failed for a reason other than rate-limiting/blocking.
+    FAILED = "FAILED"
+    #: Refused before any request was ever attempted (missing credential
+    #: or a malformed NCT ID/PMID). Distinct from FAILED: zero network
+    #: activity occurred.
+    REFUSED = "REFUSED"
+
+
 @dataclass
 class LiveSmokeReport:
     """Everything to report after the run -- diagnostics, never an
@@ -288,7 +359,15 @@ class LiveSmokeReport:
     refused_reason: str | None = None
     requested_urls: list[str] = field(default_factory=list)
     http_statuses: dict[str, int | None] = field(default_factory=dict)
+    #: LOGICAL request count -- one per distinct URL actually dispatched
+    #: (cache misses past the host-allowlist check), regardless of how many
+    #: physical retries each one took. See ``attempt_count`` for the
+    #: physical count (Phase 3F.1 correction requirement 3/6).
     request_count: int = 0
+    #: PHYSICAL GET-attempt count -- every real socket-level attempt,
+    #: including every retry of every logical request. This is the number
+    #: ``AllowlistedHttpClient.max_requests`` actually bounds.
+    attempt_count: int = 0
     cache_hit_count: int = 0
     execution_report: ExecutionReport | None = None
     pmids_located: list[str] = field(default_factory=list)
@@ -312,6 +391,23 @@ class LiveSmokeReport:
     def refused(self) -> bool:
         return self.refused_reason is not None
 
+    @property
+    def smoke_run_completed(self) -> bool:
+        """True once run_live_smoke reached the point of actually building
+        an execution report (i.e. NOT refused before the first attempt) --
+        distinct from ``status == COMPLETED``, which additionally requires
+        no errors. Computed, not stored, so it can never drift out of sync
+        with ``execution_report`` on any code path (Phase 3F.1 correction
+        requirement 6)."""
+        return self.execution_report is not None
+
+    @property
+    def status(self) -> LiveSmokeStatus:
+        """Computed on every access from ``refused_reason``/``errors`` --
+        never a separately-stored field a code path could forget to set
+        (Phase 3F.1 correction requirement 6). See ``_compute_status``."""
+        return _compute_status(self)
+
 
 def build_plan(
     *,
@@ -322,10 +418,18 @@ def build_plan(
     max_fulltext_fetches: int,
     status: CredentialStatus,
 ) -> LiveSmokePlan:
+    """``max_fulltext_fetches`` is clamped HERE via
+    ``_effective_max_fulltext_fetches`` before it ever reaches either the
+    budget formula or the returned plan's own field -- so a caller (e.g.
+    ``main()``, printing a plan before running) that passes the raw,
+    un-clamped CLI value always gets back a plan whose displayed
+    ``max_fulltext_fetches`` already matches what ``run_live_smoke`` will
+    actually execute (Phase 3F.1 correction requirement 7)."""
+    effective_max_fulltext_fetches = _effective_max_fulltext_fetches(mode, max_fulltext_fetches)
     if mode == "discovery":
-        _limits, max_requests, formula = _discovery_budget(max_articles, max_fulltext_fetches)
+        _limits, max_requests, formula = _discovery_budget(max_articles, effective_max_fulltext_fetches)
     else:
-        _limits, max_requests, formula = _targeted_budget(max_fulltext_fetches)
+        _limits, max_requests, formula = _targeted_budget(effective_max_fulltext_fetches)
     return LiveSmokePlan(
         mode=mode,
         allowed_hosts=tuple(sorted(ALLOWED_HOSTS)),
@@ -338,7 +442,7 @@ def build_plan(
         nct_id=nct_id,
         pmid=pmid,
         max_articles=max_articles,
-        max_fulltext_fetches=max_fulltext_fetches,
+        max_fulltext_fetches=effective_max_fulltext_fetches,
         ncbi_tool_configured=status.tool_configured,
         ncbi_email_configured=status.email_configured,
         ncbi_api_key_configured=status.api_key_configured,
@@ -375,23 +479,75 @@ def _build_graph(target_id: str = "target_lit_smoke") -> SourceRoutingGraph:
     return SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(l1, f, p))
 
 
+def _strip_ncbi_tool_param(url: str) -> str:
+    """This Live Smoke tool's OWN, STRICTER policy than the shared
+    ``AllowlistedHttpClient``/``_sanitize_url`` convention: that shared
+    convention deliberately keeps a ``tool=`` query parameter (it is a
+    non-secret software identifier -- see ``config.Settings.secret_values``'s
+    own exclusion of it), because most callers have no reason to hide it.
+    Literature Live Smoke is stricter regardless: it never displays or
+    stores the configured ``IRA_NCBI_TOOL`` VALUE anywhere, even though it
+    is "not as secret as an API key" (Phase 3F.1 correction requirement 2).
+    A no-op for a URL that carries no ``tool=`` parameter."""
+    if "tool=" not in url:
+        return url
+    prefix, _, query = url.partition("?")
+    kept = [pair for pair in query.split("&") if pair and not pair.startswith("tool=")]
+    return prefix + ("?" + "&".join(kept) if kept else "")
+
+
 def _collect_transport_diagnostics(client: Any, report: LiveSmokeReport) -> None:
     """Same generic, getattr-based approach as sec_live_smoke.py/
     clinicaltrials_live_smoke.py's own helper -- degrades cleanly for a
     minimal duck-typed fake transport. ``client.requested_urls`` is already
-    the sanitized public-URL form (Phase 3F.0.3), so nothing here needs its
-    own sanitization pass."""
-    seen = list(getattr(client, "requested_urls", report.requested_urls))
+    the sanitized public-URL form (Phase 3F.0.3) with respect to
+    email/api_key; ``_strip_ncbi_tool_param`` is applied ON TOP of that
+    here for this module's own stricter no-tool-value policy (see that
+    function's own docstring).
+
+    Phase 3F.1 correction requirement 2: ``http_statuses`` is built from
+    each cached ``FetchResult``'s OWN ``.url`` field -- never from the
+    cache dict's KEY. A dict key is an internal implementation detail of
+    whatever transport this is (public_url after the Phase 3F.1 correction
+    to ``AllowlistedHttpClient``, but this function must not assume that of
+    every possible duck-typed transport a caller might inject); ``.url`` is
+    the one field every ``FetchResult``-shaped object in this codebase
+    guarantees is already sanitized (of email/api_key, at least).
+    """
+    seen = [_strip_ncbi_tool_param(u) for u in getattr(client, "requested_urls", report.requested_urls)]
     deduped = list(dict.fromkeys(seen))
     report.requested_urls = deduped
     report.request_count = getattr(client, "requests_made", len(deduped))
+    report.attempt_count = getattr(client, "attempts_made", report.request_count)
     report.cache_hit_count = getattr(client, "cache_hits", 0)
     cache = getattr(client, "_cache", None)
     if isinstance(cache, dict):
-        for url, result in cache.items():
-            report.http_statuses[url] = getattr(result, "status", None)
+        for result in cache.values():
+            result_url = getattr(result, "url", None)
+            if isinstance(result_url, str):
+                report.http_statuses[_strip_ncbi_tool_param(result_url)] = getattr(result, "status", None)
     for url in report.requested_urls:
         report.http_statuses.setdefault(url, None)
+
+
+def _compute_status(report: LiveSmokeReport) -> LiveSmokeStatus:
+    """Derives the overall run status from what the report already knows --
+    never a second, independent classification of the underlying transport
+    outcomes. Checks report.errors' own text for a FetchOutcome value
+    (StrEnum, so f"{outcome}" is exactly its bare name, e.g. "RATE_LIMITED")
+    -- these strings are already embedded there by
+    literature_acquisition_adapter.py's own failure-message construction
+    (e.g. f"ESearch failed: {fetch.outcome} {fetch.error}")."""
+    if report.refused:
+        return LiveSmokeStatus.REFUSED
+    combined_errors = " ".join(report.errors)
+    if "BLOCKED" in combined_errors:
+        return LiveSmokeStatus.BLOCKED
+    if "RATE_LIMITED" in combined_errors:
+        return LiveSmokeStatus.RATE_LIMITED
+    if report.errors:
+        return LiveSmokeStatus.FAILED
+    return LiveSmokeStatus.COMPLETED
 
 
 def run_live_smoke(
@@ -407,27 +563,25 @@ def run_live_smoke(
 ) -> LiveSmokeReport:
     """Run one Literature Live Smoke pass. ``http_client``/``env`` are
     injectable for offline testing only -- production callers (``scripts/
-    literature_live_smoke.py``) leave both as ``None`` so this resolves the
-    real environment and constructs a real, host-allowlisted client.
+    literature_live_smoke.py``) leave both as ``None``, in which case this
+    resolves the real environment and constructs a real, host-allowlisted
+    ``AllowlistedHttpClient`` and WILL make real outbound NCBI/Europe PMC
+    requests (see module docstring's LIVE mode notice) if credentials are
+    configured and no refusal applies.
 
     Never called from ``Pipeline.run()``; never makes an Anthropic/LLM/Web
-    Search call; makes no real network call in THIS phase either way (see
-    module docstring), but the code path here is written exactly as a
-    future live-communication phase would run it.
+    Search call.
     """
     if mode not in ("discovery", "targeted"):
         raise ValueError(f"unknown mode: {mode!r} (expected 'discovery' or 'targeted')")
 
-    credentials, status, missing = resolve_ncbi_credentials(env)
+    credentials, credential_status, missing = resolve_ncbi_credentials(env)
     normalized_nct_id = normalize_nct_id(nct_id) if nct_id else None
     normalized_pmid = (pmid or "").strip()
-    effective_max_fulltext_fetches = (
-        max_fulltext_fetches if mode == "discovery"
-        else min(max_fulltext_fetches, TARGETED_MAX_FULLTEXT_FETCHES_CAP)
-    )
+    effective_max_fulltext_fetches = _effective_max_fulltext_fetches(mode, max_fulltext_fetches)
     plan = build_plan(
         mode=mode, nct_id=normalized_nct_id, pmid=normalized_pmid or None, max_articles=max_articles,
-        max_fulltext_fetches=effective_max_fulltext_fetches, status=status,
+        max_fulltext_fetches=effective_max_fulltext_fetches, status=credential_status,
     )
     report = LiveSmokeReport(plan=plan)
 
@@ -467,6 +621,14 @@ def run_live_smoke(
         user_agent=LITERATURE_LIVE_SMOKE_USER_AGENT, allowed_hosts=ALLOWED_HOSTS,
         timeout=DEFAULT_TIMEOUT_SECONDS, rate_limit_rps=DEFAULT_RATE_LIMIT_RPS, max_retries=MAX_RETRIES,
         max_requests=plan.max_requests, max_redirects=MAX_REDIRECTS, out_dir=out_dir, source="literature",
+        # This module's own stricter policy: never display or store the
+        # configured IRA_NCBI_TOOL value either, even though `tool` is not
+        # as secret as an API key and AllowlistedHttpClient's shared
+        # _sanitize_url deliberately keeps it for other callers (Phase
+        # 3F.1 correction requirement 2). This is what keeps `tool=...`
+        # out of the persisted Capture Manifest itself, not just this
+        # module's own in-memory diagnostics.
+        additional_secret_query_params=frozenset({"tool"}),
     )
 
     graph = _build_graph()
@@ -538,8 +700,10 @@ def run_live_smoke(
 def format_plan_for_print(plan: LiveSmokePlan) -> str:
     return "\n".join(
         [
-            "=== Literature (PubMed/Europe PMC) Live Smoke plan (nothing sent yet, OFFLINE this phase) ===",
-            f"mode: {plan.mode}",
+            "=== Literature (PubMed/Europe PMC) Live Smoke plan (nothing sent yet) ===",
+            f"mode: {plan.mode} -- LIVE mode: running this will make real NCBI/Europe PMC network "
+            "requests once credentials are configured and no refusal applies (--analyze-capture is "
+            "the only fully offline mode).",
             f"allowed_hosts: {plan.allowed_hosts}",
             f"max_requests: {plan.max_requests} [{plan.max_requests_formula}]",
             f"timeout_seconds: {plan.timeout_seconds}",
@@ -561,16 +725,20 @@ def format_plan_for_print(plan: LiveSmokePlan) -> str:
 
 def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> str:
     lines = [format_plan_for_print(report.plan), ""]
+    lines.append(f"status: {report.status.value}")
+    lines.append(f"smoke_run_completed: {report.smoke_run_completed}")
     if report.refused:
         lines.append(f"REFUSED: {report.refused_reason}")
         lines.append("requested_urls: []")
-        lines.append("http_request_count: 0")
+        lines.append("logical_request_count: 0")
+        lines.append("physical_attempt_count: 0")
         return "\n".join(_safe(line, secrets) for line in lines)
 
     lines.append(f"requested_urls ({len(report.requested_urls)}):")
     for url in report.requested_urls:
         lines.append(f"  {url} -> status={report.http_statuses.get(url)}")
-    lines.append(f"http_request_count: {report.request_count}")
+    lines.append(f"logical_request_count: {report.request_count}")
+    lines.append(f"physical_attempt_count: {report.attempt_count}")
     lines.append(f"cache_hit_count: {report.cache_hit_count}")
     lines.append(f"pmids_located: {report.pmids_located}")
     lines.append(f"coverage_complete: {report.coverage_complete}")
@@ -607,10 +775,13 @@ def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
     ``run_live_smoke`` to be metadata-only (Phase 3F.1 requirement 6)."""
     return {
         "plan": asdict(report.plan),
+        "status": report.status.value,
+        "smoke_run_completed": report.smoke_run_completed,
         "refused_reason": report.refused_reason,
         "requested_urls": report.requested_urls,
         "http_statuses": report.http_statuses,
-        "request_count": report.request_count,
+        "logical_request_count": report.request_count,
+        "physical_attempt_count": report.attempt_count,
         "cache_hit_count": report.cache_hit_count,
         "pmids_located": report.pmids_located,
         "articles": report.articles,
@@ -633,8 +804,10 @@ def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
 def _classify_capture(requested_url: str) -> str:
     """Classifies a captured request by its (already-sanitized)
     ``requested_url`` shape -- never by a recomputed filename digest (see
-    module docstring: the digest is derived from the WIRE url, which
-    carries a secret this function must never need)."""
+    module docstring: scanning by manifest content stays simpler and more
+    robust than reconstructing an exact query string, even though the
+    digest itself is now derived from the public URL, not a secret-bearing
+    one)."""
     if "esearch.fcgi" in requested_url:
         return "esearch"
     if "efetch.fcgi" in requested_url:
@@ -803,11 +976,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="literature_live_smoke",
         description=(
-            "Phase 3F.1: Literature (PubMed/Europe PMC) Live Smoke -- OFFLINE this phase. No real "
-            "NCBI/Europe PMC network call is made or intended; this validates the plan/CLI/"
-            "credential-gating/Capture-Manifest-replay surface ahead of a future live-communication "
-            "phase. Exactly one of --nct-id (discovery) or --pmid (targeted) is required, unless "
-            "--analyze-capture is given."
+            "Phase 3F.1: Literature (PubMed/Europe PMC) Live Smoke. --nct-id (discovery) and --pmid "
+            "(targeted) are a LIVE mode: running either WILL make real NCBI/Europe PMC network "
+            "requests once IRA_NCBI_TOOL/IRA_NCBI_EMAIL are configured and no refusal applies. "
+            "--analyze-capture is the only fully offline mode (zero network calls, no credentials "
+            "required). Exactly one of --nct-id or --pmid is required, unless --analyze-capture is "
+            "given."
         ),
     )
     parser.add_argument("--nct-id", type=str, default=None, help="Discovery mode: NCT ID to search PubMed for.")
@@ -876,13 +1050,30 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     secrets = [v for v in (credentials.ncbi_tool, credentials.ncbi_email, credentials.ncbi_api_key) if v]
-    report = run_live_smoke(
-        mode=mode, nct_id=normalized_nct_id, pmid=args.pmid, max_articles=args.max_articles,
-        max_fulltext_fetches=args.max_fulltext_fetches, out_dir=out_dir,
-    )
+    try:
+        report = run_live_smoke(
+            mode=mode, nct_id=normalized_nct_id, pmid=args.pmid, max_articles=args.max_articles,
+            max_fulltext_fetches=args.max_fulltext_fetches, out_dir=out_dir,
+        )
+    except Exception:
+        # We are past every pre-flight refusal check above (credentials
+        # configured, marker guard passed, mode/ID already validated) --
+        # run_live_smoke() itself only ever raises here for a reason other
+        # than a designed refusal, meaning a real attempt was already
+        # underway when this raised. The marker must still be written,
+        # exactly as it would be for a FAILED (rather than REFUSED) report
+        # (Phase 3F.1 correction requirement 5: once the first outbound
+        # attempt has started, failure -- including an unhandled exception
+        # -- never erases that a live attempt was made).
+        _write_marker(marker_path, refused=False)
+        raise
     print()
     if args.json:
-        print(json.dumps(report_to_jsonable(report), indent=2, default=str))
+        # Defense in depth, matching the text path below: report_to_jsonable
+        # is already curated to be metadata-only, but this scrub catches a
+        # raw secret VALUE the same way format_report_for_print's _safe()
+        # call does (Phase 3F.1 correction requirement 2).
+        print(_safe(json.dumps(report_to_jsonable(report), indent=2, default=str), secrets))
     else:
         print(format_report_for_print(report, secrets=secrets))
 
@@ -912,6 +1103,7 @@ __all__ = [
     "CredentialStatus",
     "LiveSmokePlan",
     "LiveSmokeReport",
+    "LiveSmokeStatus",
     "NcbiCredentials",
     "analyze_capture",
     "build_plan",

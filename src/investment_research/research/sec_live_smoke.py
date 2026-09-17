@@ -252,6 +252,26 @@ class _AllowlistedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
+def _strip_extra_params(url: str, extra_param_names: frozenset[str]) -> str:
+    """An ADDITIONAL stripping pass on top of ``_sanitize_url``'s own
+    email/api_key-only convention -- for a caller whose own policy is
+    stricter than that shared default (Phase 3F.1 correction requirement
+    2: Literature Live Smoke never displays or stores its configured
+    ``IRA_NCBI_TOOL`` value either, even though ``tool`` itself is not as
+    secret as an API key and ``_sanitize_url`` deliberately keeps it for
+    every other caller). A no-op when ``extra_param_names`` is empty --
+    i.e. for every existing SEC/ClinicalTrials/Form4 caller, which never
+    sets it."""
+    if not extra_param_names or not any(f"{name}=" in url for name in extra_param_names):
+        return url
+    prefix, _, query = url.partition("?")
+    kept = [
+        pair for pair in query.split("&")
+        if pair and not any(pair.startswith(f"{name}=") for name in extra_param_names)
+    ]
+    return prefix + ("?" + "&".join(kept) if kept else "")
+
+
 @dataclass
 class AllowlistedHttpClient:
     """A minimal, purpose-built, read-only GET client for this smoke test
@@ -271,6 +291,12 @@ class AllowlistedHttpClient:
     #: Explicit cap on redirects followed in one request -- Phase 3F.0.4
     #: requirement 2; passed straight to ``_AllowlistedRedirectHandler``.
     max_redirects: int = DEFAULT_MAX_REDIRECTS
+    #: Query parameter names this instance strips in ADDITION to
+    #: ``_sanitize_url``'s own email/api_key -- opt-in, empty by default
+    #: (every existing SEC/ClinicalTrials/Form4 caller). Literature Live
+    #: Smoke sets this to ``frozenset({"tool"})`` for its own, stricter
+    #: policy (Phase 3F.1 correction requirement 2).
+    additional_secret_query_params: frozenset[str] = field(default_factory=frozenset)
     out_dir: Path | None = None
     #: Which live-smoke module this client belongs to ("sec" /
     #: "clinicaltrials") -- recorded in each capture's manifest so a shared
@@ -280,44 +306,75 @@ class AllowlistedHttpClient:
     #: Every URL passed to ``.get()``, in order, duplicates included -- the
     #: same public convention ``FakeHttpClient`` (the offline test double)
     #: exposes, so diagnostics code can read this one attribute generically
-    #: regardless of which transport it was actually given.
+    #: regardless of which transport it was actually given. Already the
+    #: sanitized public form (Phase 3F.0.3/3F.1 correction).
     requested_urls: list[str] = field(default_factory=list, init=False, repr=False)
     _cache_hits: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._limiter = RateLimiter(self.rate_limit_rps)
+        #: Keyed by PUBLIC url (Phase 3F.1 correction requirement 1) -- so
+        #: two requests differing only in a secret query parameter value
+        #: (e.g. a courtesy email/api_key a future caller's Settings might
+        #: rotate) are recognized as the SAME logical resource for
+        #: caching/dedup purposes, and so this dict's own KEYS never carry
+        #: a secret value at all, not merely the FetchResult.url values
+        #: stored under them.
         self._cache: dict[str, FetchResult] = {}
         self._requests_made = 0
+        #: Physical GET-attempt counter -- every real socket-level attempt
+        #: made via ``_do_get`` (including every retry), regardless of how
+        #: many LOGICAL ``.get()`` calls that spans. ``max_requests``
+        #: bounds THIS counter (Phase 3F.1 correction requirement 3): a
+        #: hard cap on real outbound traffic must actually cap real
+        #: outbound traffic, not the number of distinct URLs asked for.
+        self._attempts_made = 0
         self._opener = urllib.request.build_opener(
             _AllowlistedRedirectHandler(self.allowed_hosts, self.max_redirects)
         )
-        #: requested URL -> the URL the response actually came from (after
-        #: any allowed redirect) -- FetchResult itself carries no field for
-        #: this (it is shared with production collectors.http.FetchResult),
-        #: so it is tracked here instead, purely for manifest purposes.
+        #: PUBLIC requested URL -> the (already-sanitized) URL the response
+        #: actually came from (after any allowed redirect) -- FetchResult
+        #: itself carries no field for this (it is shared with production
+        #: collectors.http.FetchResult), so it is tracked here instead,
+        #: purely for manifest purposes. Keyed by public_url (Phase 3F.1
+        #: correction requirement 1), matching ``self._cache``.
         self._final_urls: dict[str, str] = {}
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def requests_made(self) -> int:
+        """Logical request count -- one increment per ``.get()`` call that
+        was neither a cache hit nor a disallowed-host rejection, REGARDLESS
+        of how many physical retries it took. See ``attempts_made`` for the
+        physical count ``max_requests`` actually bounds."""
         return self._requests_made
+
+    @property
+    def attempts_made(self) -> int:
+        """Physical GET-attempt count -- every real socket-level attempt,
+        including every retry of every logical request. This is what
+        ``max_requests`` caps (Phase 3F.1 correction requirement 3)."""
+        return self._attempts_made
 
     @property
     def cache_hits(self) -> int:
         return self._cache_hits
 
     def get(self, url: str, **_kwargs: Any) -> FetchResult:
-        # Phase 3F.0.3: url is the wire URL (may carry a secret query
-        # param on a future caller, e.g. a literature adapter reusing this
-        # client) -- requested_urls and every raised/returned object below
-        # carry only its sanitized ("public") form. See collectors/http.py's
-        # module docstring for the wire_url/public_url convention this
-        # mirrors.
-        self.requested_urls.append(_sanitize_url(url))
-        if url in self._cache:
+        # Phase 3F.0.3/3F.1 correction: url is the wire URL (may carry a
+        # secret query param on a future caller, e.g. a literature adapter
+        # reusing this client) -- public_url is computed ONCE here and used
+        # for every cache key, diagnostic, and returned/raised object
+        # below. The wire url itself is threaded through to _get_with_retry/
+        # _do_get for EXACTLY ONE purpose: constructing the real
+        # urllib.request.Request. See collectors/http.py's module docstring
+        # for the wire_url/public_url convention this mirrors.
+        public_url = _strip_extra_params(_sanitize_url(url), self.additional_secret_query_params)
+        self.requested_urls.append(public_url)
+        if public_url in self._cache:
             self._cache_hits += 1
-            cached = self._cache[url]
+            cached = self._cache[public_url]
             return FetchResult(
                 url=cached.url, outcome=cached.outcome, status=cached.status, body=cached.body,
                 headers=dict(cached.headers), attempts=cached.attempts, from_cache=True,
@@ -327,31 +384,49 @@ class AllowlistedHttpClient:
         host = urllib.parse.urlparse(url).hostname
         if host not in self.allowed_hosts:
             result = FetchResult(
-                url=_sanitize_url(url), outcome=FetchOutcome.BLOCKED,
+                url=public_url, outcome=FetchOutcome.BLOCKED,
                 error=f"refused disallowed host: {host!r}",
             )
-            self._cache[url] = result
+            self._cache[public_url] = result
             return result
 
-        if self._requests_made >= self.max_requests:
+        if self._attempts_made >= self.max_requests:
             raise MaxRequestsExceededError(
-                f"live GET cap of {self.max_requests} reached; refusing to request {_sanitize_url(url)!r}"
+                f"live GET cap of {self.max_requests} physical attempts reached; refusing to request "
+                f"{public_url!r}"
             )
 
-        result = self._get_with_retry(url)
+        result = self._get_with_retry(url, public_url=public_url)
         self._requests_made += 1
-        self._cache[url] = result
+        self._cache[public_url] = result
         if self.out_dir is not None and result.ok:
-            self._save_response(url, result)
+            self._save_response(public_url, result)
         return result
 
-    def _get_with_retry(self, url: str) -> FetchResult:
+    def _get_with_retry(self, url: str, *, public_url: str) -> FetchResult:
         attempt = 0
         result: FetchResult | None = None
         while attempt <= self.max_retries:
+            if self._attempts_made >= self.max_requests:
+                # The physical attempt budget was exhausted -- by a PRIOR
+                # logical request's own retries, or by this one's earlier
+                # attempts -- so no further attempt (first or retry) may be
+                # made. Never raises here: running out of retry budget
+                # mid-run is a normal, reportable outcome, not a bug signal
+                # (MaxRequestsExceededError, raised in get() above, is
+                # reserved for refusing to START a new logical request at
+                # all).
+                if result is not None:
+                    return result
+                return FetchResult(
+                    url=public_url, outcome=FetchOutcome.ERROR, attempts=0,
+                    error=f"live GET cap of {self.max_requests} physical attempts reached before any "
+                    "attempt could be made for this request",
+                )
             attempt += 1
+            self._attempts_made += 1
             self._limiter.wait()
-            result = self._do_get(url, attempt=attempt)
+            result = self._do_get(url, public_url=public_url, attempt=attempt)
             # Never retry a definitive outcome -- only a transient one.
             if result.outcome != FetchOutcome.ERROR and result.outcome != FetchOutcome.TIMEOUT:
                 return result
@@ -360,11 +435,11 @@ class AllowlistedHttpClient:
         assert result is not None
         return result
 
-    def _do_get(self, url: str, *, attempt: int) -> FetchResult:
-        # Phase 3F.0.3: url is the wire URL, used for exactly the real
-        # request below. public_url is what every FetchResult this returns
-        # carries instead -- mirrors collectors/http.py::HttpClient.get().
-        public_url = _sanitize_url(url)
+    def _do_get(self, url: str, *, public_url: str, attempt: int) -> FetchResult:
+        # Phase 3F.0.3/3F.1 correction: url is the wire URL, used for
+        # exactly the real request below. public_url (computed once by the
+        # caller) is what every FetchResult this returns carries instead --
+        # mirrors collectors/http.py::HttpClient.get().
         request_headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
@@ -387,7 +462,9 @@ class AllowlistedHttpClient:
                         url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt,
                         error=f"final response host {final_host!r} not allowlisted",
                     )
-                self._final_urls[url] = _sanitize_url(response.geturl())
+                self._final_urls[public_url] = _strip_extra_params(
+                    _sanitize_url(response.geturl()), self.additional_secret_query_params
+                )
                 return FetchResult(
                     url=public_url, outcome=FetchOutcome.OK, status=int(response.status), body=body,
                     headers=dict(response.headers), attempts=attempt,
@@ -412,20 +489,24 @@ class AllowlistedHttpClient:
             error = _strip_wire_url(f"{type(exc).__name__}: {exc}", url, public_url)
             return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, attempts=attempt, error=error)
 
-    def _save_response(self, url: str, result: FetchResult) -> None:
+    def _save_response(self, public_url: str, result: FetchResult) -> None:
         """Body bytes, plus a Capture Manifest recording the real UTC
         retrieval time -- never headers (which could echo request metadata)
         and never the User-Agent/API key/email (Phase 3C requirement 29,
-        Phase 3D.4 requirement 3). ``result.url`` is already the sanitized
-        public URL (``_do_get``/the cache-hit path in ``get()`` never
-        construct a ``FetchResult`` with anything else), and
-        ``self._final_urls`` stores only the sanitized final URL too, so
-        the ``CaptureManifest`` written here can never carry a secret query
-        parameter even when ``url`` (the wire URL used only for the digest
-        below) does (Phase 3F.0.3)."""
+        Phase 3D.4 requirement 3). ``public_url`` is the SAME sanitized
+        value ``result.url`` already carries -- the digest, suffix, and
+        every ``CaptureManifest`` field derived here come from it, never
+        from a wire URL (Phase 3F.1 correction requirement 1): a caller
+        reaching the same logical resource with a different secret value
+        (e.g. a rotated api_key) still produces the same capture filename
+        and manifest, rather than a spurious duplicate keyed off the
+        secret."""
         assert self.out_dir is not None
-        digest = hashlib.sha256(url.encode()).hexdigest()[:24]
-        suffix = ".json" if url.endswith(".json") else (".htm" if url.endswith((".htm", ".html")) or "index.htm" in url else ".bin")
+        digest = hashlib.sha256(public_url.encode()).hexdigest()[:24]
+        suffix = (
+            ".json" if public_url.endswith(".json")
+            else (".htm" if public_url.endswith((".htm", ".html")) or "index.htm" in public_url else ".bin")
+        )
         path = self.out_dir / f"{digest}{suffix}"
         with contextlib.suppress(OSError):
             path.write_bytes(result.body)
@@ -434,7 +515,7 @@ class AllowlistedHttpClient:
                 schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
                 source=self.source,
                 requested_url=result.url,
-                final_url=self._final_urls.get(url, result.url),
+                final_url=self._final_urls.get(public_url, result.url),
                 http_status=result.status,
                 # Recorded NOW, at the moment of capture -- never from the
                 # out_dir's name, a file's mtime, or anything the caller

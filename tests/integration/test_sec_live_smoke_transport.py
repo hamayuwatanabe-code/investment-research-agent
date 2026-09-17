@@ -104,6 +104,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+        elif path == "/always-500":
+            counts = Handler.state.setdefault("always_500_counts", {})
+            counts[self.path] = counts.get(self.path, 0) + 1
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -365,12 +371,16 @@ def test_capture_manifest_source_field_reflects_the_caller_e_g_clinicaltrials(ba
 
 
 def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path):
-    """Phase 3F.0.3: even when the requested URL itself carries a secret-
-    shaped query parameter (as a future Literature Live Smoke tool reusing
-    this client might pass), the Capture Manifest written to disk -- and
-    the returned FetchResult -- must never contain it. First confirms the
-    loopback server itself DID receive the secret (proving this is
-    sanitization, not simply never sending the value)."""
+    """Phase 3F.0.3, digest source corrected in the Phase 3F.1 correction
+    pass: even when the requested URL itself carries a secret-shaped query
+    parameter (as a future Literature Live Smoke tool reusing this client
+    might pass), the Capture Manifest written to disk -- and the returned
+    FetchResult -- must never contain it. First confirms the loopback
+    server itself DID receive the secret (proving this is sanitization,
+    not simply never sending the value). The capture filename's own digest
+    is derived from the PUBLIC (sanitized) url, not the wire url, so it is
+    computed here from result.url -- never a hash of the secret-bearing
+    request url itself."""
     secret = "topsecret-manifest-value"
     client = _client(out_dir=tmp_path, source="sec")
     url = f"{base_url}/echo?api_key={secret}&x=1"
@@ -381,7 +391,7 @@ def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path
     assert secret not in result.url
     assert secret not in result.final_url
 
-    digest = hashlib.sha256(url.encode()).hexdigest()[:24]
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
     manifest_path = tmp_path / f"{digest}.manifest.json"
     manifest_text = manifest_path.read_text(encoding="utf-8")
     assert secret not in manifest_text
@@ -392,6 +402,28 @@ def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path
     assert secret not in manifest.requested_url
     assert secret not in manifest.final_url
     assert "x=1" in manifest.requested_url
+
+
+def test_capture_filename_digest_is_derived_from_the_public_url_not_the_wire_url(base_url, tmp_path):
+    """Two requests to the SAME logical (public) resource, differing only
+    in secret query parameter VALUES, must produce the SAME capture
+    filename/digest -- never two spurious duplicate captures keyed off the
+    secret (Phase 3F.1 correction requirement 1)."""
+    client_a = _client(out_dir=tmp_path, source="sec")
+    url_a = f"{base_url}/echo?api_key=secret-value-one&x=1"
+    result_a = client_a.get(url_a)
+    assert result_a.ok
+
+    client_b = _client(out_dir=tmp_path, source="sec")
+    url_b = f"{base_url}/echo?api_key=secret-value-two&x=1"
+    result_b = client_b.get(url_b)
+    assert result_b.ok
+
+    assert result_a.url == result_b.url  # same public url
+    digest_from_public_url = hashlib.sha256(result_a.url.encode()).hexdigest()[:24]
+    assert (tmp_path / f"{digest_from_public_url}.manifest.json").is_file()
+    # Exactly one capture on disk for this logical resource -- not two.
+    assert len(list(tmp_path.glob("*.manifest.json"))) == 1
 
 
 # --- Phase 3F.0.4: retry semantics -- max_retries is retries AFTER the
@@ -505,3 +537,126 @@ def test_capture_manifest_read_manifest_missing_for_a_pre_manifest_capture(base_
     result = read_manifest(tmp_path, digest, body=b'{"ok": true}')
     assert result.status.value == "MISSING"
     assert result.manifest is None
+
+
+# --- Phase 3F.1 correction requirement 1: cache/dedup keyed by public URL --
+def test_cache_is_stable_across_different_secret_values_for_the_same_public_url(base_url, tmp_path):
+    """Two requests to the SAME logical resource, differing only in a
+    secret query parameter's VALUE, must be recognized as the same entry
+    for caching/dedup -- the second is a cache hit, not a second real GET,
+    and only ONE capture is ever written to disk."""
+    client = _client(out_dir=tmp_path, max_requests=1)
+    first = client.get(f"{base_url}/echo?api_key=secret-value-one&x=1")
+    second = client.get(f"{base_url}/echo?api_key=secret-value-two&x=1")
+    assert first.ok and second.ok
+    assert second.from_cache
+    assert client.requests_made == 1
+    assert client.attempts_made == 1
+    assert client.cache_hits == 1
+    assert len(list(tmp_path.glob("*.manifest.json"))) == 1
+
+
+def test_final_urls_cache_is_also_keyed_by_public_url(base_url, tmp_path):
+    """The internal final_url tracking used for the Capture Manifest is
+    keyed by the PUBLIC url (Phase 3F.1 correction requirement 1) -- proven
+    via the manifest actually written for a secret-bearing initial request
+    that redirects, since FetchResult itself carries no final_url field for
+    AllowlistedHttpClient (that field is collectors.http.HttpClient's own;
+    this class's Capture Manifest is the only place a redirect's final_url
+    is exposed)."""
+    client = _client(out_dir=tmp_path)
+    result = client.get(f"{base_url}/redirect-to-allowed-host?api_key=secret-value")
+    assert result.ok
+    assert "secret-value" not in result.url
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    read_result = read_manifest(tmp_path, digest, body=result.body)
+    manifest = read_result.manifest
+    assert manifest is not None
+    assert "secret-value" not in manifest.final_url
+    assert manifest.final_url == f"{base_url}/ok"
+
+
+# --- Phase 3F.1 correction requirement 3: request cap applies to physical
+# GET attempts, including retries, not just logical URLs -------------------
+def test_attempts_made_and_requests_made_are_distinct_fields():
+    client = _client()
+    assert client.attempts_made == 0
+    assert client.requests_made == 0
+
+
+def test_max_requests_caps_physical_attempts_across_retries_within_one_call(base_url):
+    """A single logical .get() call that retries 3 times (max_retries=2,
+    so up to 3 physical attempts) against an ALWAYS-500 endpoint must never
+    make MORE than max_requests real attempts, even though it is only ONE
+    logical request."""
+    client = _client(max_retries=2, max_requests=2)
+    result = client.get(f"{base_url}/always-500?t=cap-within-call")
+    assert not result.ok
+    assert client.attempts_made == 2  # capped at max_requests, never reached max_retries+1=3
+    assert client.requests_made == 1  # exactly one logical call was made
+
+
+def test_max_requests_caps_physical_attempts_across_multiple_logical_calls(base_url):
+    """The physical attempt budget is a SHARED, run-wide total: once a
+    FIRST logical call has already exhausted it entirely (here, exactly
+    max_requests attempts), a second logical .get() call must be refused
+    OUTRIGHT (raising, before making any attempt of its own) rather than
+    being allowed to sneak in further attempts."""
+    client = _client(max_retries=1, max_requests=2)
+    first = client.get(f"{base_url}/always-500?t=multi-call-a")
+    assert client.attempts_made == 2  # one logical call, 2 attempts (1 + 1 retry) -- budget now exhausted
+    with pytest.raises(MaxRequestsExceededError):
+        client.get(f"{base_url}/always-500?t=multi-call-b")
+    assert client.attempts_made == 2  # the second call never got to attempt at all
+    assert not first.ok
+
+
+def test_a_second_call_may_still_use_a_single_remaining_slot_then_stops(base_url):
+    """When exactly ONE physical slot remains, a new logical call IS
+    allowed to use it (never refused outright while capacity remains), but
+    is not allowed to retry further once that slot is spent -- the
+    mid-retry cap check stops it silently (no raise), distinct from the
+    pre-flight refusal above which fires only when NO capacity remains at
+    the start of a new logical call."""
+    client = _client(max_retries=1, max_requests=3)
+    client.get(f"{base_url}/always-500?t=slot-a")  # consumes 2 of 3
+    assert client.attempts_made == 2
+    second = client.get(f"{base_url}/always-500?t=slot-b")  # gets the last slot, then stops
+    assert client.attempts_made == 3
+    assert not second.ok
+    assert client.requests_made == 2
+
+
+def test_timeout_retries_never_exceed_the_physical_cap(base_url):
+    client = _client(timeout=0.3, max_retries=3, max_requests=1)
+    result = client.get(f"{base_url}/slow")
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert client.attempts_made == 1  # capped at 1, never reached max_retries+1=4
+
+
+def test_connection_error_retries_never_exceed_the_physical_cap():
+    """A closed port on loopback -- a real connection-level failure --
+    proving the physical cap holds for OSError/URLError retries too, not
+    just HTTP-level failures."""
+    client = _client(timeout=1.0, max_retries=5, max_requests=2)
+    result = client.get("http://127.0.0.1:1/unreachable")
+    assert not result.ok
+    assert client.attempts_made == 2  # capped at 2, never reached max_retries+1=6
+
+
+def test_429_is_never_retried_and_counts_as_exactly_one_physical_attempt(base_url):
+    client = _client(max_retries=3, max_requests=6)
+    result = client.get(f"{base_url}/ratelimited")
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert client.attempts_made == 1
+    assert client.requests_made == 1
+
+
+def test_5xx_retry_then_success_reports_correct_physical_attempts(base_url):
+    client = _client(max_retries=2, max_requests=6)
+    result = client.get(f"{base_url}/flaky-error?t=success-within-budget")
+    assert result.ok
+    assert result.attempts == 3
+    assert client.attempts_made == 3
+    assert client.requests_made == 1
