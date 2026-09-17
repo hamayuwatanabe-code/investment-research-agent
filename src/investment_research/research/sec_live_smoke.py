@@ -57,7 +57,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -279,28 +279,73 @@ def _stripped_query_values(wire_url: str, public_url: str) -> list[str]:
     place (email/api_key always; ``tool``/etc. when a caller's own
     ``additional_secret_query_params`` configures it). Used to scrub a
     response BODY (never a URL, which is already sanitized by
-    construction) of the same secret values, in case a failed response
-    echoes the request back -- an API error page naming the URL/params it
-    could not satisfy (Phase 3F.2 correction requirement 5)."""
+    construction) of the same secret values, in case the response echoes
+    the request back -- an API error page (or, in principle, any
+    response) naming the URL/params it received (Phase 3F.2 correction 2
+    requirement 1: every response body is scrubbed this way, not only a
+    failed one)."""
     wire_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(wire_url).query))
     public_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(public_url).query))
     return [value for name, value in wire_query.items() if public_query.get(name) != value]
 
 
-def _scrub_body_of_secrets(body: bytes, secret_values: list[str]) -> bytes:
-    """Value-based redaction over raw bytes (never decoded/re-encoded, so
-    this can never corrupt a binary body it doesn't otherwise touch) --
-    catches a secret value whether it appears raw or percent-encoded in an
-    error response's own text (Phase 3F.2 correction requirement 5)."""
+def _case_insensitive_percent_pattern(text: str) -> re.Pattern[bytes]:
+    """Compiles ``text`` (already percent-encoded, or not) into a byte
+    regex that matches it literally EXCEPT that any ``%XX`` escape's hex
+    digits match case-insensitively -- RFC 3986 permits either case for a
+    percent-encoding, and Python's own ``quote()``/``quote_plus()`` always
+    emit uppercase, but a response body could have been produced by a
+    different encoder that emits lowercase (Phase 3F.2 correction 2
+    requirement 2). Every other character is matched literally (escaped),
+    so this never over-matches beyond the exact needle."""
+    parts: list[bytes] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "%" and i + 2 < len(text) and text[i + 1] in "0123456789abcdefABCDEF" and text[i + 2] in "0123456789abcdefABCDEF":
+            h1, h2 = text[i + 1], text[i + 2]
+            parts.append(
+                b"%[" + h1.upper().encode() + h1.lower().encode() + b"]["
+                + h2.upper().encode() + h2.lower().encode() + b"]"
+            )
+            i += 3
+        else:
+            parts.append(re.escape(ch.encode("utf-8", errors="ignore")))
+            i += 1
+    return re.compile(b"".join(parts))
+
+
+def _secret_body_patterns(secret_values: list[str]) -> list[re.Pattern[bytes]]:
+    """Every byte-level pattern a secret VALUE could appear as inside a
+    response body -- raw UTF-8, ``urllib.parse.quote(value, safe="")``, and
+    ``urllib.parse.quote_plus(value, safe="")`` (the two differ only in how
+    a space is encoded -- ``%20`` vs. ``+`` -- which matters for a
+    User-Agent value, the one secret this module scrubs that routinely
+    contains a space), each case-insensitive on any ``%XX`` escape (Phase
+    3F.2 correction 2 requirement 2). Deduplicates identical encoded forms
+    (e.g. a value with no special characters encodes the same under both
+    functions) so the same pattern is never compiled/applied twice."""
+    patterns: list[re.Pattern[bytes]] = []
+    seen: set[str] = set()
     for value in secret_values:
         if not value:
             continue
-        raw = value.encode("utf-8", errors="ignore")
-        if raw:
-            body = body.replace(raw, b"[REDACTED]")
-        encoded = urllib.parse.quote(value, safe="").encode("utf-8", errors="ignore")
-        if encoded and encoded != raw:
-            body = body.replace(encoded, b"[REDACTED]")
+        for form in (value, urllib.parse.quote(value, safe=""), urllib.parse.quote_plus(value, safe="")):
+            if form in seen:
+                continue
+            seen.add(form)
+            patterns.append(_case_insensitive_percent_pattern(form))
+    return patterns
+
+
+def _scrub_body_of_secrets(body: bytes, secret_values: list[str]) -> bytes:
+    """Value-based redaction over raw bytes (never decoded/re-encoded as a
+    whole, so this can never corrupt binary content it doesn't otherwise
+    touch) -- catches a secret value whether it appears raw, ``quote()``-
+    encoded, or ``quote_plus()``-encoded, in any percent-escape case, in a
+    response body (Phase 3F.2 correction 2 requirement 1/2)."""
+    for pattern in _secret_body_patterns(secret_values):
+        body = pattern.sub(b"[REDACTED]", body)
     return body
 
 
@@ -463,6 +508,15 @@ class AllowlistedHttpClient:
             )
 
         result = self._get_with_retry(url, public_url=public_url)
+        # Phase 3F.2 correction 2 requirement 1: sanitize the response BODY
+        # here -- immediately after _get_with_retry returns, before it is
+        # cached, returned, or handed to any downstream parser/adapter.
+        # Applies to EVERY result (a 2xx body AND a failure body alike):
+        # an echoed secret must never survive into result.body,
+        # self._cache's own stored value, a Document a caller builds from
+        # fetch.text/.json(), or (via the SAME already-scrubbed result)
+        # the Capture Manifest _save_response writes below.
+        result = self._sanitize_result_body(result, wire_url=url, public_url=public_url)
         self._requests_made += 1
         self._cache[public_url] = result
         # result.status is not None exactly when a real HTTP response was
@@ -472,8 +526,31 @@ class AllowlistedHttpClient:
         # exists to audit" from "there is nothing to capture" (Phase 3F.2
         # correction requirement 5), never outcome alone.
         if self.out_dir is not None and (result.ok or (self.save_failed_responses and result.status is not None)):
-            self._save_response(public_url, result, wire_url=url)
+            self._save_response(public_url, result)
         return result
+
+    def _sanitize_result_body(self, result: FetchResult, *, wire_url: str, public_url: str) -> FetchResult:
+        """Returns a NEW ``FetchResult`` whose ``.body`` has every
+        configured secret value scrubbed out: the query-parameter values
+        ``_sanitize_url``/``_strip_extra_params`` removed to compute
+        ``public_url`` (email/api_key always; ``tool``/etc. when
+        ``additional_secret_query_params`` configures it) PLUS
+        ``self.user_agent`` -- the one secret value that never appears in
+        a URL at all, only in the request header a server's error
+        diagnostics could echo back (Phase 3F.2 correction 2 requirement
+        1). Every OTHER ``FetchResult`` field (url/outcome/status/headers/
+        attempts/error/elapsed_ms/final_url) is passed through completely
+        unchanged -- this never touches metadata, only body bytes. A
+        no-op (returns ``result`` itself) when the body is empty or no
+        configured secret actually appears in it, so an unrelated body is
+        never reallocated."""
+        if not result.body:
+            return result
+        secret_values = [*_stripped_query_values(wire_url, public_url), self.user_agent]
+        scrubbed = _scrub_body_of_secrets(result.body, secret_values)
+        if scrubbed == result.body:
+            return result
+        return replace(result, body=scrubbed)
 
     def _get_with_retry(self, url: str, *, public_url: str) -> FetchResult:
         attempt = 0
@@ -554,6 +631,28 @@ class AllowlistedHttpClient:
                 )
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
+            # Phase 3F.2 correction 2 requirement 4: the FINAL (post-
+            # redirect) URL that actually returned this error response --
+            # exc.url is the URL of the request that raised it, i.e. the
+            # LAST hop the redirect handler already validated and
+            # followed, exactly like response.geturl() is for a 2xx below.
+            # Without this, a Capture Manifest for a redirect-then-404/
+            # 429/5xx previously fell back to public_url (the ORIGINAL,
+            # pre-redirect URL) instead of where the response actually
+            # came from. Re-checked against the allowlist here too --
+            # defense in depth mirroring the 2xx path's own re-check,
+            # never assumed just because the redirect handler should
+            # already guarantee it.
+            final_url = getattr(exc, "url", None) or url
+            final_host = urllib.parse.urlparse(final_url).hostname
+            if final_host not in self.allowed_hosts:
+                return FetchResult(
+                    url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt,
+                    error=f"final response host {final_host!r} not allowlisted",
+                )
+            self._final_urls[public_url] = _strip_extra_params(
+                _sanitize_url(final_url), self.additional_secret_query_params
+            )
             # Only read/keep the error response BODY when a caller has
             # opted in (Phase 3F.2 correction requirement 5) -- every
             # existing SEC/ClinicalTrials/Form4 caller leaves this
@@ -584,7 +683,7 @@ class AllowlistedHttpClient:
             error = _strip_wire_url(f"{type(exc).__name__}: {exc}", url, public_url)
             return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, attempts=attempt, error=error)
 
-    def _save_response(self, public_url: str, result: FetchResult, *, wire_url: str = "") -> None:
+    def _save_response(self, public_url: str, result: FetchResult) -> None:
         """Body bytes, plus a Capture Manifest recording the real UTC
         retrieval time -- never headers (which could echo request metadata)
         and never the User-Agent/API key/email (Phase 3C requirement 29,
@@ -597,16 +696,12 @@ class AllowlistedHttpClient:
         and manifest, rather than a spurious duplicate keyed off the
         secret.
 
-        For a NON-ok result saved under ``save_failed_responses`` (Phase
-        3F.2 correction requirement 5), the body is additionally scrubbed
-        of every secret value ``wire_url`` carried that ``public_url``
-        does not -- an error page can echo the request (URL, email, tool,
-        api_key) back verbatim, and that must never reach disk. The
-        manifest's own ``content_hash``/``content_length`` are computed
-        from the body actually written (post-scrub), so a later
-        ``read_manifest`` verifies correctly against what is really on
-        disk. A successful (``result.ok``) response is never scrubbed --
-        unchanged from every prior phase."""
+        ``result.body`` is ALREADY sanitized by the time this is called --
+        ``get()`` scrubs it via ``_sanitize_result_body`` immediately after
+        ``_get_with_retry`` returns, before caching, so this method (and
+        the ``content_hash``/``content_length`` it computes) never needs
+        its own scrub pass (Phase 3F.2 correction 2 requirement 1: one
+        sanitize point, not a second, save-time-only one)."""
         assert self.out_dir is not None
         digest = hashlib.sha256(public_url.encode()).hexdigest()[:24]
         suffix = (
@@ -614,11 +709,8 @@ class AllowlistedHttpClient:
             else (".htm" if public_url.endswith((".htm", ".html")) or "index.htm" in public_url else ".bin")
         )
         path = self.out_dir / f"{digest}{suffix}"
-        body = result.body
-        if not result.ok and self.save_failed_responses and wire_url:
-            body = _scrub_body_of_secrets(body, _stripped_query_values(wire_url, public_url))
         with contextlib.suppress(OSError):
-            path.write_bytes(body)
+            path.write_bytes(result.body)
         with contextlib.suppress(OSError):
             manifest = CaptureManifest(
                 schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
@@ -630,8 +722,8 @@ class AllowlistedHttpClient:
                 # out_dir's name, a file's mtime, or anything the caller
                 # supplies later (Phase 3D.4 requirements 1/7).
                 capture_retrieved_at=utc_now_iso(),
-                content_hash=compute_content_hash(body),
-                content_length=len(body),
+                content_hash=compute_content_hash(result.body),
+                content_length=len(result.body),
             )
             write_manifest(self.out_dir, digest, manifest)
 

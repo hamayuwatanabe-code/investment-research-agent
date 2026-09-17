@@ -18,6 +18,7 @@ import hashlib
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -113,14 +114,53 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/error-with-body":
             # Phase 3F.2 correction requirement 5: a 404 whose error BODY
             # echoes the request back (path + full query string, secrets
-            # included) -- mirrors a real API's own error page naming the
-            # URL/params it could not satisfy.
-            body = json.dumps({"error": "not found", "path": self.path}).encode()
+            # included, RAW and percent-encoded, plus the received
+            # User-Agent header) -- mirrors a real API's own error page
+            # naming the URL/params/client it could not satisfy.
+            Handler.last_raw_path = self.path
+            body = json.dumps(
+                {
+                    "error": "not found",
+                    "path": self.path,  # as received on the wire (percent-encoded)
+                    "decoded_path": urllib.parse.unquote(self.path),  # raw/decoded form
+                    "user_agent": self.headers.get("User-Agent", ""),
+                }
+            ).encode()
             self.send_response(404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/echo-secrets":
+            # Phase 3F.2 correction 2 requirement 3: a genuinely SUCCESSFUL
+            # (200) response that echoes everything a secret-scrubbing
+            # pass must catch -- the wire-encoded query string, its
+            # decoded/raw form, and the received User-Agent header (which
+            # never appears in a URL at all). Records the RAW path too
+            # (like /echo), so a test can independently prove the server
+            # really did receive the secret before checking it was scrubbed.
+            Handler.last_raw_path = self.path
+            body = json.dumps(
+                {
+                    "raw_query": self.path.split("?", 1)[1] if "?" in self.path else "",
+                    "decoded_query": urllib.parse.unquote(self.path),
+                    "user_agent": self.headers.get("User-Agent", ""),
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/redirect-to-allowed-404":
+            # Phase 3F.2 correction 2 requirement 4: a redirect to an
+            # ALLOWED-host target that itself then 404s -- the final_url a
+            # Capture Manifest records must reflect THIS target, not the
+            # original pre-redirect URL.
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/error-with-body")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -846,3 +886,167 @@ def test_save_failed_responses_true_never_changes_successful_capture_behavior(ba
     body_a = (tmp_path / "a" / f"{digest}.bin" if not str(result_a.url).endswith(".json") else tmp_path / "a" / f"{digest}.json")
     body_b = (tmp_path / "b" / f"{digest}.bin" if not str(result_b.url).endswith(".json") else tmp_path / "b" / f"{digest}.json")
     assert body_a.read_bytes() == body_b.read_bytes()
+
+
+# --- Phase 3F.2 correction 2: sanitize the response body BEFORE caching ----
+# requirement 1: one sanitize point (immediately after _get_with_retry
+# returns, before self._cache[public_url] = result), not a second,
+# save-time-only one -- result.body, the cached value's own body, the
+# saved capture, and every downstream parser/Document all see the SAME
+# already-sanitized bytes.
+def _all_secret_forms(value: str) -> list[str]:
+    import urllib.parse as _up
+
+    return [value, _up.quote(value, safe=""), _up.quote_plus(value, safe="")]
+
+
+def test_cache_stores_a_sanitized_body_not_the_raw_wire_response(base_url):
+    """Directly inspects AllowlistedHttpClient's own private _cache VALUE
+    (its .body, not merely result.body returned to the caller) -- proving
+    the cached copy itself is sanitized, not only what happens to be
+    handed back this one time."""
+    secret_api_key = "cache-secret-api-key-777"
+    secret_email = "cache-secret-contact@example.test"
+    client = _client()
+    url = f"{base_url}/echo-secrets?api_key={secret_api_key}&email={urllib.parse.quote(secret_email, safe='')}"
+    result = client.get(url)
+    assert result.ok
+
+    cached = client._cache[result.url]
+    cached_text = cached.body.decode("utf-8")
+    for secret in (*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT):
+        assert secret not in cached_text, f"{secret!r} leaked into client._cache[...].body"
+
+
+def test_successful_response_body_is_scrubbed_of_every_secret_form_end_to_end(base_url, tmp_path):
+    """The full sweep requirement 3 asks for for a GENUINELY SUCCESSFUL
+    (200) response: the loopback server echoes the received email/
+    api_key/User-Agent back, raw AND percent-encoded (both quote() and
+    quote_plus() shapes, since the configured User-Agent itself contains
+    a space) -- none of it may survive into FetchResult.body, the
+    client's own _cache value, the saved Capture body, the Capture
+    Manifest, or what a parser reading fetch.text()/.json() would see."""
+    secret_api_key = "success-sweep-api-key-42"
+    secret_email = "success-sweep-contact@example.test"
+    client = _client(out_dir=tmp_path)
+    url = (
+        f"{base_url}/echo-secrets?api_key={secret_api_key}"
+        f"&email={urllib.parse.quote(secret_email, safe='')}"
+    )
+    result = client.get(url)
+    assert result.ok
+    # Confirms the server genuinely received and echoed the secrets --
+    # every check below is real sanitization, not "never sent". This is
+    # checked against the SERVER's own record (Handler.last_raw_path),
+    # independent of the client's own (by-now-sanitized) result.
+    assert secret_api_key in Handler.last_raw_path
+
+    secrets_to_check = [*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT]
+
+    haystacks: list[str] = [
+        result.body.decode("utf-8"),
+        client._cache[result.url].body.decode("utf-8"),
+        result.text,
+        json.dumps(result.json()),  # what a parser reading fetch.json() would see
+    ]
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    saved_body_path = tmp_path / f"{digest}.json"
+    if not saved_body_path.is_file():
+        saved_body_path = tmp_path / f"{digest}.bin"
+    haystacks.append(saved_body_path.read_text(encoding="utf-8"))
+    haystacks.append((tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8"))
+
+    for secret in secrets_to_check:
+        for haystack in haystacks:
+            assert secret not in haystack, f"{secret!r} leaked into {haystack!r}"
+
+
+def test_failed_response_body_is_scrubbed_of_every_secret_form_end_to_end(base_url, tmp_path):
+    """The same full sweep as the success-path test above, for a FAILED
+    (404) response whose body echoes the request back -- requirement 3's
+    "failure responseについても同じ検証を行う"."""
+    secret_api_key = "failure-sweep-api-key-42"
+    secret_email = "failure-sweep-contact@example.test"
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    url = (
+        f"{base_url}/error-with-body?api_key={secret_api_key}"
+        f"&email={urllib.parse.quote(secret_email, safe='')}"
+    )
+    result = client.get(url)
+    assert not result.ok
+    assert result.status == 404
+    assert secret_api_key in Handler.last_raw_path  # the server genuinely received it
+
+    secrets_to_check = [*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT]
+
+    haystacks: list[str] = [
+        result.body.decode("utf-8"),
+        client._cache[result.url].body.decode("utf-8"),
+        result.text,
+        result.error,
+    ]
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    haystacks.append((tmp_path / f"{digest}.bin").read_text(encoding="utf-8"))
+    haystacks.append((tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8"))
+
+    for secret in secrets_to_check:
+        for haystack in haystacks:
+            assert secret not in haystack, f"{secret!r} leaked into {haystack!r}"
+
+
+def test_cache_hit_replays_the_already_sanitized_body_never_a_later_secret_either(base_url):
+    """Two requests to the same logical (public) resource, differing only
+    in secret VALUES -- the second is a cache hit, replaying the FIRST
+    request's own already-sanitized body. Neither request's secret value
+    may appear in either returned FetchResult.body."""
+    client = _client(max_requests=1)
+    first = client.get(f"{base_url}/echo-secrets?api_key=cache-hit-secret-one&x=1")
+    second = client.get(f"{base_url}/echo-secrets?api_key=cache-hit-secret-two&x=1")
+    assert first.ok and second.ok
+    assert second.from_cache
+    assert "cache-hit-secret-one" not in first.body.decode("utf-8")
+    assert "cache-hit-secret-two" not in second.body.decode("utf-8")
+
+
+# --- Phase 3F.2 correction 2 requirement 4: a failed response AFTER an
+# allowed-host redirect still tracks the REAL final (post-redirect) URL ----
+def test_redirect_to_an_allowed_host_that_then_404s_tracks_the_real_final_url(base_url, tmp_path):
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    secret = "redirect-final-url-secret-999"
+    url = f"{base_url}/redirect-to-allowed-404?api_key={secret}"
+    result = client.get(url)
+    assert not result.ok
+    assert result.status == 404
+    assert secret not in result.url
+    assert secret not in result.body.decode("utf-8")
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    manifest_text = (tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8")
+    assert secret not in manifest_text
+
+    read_result = read_manifest(tmp_path, digest, body=(tmp_path / f"{digest}.bin").read_bytes())
+    assert read_result.status.value == "VERIFIED"
+    manifest = read_result.manifest
+    assert manifest is not None
+    # requested_url is the ORIGINAL (pre-redirect) sanitized URL...
+    assert "/redirect-to-allowed-404" in manifest.requested_url
+    assert manifest.requested_url == result.url
+    # ...final_url is the ACTUAL URL that returned the response, after the
+    # allowed-host redirect was followed -- never the original one.
+    assert "/error-with-body" in manifest.final_url
+    assert manifest.requested_url != manifest.final_url
+    assert secret not in manifest.final_url
+
+
+def test_disallowed_redirect_target_hit_count_still_zero_after_this_correction(two_servers):
+    """Re-confirms the existing guarantee (Phase 3F.0.4) this correction
+    must not weaken: a redirect to a DISALLOWED host is refused before any
+    request reaches it, regardless of the new body-sanitize-before-cache
+    and failed-redirect final_url tracking added above."""
+    client = _client()
+    result = client.get(f"{two_servers}/redirect-to-disallowed-server")
+    assert not result.ok
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert DisallowedHandler.state.get("hits", 0) == 0
