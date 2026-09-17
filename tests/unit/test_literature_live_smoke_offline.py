@@ -286,8 +286,9 @@ def test_discovery_full_orchestration_against_fake_transport():
     assert report.anthropic_api_calls == 0
     assert report.web_search_calls == 0
     assert report.external_llm_tokens == 0
-    assert report.execution_report is not None
-    assert report.execution_report.diagnostics.external_llm_tokens == 0
+    assert report.smoke_run_completed is True
+    assert report.diagnostics is not None
+    assert report.diagnostics.external_llm_tokens == 0
 
 
 def test_discovery_matches_requested_nct_id_true():
@@ -1325,14 +1326,16 @@ def test_report_to_jsonable_standalone_carries_no_secret_bypassing_main():
 
 
 def test_repr_of_report_carries_no_secret():
-    """repr(report) must never expose a credential value -- in particular,
-    it must never recurse into report.execution_report's own nested
-    StepExecutionResult.failure_reason/payload fields, which this module
-    does not scrub in place (LiveSmokeReport.execution_report is declared
-    repr=False for exactly this reason)."""
+    """repr(report) must never expose a credential value. Phase 3F.1
+    correction 3: LiveSmokeReport no longer holds a raw ExecutionReport at
+    all (not merely a repr=False-hidden one) -- its own nested
+    StepExecutionResult.failure_reason/payload fields simply cannot appear
+    in repr(report), because they are never stored on the report object in
+    the first place."""
     report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
     rendered = repr(report)
-    assert "execution_report" not in rendered  # excluded from repr entirely, not merely scrubbed
+    assert "execution_report" not in rendered  # no such field exists at all
+    assert not hasattr(report, "execution_report")
     for secret in _all_secret_forms(_ENV_WITH_KEY):
         assert secret not in rendered, f"{secret!r} leaked into repr(report)"
 
@@ -1366,3 +1369,152 @@ def test_json_output_via_main_carries_no_secret(tmp_path, monkeypatch, capsys):
     for secret in _all_secret_forms(_ENV_WITH_KEY):
         assert secret not in printed, f"{secret!r} leaked into --json stdout"
     assert marker.is_file()  # on_first_attempt still fired via the real client construction path
+
+
+# --- Phase 3F.1 correction 3 requirement 1: no raw ExecutionReport on the
+# report object at all (not merely hidden from repr) ------------------------
+def test_live_smoke_report_has_no_execution_report_field():
+    import dataclasses
+
+    report = live.LiveSmokeReport(plan=_blank_plan())
+    assert not hasattr(report, "execution_report")
+    field_names = {f.name for f in dataclasses.fields(report)}
+    assert "execution_report" not in field_names
+    assert "smoke_run_completed" in field_names  # a plain stored bool now
+    assert "diagnostics" in field_names  # curated, int-only ExecutionDiagnostics
+
+
+def test_smoke_run_completed_is_a_stored_field_not_a_computed_property():
+    """smoke_run_completed defaults False and is only ever set True by
+    run_live_smoke itself, right after executor.run() succeeds -- proven
+    here by constructing a report directly (as any hand-built test double
+    does) and confirming it stays False without a real run."""
+    report = live.LiveSmokeReport(plan=_blank_plan())
+    assert report.smoke_run_completed is False
+    assert report.diagnostics is None
+
+
+def test_diagnostics_field_is_populated_and_is_the_curated_int_only_type():
+    import dataclasses as _dc
+
+    http = FakeHttpClient(responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml"))
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV)
+    assert report.smoke_run_completed is True
+    assert report.diagnostics is not None
+    # Every field of ExecutionDiagnostics is an int -- this is what makes
+    # storing it directly on the report safe regardless of what the raw
+    # ExecutionReport it was read from otherwise contained.
+    for f in _dc.fields(report.diagnostics):
+        assert isinstance(getattr(report.diagnostics, f.name), int)
+
+
+# --- Phase 3F.1 correction 3 requirement 3: exhaustive recursive sweep -----
+# of EVERY field on LiveSmokeReport (vars(), dataclass fields, nested
+# dict/list/dataclass), not merely the hand-picked surfaces (repr/
+# report_to_jsonable/requested_urls/errors) the previous correction swept.
+import dataclasses as _dataclasses  # noqa: E402
+from collections.abc import Mapping as _Mapping  # noqa: E402
+from enum import Enum as _Enum  # noqa: E402
+
+
+def _iter_recursive_leaves(obj, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        yield obj
+        return
+    if isinstance(obj, _Enum):
+        yield obj.value
+        return
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return
+    _seen.add(obj_id)
+    if isinstance(obj, _Mapping):
+        for k, v in obj.items():
+            yield from _iter_recursive_leaves(k, _seen)
+            yield from _iter_recursive_leaves(v, _seen)
+        return
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        for item in obj:
+            yield from _iter_recursive_leaves(item, _seen)
+        return
+    if _dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        # Both lenses, per the correction's own instruction: dataclass
+        # fields AND vars() -- for a plain (non-slotted) dataclass these
+        # cover the same instance attributes, but walking both means this
+        # helper stays correct even if a future field is added outside
+        # dataclasses.fields() (e.g. an attribute set by __post_init__).
+        for f in _dataclasses.fields(obj):
+            yield from _iter_recursive_leaves(getattr(obj, f.name), _seen)
+        for v in vars(obj).values():
+            yield from _iter_recursive_leaves(v, _seen)
+        return
+    if hasattr(obj, "__dict__"):
+        for v in vars(obj).values():
+            yield from _iter_recursive_leaves(v, _seen)
+        return
+    yield str(obj)  # unknown leaf type -- stringify rather than skip
+
+
+def _all_report_strings(report: live.LiveSmokeReport) -> list[str]:
+    return [v for v in _iter_recursive_leaves(report) if isinstance(v, str)]
+
+
+# Unique markers proving these come from ACTUAL fixture body content, never
+# a coincidental substring -- one per raw-body shape the sweep must rule out.
+_DISCOVERY_ABSTRACT_MARKER = "Fictional abstract text for a registered fictional trial."
+_TARGETED_ABSTRACT_MARKER = "Fictional abstract text for an article with every identifier populated."
+_FULLTEXT_MARKER = "fictional full-text introduction content"
+_RAW_XML_ROOT_MARKER = "<PubmedArticleSet>"
+_RAW_JSON_UNIQUE_KEY_MARKER = "cursorMark"
+
+
+def _assert_report_carries_no_secret_or_body(report: live.LiveSmokeReport, *, env: dict[str, str]) -> None:
+    haystack = "\n".join(_all_report_strings(report))
+    for secret in _all_secret_forms(env):
+        assert secret not in haystack, f"{secret!r} leaked somewhere inside LiveSmokeReport (recursive sweep)"
+    for marker in (
+        _DISCOVERY_ABSTRACT_MARKER, _TARGETED_ABSTRACT_MARKER, _FULLTEXT_MARKER,
+        _RAW_XML_ROOT_MARKER, _RAW_JSON_UNIQUE_KEY_MARKER,
+    ):
+        assert marker not in haystack, f"{marker!r} (raw body/document marker) leaked inside LiveSmokeReport"
+
+
+def test_recursive_sweep_unsanitized_fake_transport_discovery_mode():
+    """A discovery-mode run over an UNSANITIZED FakeHttpClient -- the wire
+    URLs the adapter builds (and FakeHttpClient echoes back verbatim in
+    requested_urls) carry every credential value raw, and the ESearch/
+    EFetch responses carry the real fixture XML body (with its own
+    abstract text) -- the strongest single-run combination of both leak
+    vectors this recursive sweep must catch."""
+    http = FakeHttpClient(responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml", env=_ENV_WITH_KEY))
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV_WITH_KEY)
+    assert not report.refused
+    _assert_report_carries_no_secret_or_body(report, env=_ENV_WITH_KEY)
+
+
+def test_recursive_sweep_raising_transport():
+    report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
+    _assert_report_carries_no_secret_or_body(report, env=_ENV_WITH_KEY)
+
+
+def test_recursive_sweep_successful_oa_fulltext_acquisition():
+    """The strongest case: a genuinely SUCCESSFUL run that acquires an
+    open-access full-text article. The raw XML (EFetch)/JSON (Europe PMC
+    search) response bodies and the abstract/full-text CONTENT all
+    actually exist somewhere in memory this time (inside run_live_smoke's
+    own LOCAL execution_report/store, per Phase 3F.1 correction 3
+    requirement 1) -- proving the report stays clean even when there is
+    real, substantial content for it to accidentally retain."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"], env=_ENV_WITH_KEY): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV_WITH_KEY)
+    assert report.status is live.LiveSmokeStatus.COMPLETED
+    assert report.articles and report.articles[0]["full_text_acquired"] is True
+    _assert_report_carries_no_secret_or_body(report, env=_ENV_WITH_KEY)

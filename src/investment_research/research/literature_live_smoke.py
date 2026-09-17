@@ -145,7 +145,7 @@ from ..collectors.literature import (
     parse_pubmed_articleset,
 )
 from ..schemas.enums import FetchOutcome, ResearchDomain
-from .acquisition_executor import AcquisitionExecutor, ExecutionReport
+from .acquisition_executor import AcquisitionExecutor, ExecutionDiagnostics
 from .acquisition_planning import AcquisitionMethod
 from .capture_manifest import ManifestReadStatus, read_manifest
 from .checks import SubjectScope
@@ -388,16 +388,31 @@ class LiveSmokeReport:
     #: message could coincidentally contain (e.g. an EFetch error whose
     #: text happens to mention "blocked" for an unrelated reason).
     transport_outcomes: list[str] = field(default_factory=list)
-    #: Excluded from the default dataclass repr (Phase 3F.1 correction 2
-    #: requirement 2): the nested ``StepExecutionResult.failure_reason``/
-    #: ``.payload`` fields inside this object are NOT scrubbed of
-    #: credential values by this module (mutating the shared
-    #: acquisition-executor's own result objects is out of scope here), so
-    #: ``repr(report)`` must never recurse into it. Every OTHER surface
-    #: this module actually renders (``report_to_jsonable``,
-    #: ``format_report_for_print``) already reads only the int-only
-    #: ``ExecutionDiagnostics``, never this field directly.
-    execution_report: ExecutionReport | None = field(default=None, repr=False)
+    #: True once run_live_smoke reached the point of actually building an
+    #: execution report (i.e. NOT refused before the first attempt) --
+    #: distinct from ``status == COMPLETED``, which additionally requires
+    #: no errors. A plain STORED field, not a ``execution_report is not
+    #: None`` computed property (Phase 3F.1 correction 3 requirement 1):
+    #: the raw ``ExecutionReport`` itself is never held anywhere on this
+    #: object at all, so there is nothing left for that check to read.
+    #: ``run_live_smoke`` sets this exactly once, right after
+    #: ``executor.run()`` returns successfully; it never resets to
+    #: ``False`` afterward on any code path.
+    smoke_run_completed: bool = False
+    #: The run's own diagnostics, curated down to ONLY
+    #: ``acquisition_executor.ExecutionDiagnostics`` -- an all-``int``
+    #: dataclass with no string fields, so it can never carry a credential
+    #: value or document body regardless of what the raw ``ExecutionReport``
+    #: it was read from contained. This is deliberately the ONLY thing this
+    #: module keeps from that raw ``ExecutionReport`` -- everything else
+    #: (``StepExecutionResult.failure_reason``/``.payload``, ``Document``,
+    #: abstract/full-text bodies, ``EuropePmcSearchResult``) is read from a
+    #: LOCAL variable inside ``run_live_smoke`` and extracted into this
+    #: report's other, already-curated fields (``errors``, ``articles``,
+    #: ``pmids_located``, ...) -- never stored on this object itself (Phase
+    #: 3F.1 correction 3 requirement 1: the raw ``ExecutionReport`` must not
+    #: merely be hidden from ``repr()``, it must not be held here at all).
+    diagnostics: ExecutionDiagnostics | None = None
     pmids_located: list[str] = field(default_factory=list)
     #: One curated, JSON-safe dict per article -- metadata/diagnostics
     #: only; abstract/full-text body text is never included here.
@@ -418,16 +433,6 @@ class LiveSmokeReport:
     @property
     def refused(self) -> bool:
         return self.refused_reason is not None
-
-    @property
-    def smoke_run_completed(self) -> bool:
-        """True once run_live_smoke reached the point of actually building
-        an execution report (i.e. NOT refused before the first attempt) --
-        distinct from ``status == COMPLETED``, which additionally requires
-        no errors. Computed, not stored, so it can never drift out of sync
-        with ``execution_report`` on any code path (Phase 3F.1 correction
-        requirement 6)."""
-        return self.execution_report is not None
 
     @property
     def status(self) -> LiveSmokeStatus:
@@ -734,8 +739,16 @@ def run_live_smoke(
         max_fulltext_fetches=limits.max_fulltext_fetches, max_total_requests=limits.max_total_requests,
     )
     executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
+    # execution_report is a LOCAL variable ONLY, for the rest of this
+    # function's own curation logic below -- it is never assigned onto
+    # `report` (Phase 3F.1 correction 3 requirement 1). Everything this
+    # report needs FROM it is extracted into report's own, already-curated
+    # fields (errors/articles/pmids_located/... below, diagnostics here);
+    # the raw StepExecutionResult/Document/EuropePmcSearchResult objects
+    # it carries never survive past this function's own stack frame.
     execution_report = executor.run(graph, literature_references={"target_lit_smoke": reference})
-    report.execution_report = execution_report
+    report.smoke_run_completed = True
+    report.diagnostics = execution_report.diagnostics
     _collect_transport_diagnostics(client, report, secret_values)
 
     for target_report in execution_report.target_reports:
@@ -860,20 +873,25 @@ def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> s
     lines.append(f"anthropic_api_calls: {report.anthropic_api_calls}")
     lines.append(f"web_search_calls: {report.web_search_calls}")
     lines.append(f"external_llm_tokens: {report.external_llm_tokens}")
-    if report.execution_report is not None:
-        lines.append(f"diagnostics: {report.execution_report.diagnostics}")
+    if report.diagnostics is not None:
+        lines.append(f"diagnostics: {report.diagnostics}")
     if report.errors:
         lines.append(f"errors: {report.errors}")
     return "\n".join(_safe(line, secrets) for line in lines)
 
 
 def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
-    """A curated, JSON-safe dict -- deliberately NOT ``dataclasses.asdict``
-    of the whole report, since ``report.execution_report`` embeds step
-    payloads that (for the FETCH step) hold real ``Document``/
-    ``EuropePmcSearchResult`` objects, and a ``Document`` carries the FULL
-    fetched text. Every field below is one already curated by
-    ``run_live_smoke`` to be metadata-only (Phase 3F.1 requirement 6)."""
+    """A curated, JSON-safe dict. ``LiveSmokeReport`` itself never holds a
+    raw ``ExecutionReport`` at all (Phase 3F.1 correction 3 requirement 1)
+    -- the step payloads that (for the FETCH step) would hold real
+    ``Document``/``EuropePmcSearchResult`` objects, and a ``Document``
+    carrying the FULL fetched text, are read from a local variable inside
+    ``run_live_smoke`` and never stored on the report object this function
+    reads. Every field below is one already curated by ``run_live_smoke``
+    to be metadata-only (Phase 3F.1 requirement 6); this still builds the
+    dict field-by-field, rather than ``dataclasses.asdict(report)``, only
+    because ``status``/``refused`` are computed properties ``asdict``
+    would not see."""
     return {
         "plan": asdict(report.plan),
         "status": report.status.value,
@@ -895,7 +913,7 @@ def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
         "anthropic_api_calls": report.anthropic_api_calls,
         "web_search_calls": report.web_search_calls,
         "external_llm_tokens": report.external_llm_tokens,
-        "diagnostics": (asdict(report.execution_report.diagnostics) if report.execution_report is not None else None),
+        "diagnostics": (asdict(report.diagnostics) if report.diagnostics is not None else None),
         "errors": report.errors,
     }
 
