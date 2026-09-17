@@ -135,23 +135,22 @@ def test_credential_values_never_appear_in_the_printed_plan():
     assert "ncbi_api_key_configured: True" in printed
 
 
-def test_collect_transport_diagnostics_strips_the_tool_param_even_from_an_unsanitized_fake():
-    """_collect_transport_diagnostics applies its own _strip_ncbi_tool_param
-    pass regardless of transport -- this module's stricter no-tool-value
-    policy holds even against a FakeHttpClient that (unlike the real
-    AllowlistedHttpClient) does not sanitize requested_urls at all
-    (Phase 3F.1 correction requirement 2)."""
+def test_collect_transport_diagnostics_scrubs_all_credentials_even_from_an_unsanitized_fake():
+    """_collect_transport_diagnostics applies BOTH _strip_ncbi_tool_param
+    (param-name-based) AND _scrub_credentials (value-based, raw and
+    percent-encoded) to every URL it writes into the report -- regardless
+    of transport. This holds even against a FakeHttpClient that (unlike
+    the real AllowlistedHttpClient) never sanitizes requested_urls at all
+    (Phase 3F.1 correction 2 requirement 2: the report itself must be safe,
+    not merely whatever a well-behaved transport happens to hand it)."""
     http = FakeHttpClient(responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml"))
     report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV)
-    assert "tool=" not in "".join(report.requested_urls)
-    # email IS still present in requested_urls (percent-encoded) with this
-    # fake transport -- _collect_transport_diagnostics only strips `tool`;
-    # email/api_key sanitization is the REAL AllowlistedHttpClient's own
-    # job (see the loopback integration suite for proof it does that,
-    # including for the percent-encoded form, before a FetchResult even
-    # exists). This documents that boundary rather than pretending a fake
-    # transport gets the same guarantee.
-    assert "email=test%40example.test" in "".join(report.requested_urls)
+    joined = "".join(report.requested_urls)
+    assert "tool=" not in joined
+    assert "test-tool" not in joined
+    assert "test@example.test" not in joined
+    assert "email=test%40example.test" not in joined
+    assert "test%40example.test" not in joined
 
 
 def test_adapter_level_errors_never_contain_a_raw_email_regardless_of_transport():
@@ -171,20 +170,21 @@ def test_adapter_level_errors_never_contain_a_raw_email_regardless_of_transport(
     assert "test@example.test" not in " ".join(report.errors)
 
 
-def test_format_report_for_print_redacts_the_tool_value_from_an_adapter_error_message():
+def test_report_errors_never_contain_the_tool_value_from_an_adapter_error_message():
     """A RaisingHttpClient's exception message embeds the adapter's own
-    public_url substitution, which (unlike this module's stricter
-    diagnostics-level stripping of tool= from requested_urls) still
-    includes `tool=<value>` -- literature_acquisition_adapter.py's own
-    _sanitize_text never touches it (see previous test). This is exactly
-    the raw, non-percent-encoded case format_report_for_print's own
-    _safe() scrub is good at: proven here by confirming the RAW error text
-    DOES carry it before printing, and the PRINTED text does not after
-    (Phase 3F.1 correction requirement 2)."""
+    public_url substitution, which (unlike literature_acquisition_adapter.py's
+    own email/api_key-only _sanitize_text) still includes `tool=<value>`
+    coming straight from the transport layer. This must now be caught at
+    the REPORT level -- report.errors is scrubbed at the point of
+    insertion in run_live_smoke() -- rather than relying solely on
+    format_report_for_print's print-time _safe() call (Phase 3F.1
+    correction 2 requirement 2: the report object itself must never carry
+    the raw value, not merely whatever gets printed from it)."""
     http = RaisingHttpClient()
     report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
     assert report.errors
-    assert "tool=test-tool" in " ".join(report.errors)  # confirms this leak path is real before the print-time fix
+    assert "tool=test-tool" not in " ".join(report.errors)
+    assert "test-tool" not in " ".join(report.errors)
     printed = live.format_report_for_print(report, secrets=["test-tool", "test@example.test"])
     assert "test-tool" not in printed
 
@@ -937,7 +937,14 @@ def test_sent_then_failed_is_never_a_refusal():
     assert report.errors
 
 
-def test_main_writes_marker_even_when_run_live_smoke_raises_unexpectedly(tmp_path, monkeypatch):
+def test_main_never_writes_marker_when_run_live_smoke_raises_before_any_attempt(tmp_path, monkeypatch):
+    """Phase 3F.1 correction 2 requirement 1: main() no longer wraps
+    run_live_smoke() in a try/except that writes the marker on ANY
+    exception. If run_live_smoke() itself never got a chance to invoke the
+    on_first_attempt callback (e.g. it raised immediately, before even
+    constructing a transport), no marker is written -- the OLD behavior
+    (a marker written for any exception, even one before any real
+    communication) was exactly the bug this correction fixes."""
     import pytest
 
     monkeypatch.setenv(live.NCBI_TOOL_ENV_VAR, "test-tool")
@@ -945,15 +952,72 @@ def test_main_writes_marker_even_when_run_live_smoke_raises_unexpectedly(tmp_pat
     marker = tmp_path / "marker.json"
 
     def _boom(*args, **kwargs):
-        raise RuntimeError("simulated failure mid-run")
+        raise RuntimeError("simulated failure before any attempt")
 
     monkeypatch.setattr(live, "run_live_smoke", _boom)
     with pytest.raises(RuntimeError):
         live.main(["--nct-id", "NCT09990001", "--marker-path", str(marker)])
+    assert not marker.exists()
+
+
+def test_main_writes_marker_via_on_first_attempt_callback_before_any_get_call(tmp_path, monkeypatch):
+    """The marker is written by main()'s own _mark_first_attempt callback,
+    which run_live_smoke() threads into the client as on_first_attempt --
+    proven here by monkeypatching run_live_smoke() to invoke the callback
+    it was given (standing in for "a real attempt started") without ever
+    touching a transport, and confirming the marker exists afterward."""
+    monkeypatch.setenv(live.NCBI_TOOL_ENV_VAR, "test-tool")
+    monkeypatch.setenv(live.NCBI_EMAIL_ENV_VAR, "test@example.test")
+    marker = tmp_path / "marker.json"
+
+    def _fake_run_live_smoke(*, on_first_attempt=None, **kwargs):
+        assert on_first_attempt is not None
+        on_first_attempt()
+        return live.LiveSmokeReport(
+            plan=live.build_plan(
+                mode="discovery", nct_id="NCT09990001", pmid=None, max_articles=3, max_fulltext_fetches=1,
+                status=live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False),
+            ),
+        )
+
+    monkeypatch.setattr(live, "run_live_smoke", _fake_run_live_smoke)
+    exit_code = live.main(["--nct-id", "NCT09990001", "--marker-path", str(marker)])
+    assert exit_code == 0
     assert marker.is_file()
     state = live._marker_state(marker)
     assert state is not None
     assert state["refused"] is False
+
+
+def test_main_raises_and_writes_no_marker_when_the_marker_write_itself_fails(tmp_path, monkeypatch):
+    """Phase 3F.1 correction 2 requirement 1: if writing the marker itself
+    fails, HTTP communication must never begin. Simulated here by pointing
+    --marker-path at a location _write_marker cannot create (a path
+    component that is a FILE, not a directory), and confirming main()
+    propagates the failure rather than swallowing it."""
+    import pytest
+
+    monkeypatch.setenv(live.NCBI_TOOL_ENV_VAR, "test-tool")
+    monkeypatch.setenv(live.NCBI_EMAIL_ENV_VAR, "test@example.test")
+    blocking_file = tmp_path / "not_a_directory"
+    blocking_file.write_text("occupied")
+    marker = blocking_file / "marker.json"
+    calls: list[str] = []
+
+    def _fake_run_live_smoke(*, on_first_attempt=None, **kwargs):
+        assert on_first_attempt is not None
+        on_first_attempt()  # raises NotADirectoryError -- must propagate uncaught
+        calls.append("never reached")
+        return live.LiveSmokeReport(plan=live.build_plan(
+            mode="discovery", nct_id="NCT09990001", pmid=None, max_articles=3, max_fulltext_fetches=1,
+            status=live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False),
+        ))
+
+    monkeypatch.setattr(live, "run_live_smoke", _fake_run_live_smoke)
+    with pytest.raises((NotADirectoryError, OSError)):
+        live.main(["--nct-id", "NCT09990001", "--marker-path", str(marker)])
+    assert calls == []
+    assert not marker.exists()
 
 
 def test_main_still_never_writes_marker_on_missing_credentials_even_with_the_new_try_except(tmp_path, monkeypatch):
@@ -996,18 +1060,57 @@ def test_report_status_rate_limited_when_a_429_occurs():
     assert report.status is live.LiveSmokeStatus.RATE_LIMITED
 
 
-def test_status_priority_blocked_over_failed():
-    """A run whose errors mention BOTH a BLOCKED and a generic failure
-    reason is reported as BLOCKED -- the more specific, more severe
-    classification wins."""
+def _blank_plan() -> live.LiveSmokePlan:
+    return live.build_plan(
+        mode="targeted", nct_id=None, pmid="90000001", max_articles=3, max_fulltext_fetches=1,
+        status=live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False),
+    )
+
+
+def test_status_is_never_misclassified_by_an_error_message_that_merely_mentions_blocked():
+    """Phase 3F.1 correction 2 requirement 3: status is derived from
+    STRUCTURED transport_outcomes, never from pattern-matching errors'
+    free text. A generic failure whose message happens to contain the word
+    "BLOCKED" (for a reason unrelated to any actual host-block/redirect-
+    refusal/egress-denial) must be reported as FAILED, not BLOCKED --
+    report.transport_outcomes is empty here, so there is no structured
+    evidence of an actual BLOCKED outcome."""
     report = live.LiveSmokeReport(
-        plan=live.build_plan(
-            mode="targeted", nct_id=None, pmid="90000001", max_articles=3, max_fulltext_fetches=1,
-            status=live.CredentialStatus(tool_configured=True, email_configured=True, api_key_configured=False),
-        ),
+        plan=_blank_plan(),
         errors=["f: StepStatus.FAILED -- transport raised BLOCKED somehow"],
     )
+    assert report.transport_outcomes == []
+    assert report.status is live.LiveSmokeStatus.FAILED
+
+
+def test_status_priority_blocked_over_rate_limited_over_failed():
+    """When transport_outcomes carries BOTH BLOCKED and RATE_LIMITED (a run
+    that hit one of each), BLOCKED -- the more severe classification --
+    wins, per LiveSmokeStatus's own documented priority order."""
+    report = live.LiveSmokeReport(
+        plan=_blank_plan(),
+        transport_outcomes=[FetchOutcome.RATE_LIMITED.value, FetchOutcome.BLOCKED.value, FetchOutcome.OK.value],
+        errors=["some step failed"],
+    )
     assert report.status is live.LiveSmokeStatus.BLOCKED
+
+
+def test_status_rate_limited_wins_over_generic_failed():
+    report = live.LiveSmokeReport(
+        plan=_blank_plan(),
+        transport_outcomes=[FetchOutcome.RATE_LIMITED.value, FetchOutcome.OK.value],
+        errors=["some step failed"],
+    )
+    assert report.status is live.LiveSmokeStatus.RATE_LIMITED
+
+
+def test_status_refused_wins_over_everything_even_a_blocked_transport_outcome():
+    report = live.LiveSmokeReport(
+        plan=_blank_plan(),
+        refused_reason="missing required environment variable(s): IRA_NCBI_TOOL",
+        transport_outcomes=[FetchOutcome.BLOCKED.value],
+    )
+    assert report.status is live.LiveSmokeStatus.REFUSED
 
 
 def test_output_contract_fields_all_present_in_text_and_json():
@@ -1084,3 +1187,182 @@ def test_discovery_mode_never_clamps_max_fulltext_fetches():
         mode="discovery", nct_id="NCT09990001", pmid=None, max_articles=3, max_fulltext_fetches=99, status=status,
     )
     assert plan.max_fulltext_fetches == 99
+
+
+# --- Phase 3F.1 correction 2 requirement 1: on_first_attempt marker timing --
+def test_on_first_attempt_never_fires_when_no_get_call_is_ever_made():
+    """A refused run (missing credential/malformed ID) never constructs a
+    client at all, so a caller-supplied on_first_attempt is never invoked --
+    the callback is the ONLY thing that would write a marker in main(), and
+    a refusal must never trigger it."""
+    calls: list[str] = []
+    report = live.run_live_smoke(
+        mode="discovery", nct_id="not-an-nct-id", http_client=_PoisonHttpClient(), env=_ENV,
+        on_first_attempt=lambda: calls.append("fired"),
+    )
+    assert report.refused
+    assert calls == []
+
+
+def test_on_first_attempt_fires_exactly_once_before_the_first_get_call():
+    """FakeHttpClient.on_first_attempt (mirroring AllowlistedHttpClient's
+    own contract) fires exactly once, before its FIRST .get() call --
+    proven here via a FakeHttpClient constructed directly with the
+    callback (the pattern an offline test uses in place of a real socket)."""
+    calls: list[str] = []
+    http = FakeHttpClient(
+        responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml"),
+        on_first_attempt=lambda: calls.append("fired"),
+    )
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV)
+    assert not report.refused
+    assert calls == ["fired"]
+    assert http.requested_urls  # at least one real .get() call happened
+
+
+def test_on_first_attempt_fires_even_when_the_transport_then_fails():
+    """A RaisingHttpClient's on_first_attempt fires BEFORE it raises --
+    proving the marker-writing signal survives a subsequent transport
+    failure (Phase 3F.1 correction 2 requirement 1: "sent, then failed"
+    must still preserve the marker)."""
+    calls: list[str] = []
+    http = RaisingHttpClient(on_first_attempt=lambda: calls.append("fired"))
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert not report.refused
+    assert report.errors
+    assert calls == ["fired"]
+
+
+def test_on_first_attempt_raising_prevents_any_get_call_from_completing():
+    """If the callback itself raises (standing in for "the marker write
+    failed"), no request may complete. literature_acquisition_adapter.py's
+    own ``_safe_get`` catches ANY exception a transport's ``.get()`` raises
+    (so a raw wire_url embedded in a transport exception can never
+    propagate outward unsanitized) -- so this surfaces as a normal,
+    reported FAILED step, never an uncaught crash. What actually proves
+    "no HTTP communication began" is that FakeHttpClient's own
+    requested_urls stays empty: the callback runs (and raises) BEFORE
+    FakeHttpClient.get() ever appends the URL or looks up a response."""
+    def _boom() -> None:
+        raise OSError("simulated marker write failure")
+
+    http = FakeHttpClient(responses={}, on_first_attempt=_boom)
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert http.requested_urls == []
+    assert report.errors
+    assert any("simulated marker write failure" in e for e in report.errors)
+
+
+def test_run_live_smoke_threads_on_first_attempt_into_the_default_client(monkeypatch):
+    """run_live_smoke(), when NOT given an http_client, threads
+    on_first_attempt straight into the internally-constructed
+    AllowlistedHttpClient -- this is what lets main() tie its marker to
+    the real transport's first physical attempt without injecting a fake
+    one (Phase 3F.1 correction 2 requirement 1)."""
+    captured: dict[str, object] = {}
+    real_client_cls = live.AllowlistedHttpClient
+
+    class _RecordingClient(real_client_cls):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            captured["on_first_attempt"] = kwargs.get("on_first_attempt")
+            super().__init__(*args, **kwargs)
+
+        def get(self, url, **kwargs):
+            raise ConnectionError("no real network in this test")
+
+    monkeypatch.setattr(live, "AllowlistedHttpClient", _RecordingClient)
+    sentinel = lambda: None  # noqa: E731
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", env=_ENV, on_first_attempt=sentinel)
+    assert captured["on_first_attempt"] is sentinel
+    assert not report.refused  # the transport failure is reported, not raised, past this point
+
+
+# --- Phase 3F.1 correction 2 requirement 2: report-level secret sweep ------
+def _report_with_every_secret_leak_vector(*, credentials_env: dict[str, str]) -> live.LiveSmokeReport:
+    """Drives a real orchestration (LOCATE -> FETCH, with FETCH failing)
+    through an UNSANITIZED RaisingHttpClient, whose exception message
+    embeds the tool value raw (see
+    test_report_errors_never_contain_the_tool_value_from_an_adapter_error_message)
+    -- the worst case for every secret-sweep assertion below."""
+    http = RaisingHttpClient()
+    return live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=credentials_env)
+
+
+def _all_secret_forms(env: dict[str, str]) -> list[str]:
+    from urllib.parse import quote as _quote
+
+    forms: list[str] = []
+    for key in ("IRA_NCBI_TOOL", "IRA_NCBI_EMAIL", "IRA_NCBI_API_KEY"):
+        value = env.get(key)
+        if value:
+            forms.append(value)
+            forms.append(_quote(value, safe=""))
+    return forms
+
+
+def test_report_object_itself_carries_no_secret_after_an_unsanitized_transport_failure():
+    report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
+    haystacks = [
+        " ".join(report.requested_urls),
+        " ".join(str(v) for v in report.http_statuses),
+        " ".join(report.errors),
+        report.refused_reason or "",
+    ]
+    for secret in _all_secret_forms(_ENV_WITH_KEY):
+        for haystack in haystacks:
+            assert secret not in haystack, f"{secret!r} leaked into {haystack!r}"
+
+
+def test_report_to_jsonable_standalone_carries_no_secret_bypassing_main():
+    """report_to_jsonable(report), dumped directly via json.dumps -- i.e.
+    bypassing main()'s own defense-in-depth _safe() call entirely -- must
+    already be free of every secret value, raw or percent-encoded (Phase
+    3F.1 correction 2 requirement 2)."""
+    report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
+    dumped = json.dumps(live.report_to_jsonable(report), default=str)
+    for secret in _all_secret_forms(_ENV_WITH_KEY):
+        assert secret not in dumped, f"{secret!r} leaked into report_to_jsonable() output"
+
+
+def test_repr_of_report_carries_no_secret():
+    """repr(report) must never expose a credential value -- in particular,
+    it must never recurse into report.execution_report's own nested
+    StepExecutionResult.failure_reason/payload fields, which this module
+    does not scrub in place (LiveSmokeReport.execution_report is declared
+    repr=False for exactly this reason)."""
+    report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
+    rendered = repr(report)
+    assert "execution_report" not in rendered  # excluded from repr entirely, not merely scrubbed
+    for secret in _all_secret_forms(_ENV_WITH_KEY):
+        assert secret not in rendered, f"{secret!r} leaked into repr(report)"
+
+
+def test_format_report_for_print_carries_no_secret_text_output():
+    report = _report_with_every_secret_leak_vector(credentials_env=_ENV_WITH_KEY)
+    secrets = [v for v in (_ENV_WITH_KEY["IRA_NCBI_TOOL"], _ENV_WITH_KEY["IRA_NCBI_EMAIL"], _ENV_WITH_KEY["IRA_NCBI_API_KEY"]) if v]
+    printed = live.format_report_for_print(report, secrets=secrets)
+    for secret in _all_secret_forms(_ENV_WITH_KEY):
+        assert secret not in printed, f"{secret!r} leaked into format_report_for_print() output"
+
+
+def test_json_output_via_main_carries_no_secret(tmp_path, monkeypatch, capsys):
+    """Drives the REAL main()/run_live_smoke() end-to-end, with the
+    internally-constructed client replaced by an unsanitized
+    RaisingHttpClient (standing in for "the transport does no sanitization
+    of its own") -- proving the --json output stays free of every secret
+    value purely because of the report-level scrub, not because of
+    whatever the real AllowlistedHttpClient would have done anyway."""
+    monkeypatch.setenv(live.NCBI_TOOL_ENV_VAR, _ENV_WITH_KEY["IRA_NCBI_TOOL"])
+    monkeypatch.setenv(live.NCBI_EMAIL_ENV_VAR, _ENV_WITH_KEY["IRA_NCBI_EMAIL"])
+    monkeypatch.setenv(live.NCBI_API_KEY_ENV_VAR, _ENV_WITH_KEY["IRA_NCBI_API_KEY"])
+    marker = tmp_path / "marker.json"
+
+    def _unsanitized_client_factory(*args, **kwargs):
+        return RaisingHttpClient(on_first_attempt=kwargs.get("on_first_attempt"))
+
+    monkeypatch.setattr(live, "AllowlistedHttpClient", _unsanitized_client_factory)
+    live.main(["--pmid", "90000001", "--marker-path", str(marker), "--json"])
+    printed = capsys.readouterr().out
+    for secret in _all_secret_forms(_ENV_WITH_KEY):
+        assert secret not in printed, f"{secret!r} leaked into --json stdout"
+    assert marker.is_file()  # on_first_attempt still fired via the real client construction path

@@ -225,6 +225,89 @@ def test_allowed_host_normal_fetch_succeeds(base_url):
     assert client.requests_made == 1
 
 
+# --- on_first_attempt callback (Phase 3F.1 correction 2 requirement 1) ------
+# Generic to AllowlistedHttpClient -- exercised here independent of any
+# specific caller (SEC/ClinicalTrials/Form4/Literature all reuse this same
+# class); Literature Live Smoke's own marker-timing tests live in
+# tests/integration/test_literature_live_smoke_transport.py.
+def test_on_first_attempt_default_none_preserves_existing_behavior(base_url):
+    """A client constructed with no on_first_attempt at all (every existing
+    SEC/ClinicalTrials/Form4 caller) behaves exactly as before -- nothing
+    is called, nothing changes."""
+    client = _client()
+    result = client.get(f"{base_url}/ok")
+    assert result.ok
+    assert client.attempts_made == 1
+
+
+def test_on_first_attempt_fires_exactly_once_before_the_first_physical_attempt(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    result = client.get(f"{base_url}/ok")
+    assert result.ok
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_never_fires_when_no_attempt_is_made(base_url):
+    """A disallowed-host refusal never reaches the physical-attempt code
+    path at all -- on_first_attempt must not fire for it."""
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"), allowed_hosts=frozenset({"only-this-host"}))
+    result = client.get(f"{base_url}/ok")
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert events == []
+
+
+def test_on_first_attempt_fires_only_once_across_retries_of_the_same_call(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"), max_retries=2)
+    result = client.get(f"{base_url}/flaky-error?case=on-first-attempt-retries")
+    assert result.ok
+    assert events == ["callback"]
+    assert client.attempts_made == 3  # two failed attempts + the succeeding retry
+
+
+def test_on_first_attempt_fires_only_once_across_multiple_logical_calls(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    client.get(f"{base_url}/ok")
+    client.get(f"{base_url}/ok/again")
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_still_fires_when_the_first_attempt_then_times_out(base_url):
+    """"Sent, then timed out" must still count as a real attempt having
+    started -- the callback fires before the outcome (here, a timeout) is
+    known."""
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"), timeout=0.2)
+    result = client.get(f"{base_url}/slow")
+    assert result.outcome is FetchOutcome.TIMEOUT
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_still_fires_when_the_first_attempt_then_429s(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    result = client.get(f"{base_url}/ratelimited")
+    assert result.outcome is FetchOutcome.RATE_LIMITED
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_raising_makes_zero_physical_attempts(base_url):
+    """If the callback raises, no physical attempt is made at all -- this
+    is the property main()'s "marker write failure must not begin
+    communication" contract relies on."""
+    def _boom() -> None:
+        raise OSError("simulated failure")
+
+    client = _client(on_first_attempt=_boom)
+    with pytest.raises(OSError):
+        client.get(f"{base_url}/ok")
+    assert client.attempts_made == 0
+    assert client.requests_made == 0
+
+
 # --- host allowlist -----------------------------------------------------------
 def test_disallowed_host_is_refused_without_a_request(base_url):
     """A URL whose host isn't in ``allowed_hosts`` never reaches urllib at

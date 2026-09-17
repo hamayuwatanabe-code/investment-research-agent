@@ -46,9 +46,18 @@ unset or blank, mirroring ``sec_live_smoke.py``'s own
 is always optional and never causes a refusal. The three VALUES are never
 placed in a plan, a report, an exception message, a cache key, a
 ``Document``, or a Capture Manifest anywhere in this module -- only
-whether each is CONFIGURED (a plain boolean) is ever displayed. A refusal
-(missing credential, malformed ID) or anything before the first real
-request is attempted never writes the one-time LAST_RUN marker.
+whether each is CONFIGURED (a plain boolean) is ever displayed. This is
+enforced at the REPORT level, not merely at print time (Phase 3F.1
+correction 2 requirement 2): ``_scrub_credentials`` replaces every
+configured credential value -- raw and percent-encoded alike -- wherever
+one could otherwise land (``requested_urls``, ``http_statuses`` keys,
+``errors``, ``refused_reason``), so ``report_to_jsonable(report)`` and
+``repr(report)`` stay safe even if a caller injects a transport (e.g. a
+test double) that never sanitizes a URL itself; ``format_report_for_print``'s
+own ``_safe()`` call remains as defense in depth on top of that, not as
+the only line of defense. A refusal (missing credential, malformed ID) or
+anything before the first real request is attempted never writes the
+one-time LAST_RUN marker.
 
 Request budget (Phase 3F.1 requirement 5): discovery mode's request cap is
 an explicit, printed formula -- ``ESearch(1) + EFetch(1, batched) +
@@ -120,10 +129,12 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ..collectors.http import DEFAULT_MAX_REDIRECTS
 from ..collectors.literature import (
@@ -133,7 +144,7 @@ from ..collectors.literature import (
     parse_europepmc_search_response,
     parse_pubmed_articleset,
 )
-from ..schemas.enums import ResearchDomain
+from ..schemas.enums import FetchOutcome, ResearchDomain
 from .acquisition_executor import AcquisitionExecutor, ExecutionReport
 from .acquisition_planning import AcquisitionMethod
 from .capture_manifest import ManifestReadStatus, read_manifest
@@ -369,7 +380,24 @@ class LiveSmokeReport:
     #: ``AllowlistedHttpClient.max_requests`` actually bounds.
     attempt_count: int = 0
     cache_hit_count: int = 0
-    execution_report: ExecutionReport | None = None
+    #: Structured per-request outcomes (``FetchOutcome`` values, e.g.
+    #: "BLOCKED"/"RATE_LIMITED"/"OK") collected from the transport's own
+    #: cache -- what ``status`` (below) is actually computed from (Phase
+    #: 3F.1 correction 2 requirement 3). Never inferred from matching a
+    #: substring against ``errors``' free text, which a provider's own error
+    #: message could coincidentally contain (e.g. an EFetch error whose
+    #: text happens to mention "blocked" for an unrelated reason).
+    transport_outcomes: list[str] = field(default_factory=list)
+    #: Excluded from the default dataclass repr (Phase 3F.1 correction 2
+    #: requirement 2): the nested ``StepExecutionResult.failure_reason``/
+    #: ``.payload`` fields inside this object are NOT scrubbed of
+    #: credential values by this module (mutating the shared
+    #: acquisition-executor's own result objects is out of scope here), so
+    #: ``repr(report)`` must never recurse into it. Every OTHER surface
+    #: this module actually renders (``report_to_jsonable``,
+    #: ``format_report_for_print``) already reads only the int-only
+    #: ``ExecutionDiagnostics``, never this field directly.
+    execution_report: ExecutionReport | None = field(default=None, repr=False)
     pmids_located: list[str] = field(default_factory=list)
     #: One curated, JSON-safe dict per article -- metadata/diagnostics
     #: only; abstract/full-text body text is never included here.
@@ -496,54 +524,102 @@ def _strip_ncbi_tool_param(url: str) -> str:
     return prefix + ("?" + "&".join(kept) if kept else "")
 
 
-def _collect_transport_diagnostics(client: Any, report: LiveSmokeReport) -> None:
+#: Placeholder substituted for a matched credential value -- distinct from
+#: sec_live_smoke.py's generic REDACTED marker so a grep for either can
+#: tell which layer caught it, though both mean the same thing: a secret
+#: was found and replaced before this text left this module.
+_CREDENTIAL_REDACTED = "[REDACTED-NCBI-CREDENTIAL]"
+
+
+def _credential_secret_values(credentials: NcbiCredentials) -> list[str]:
+    """Every non-empty credential VALUE, plus its percent-encoded form (the
+    two shapes a secret can appear in inside a URL or an exception message
+    that embedded one) -- the input ``_scrub_credentials`` scrubs against.
+    An unset ``ncbi_api_key`` (empty string) is skipped entirely: an empty
+    "secret" would otherwise match (and mangle) every string, since ``""
+    in text`` is always true (Phase 3F.1 correction 2 requirement 2)."""
+    values: list[str] = []
+    for raw in (credentials.ncbi_tool, credentials.ncbi_email, credentials.ncbi_api_key):
+        if not raw:
+            continue
+        values.append(raw)
+        encoded = quote(raw, safe="")
+        if encoded != raw:
+            values.append(encoded)
+    return values
+
+
+def _scrub_credentials(text: str, secret_values: list[str]) -> str:
+    """Value-based redaction -- catches a credential VALUE (raw or
+    percent-encoded) wherever it appears in ``text``, regardless of which
+    query parameter NAME carried it or whether the transport that produced
+    ``text`` sanitized anything itself. This is what closes the leak
+    ``_strip_ncbi_tool_param`` (a param-NAME-based strip, tool-only) could
+    never close: an unsanitized test double's raw wire URL, or an
+    adapter's own exception-message text embedding one (Phase 3F.1
+    correction 2 requirement 2)."""
+    for value in secret_values:
+        if value and value in text:
+            text = text.replace(value, _CREDENTIAL_REDACTED)
+    return text
+
+
+def _collect_transport_diagnostics(client: Any, report: LiveSmokeReport, secret_values: list[str]) -> None:
     """Same generic, getattr-based approach as sec_live_smoke.py/
     clinicaltrials_live_smoke.py's own helper -- degrades cleanly for a
-    minimal duck-typed fake transport. ``client.requested_urls`` is already
-    the sanitized public-URL form (Phase 3F.0.3) with respect to
-    email/api_key; ``_strip_ncbi_tool_param`` is applied ON TOP of that
-    here for this module's own stricter no-tool-value policy (see that
-    function's own docstring).
+    minimal duck-typed fake transport. ``client.requested_urls`` is
+    expected to already be the sanitized public-URL form (Phase 3F.0.3)
+    with respect to email/api_key for the REAL ``AllowlistedHttpClient``,
+    but this function must never ASSUME that of every possible duck-typed
+    transport a caller might inject (Phase 3F.1 correction 2 requirement
+    2): ``_strip_ncbi_tool_param`` (param-name-based) and
+    ``_scrub_credentials`` (value-based, covers email/api_key/tool alike,
+    raw and percent-encoded) are BOTH applied to every URL this function
+    ever writes into the report, regardless of transport.
 
-    Phase 3F.1 correction requirement 2: ``http_statuses`` is built from
-    each cached ``FetchResult``'s OWN ``.url`` field -- never from the
-    cache dict's KEY. A dict key is an internal implementation detail of
-    whatever transport this is (public_url after the Phase 3F.1 correction
-    to ``AllowlistedHttpClient``, but this function must not assume that of
-    every possible duck-typed transport a caller might inject); ``.url`` is
-    the one field every ``FetchResult``-shaped object in this codebase
-    guarantees is already sanitized (of email/api_key, at least).
+    Also collects ``report.transport_outcomes`` -- each cached
+    ``FetchResult``'s OWN ``.outcome`` value (Phase 3F.1 correction 2
+    requirement 3), which ``_compute_status`` uses instead of pattern-
+    matching ``report.errors``' free text.
     """
-    seen = [_strip_ncbi_tool_param(u) for u in getattr(client, "requested_urls", report.requested_urls)]
+
+    def sanitize(url: str) -> str:
+        return _scrub_credentials(_strip_ncbi_tool_param(url), secret_values)
+
+    seen = [sanitize(u) for u in getattr(client, "requested_urls", report.requested_urls)]
     deduped = list(dict.fromkeys(seen))
     report.requested_urls = deduped
     report.request_count = getattr(client, "requests_made", len(deduped))
     report.attempt_count = getattr(client, "attempts_made", report.request_count)
     report.cache_hit_count = getattr(client, "cache_hits", 0)
     cache = getattr(client, "_cache", None)
+    outcomes: list[str] = []
     if isinstance(cache, dict):
         for result in cache.values():
             result_url = getattr(result, "url", None)
             if isinstance(result_url, str):
-                report.http_statuses[_strip_ncbi_tool_param(result_url)] = getattr(result, "status", None)
+                report.http_statuses[sanitize(result_url)] = getattr(result, "status", None)
+            outcome = getattr(result, "outcome", None)
+            if outcome is not None:
+                outcomes.append(getattr(outcome, "value", str(outcome)))
+    report.transport_outcomes = outcomes
     for url in report.requested_urls:
         report.http_statuses.setdefault(url, None)
 
 
 def _compute_status(report: LiveSmokeReport) -> LiveSmokeStatus:
-    """Derives the overall run status from what the report already knows --
-    never a second, independent classification of the underlying transport
-    outcomes. Checks report.errors' own text for a FetchOutcome value
-    (StrEnum, so f"{outcome}" is exactly its bare name, e.g. "RATE_LIMITED")
-    -- these strings are already embedded there by
-    literature_acquisition_adapter.py's own failure-message construction
-    (e.g. f"ESearch failed: {fetch.outcome} {fetch.error}")."""
+    """Derives the overall run status from STRUCTURED transport outcomes,
+    never from pattern-matching ``report.errors``' free text (Phase 3F.1
+    correction 2 requirement 3): a provider failure message that happens
+    to contain the word "blocked" or "rate limited" for an unrelated
+    reason must never misclassify the run. The specific provider-failure
+    reason stays exactly where it always was -- ``report.errors`` -- this
+    function only ever reads ``report.transport_outcomes``."""
     if report.refused:
         return LiveSmokeStatus.REFUSED
-    combined_errors = " ".join(report.errors)
-    if "BLOCKED" in combined_errors:
+    if FetchOutcome.BLOCKED.value in report.transport_outcomes:
         return LiveSmokeStatus.BLOCKED
-    if "RATE_LIMITED" in combined_errors:
+    if FetchOutcome.RATE_LIMITED.value in report.transport_outcomes:
         return LiveSmokeStatus.RATE_LIMITED
     if report.errors:
         return LiveSmokeStatus.FAILED
@@ -560,6 +636,7 @@ def run_live_smoke(
     http_client: Any | None = None,
     out_dir: Path | None = None,
     env: dict[str, str] | None = None,
+    on_first_attempt: Callable[[], None] | None = None,
 ) -> LiveSmokeReport:
     """Run one Literature Live Smoke pass. ``http_client``/``env`` are
     injectable for offline testing only -- production callers (``scripts/
@@ -569,6 +646,17 @@ def run_live_smoke(
     requests (see module docstring's LIVE mode notice) if credentials are
     configured and no refusal applies.
 
+    ``on_first_attempt``, when given, is threaded straight into the
+    internally-constructed ``AllowlistedHttpClient`` (see that class's own
+    docstring) -- it fires exactly once, immediately before this run's
+    FIRST real socket-level attempt, never for a refusal or any other
+    pre-send failure. ``main()`` uses this to tie the one-time LAST_RUN
+    marker to the moment real communication actually begins, rather than
+    inferring it from a broad try/except around this whole function (Phase
+    3F.1 correction 2 requirement 1). Ignored when ``http_client`` is
+    injected -- a caller providing its own transport also controls that
+    transport's own ``on_first_attempt`` directly, if it has one.
+
     Never called from ``Pipeline.run()``; never makes an Anthropic/LLM/Web
     Search call.
     """
@@ -576,6 +664,7 @@ def run_live_smoke(
         raise ValueError(f"unknown mode: {mode!r} (expected 'discovery' or 'targeted')")
 
     credentials, credential_status, missing = resolve_ncbi_credentials(env)
+    secret_values = _credential_secret_values(credentials)
     normalized_nct_id = normalize_nct_id(nct_id) if nct_id else None
     normalized_pmid = (pmid or "").strip()
     effective_max_fulltext_fetches = _effective_max_fulltext_fetches(mode, max_fulltext_fetches)
@@ -590,15 +679,18 @@ def run_live_smoke(
     # 3F.1 requirement 3). Nothing has been constructed yet that could ever
     # make a request.
     if missing:
-        report.refused_reason = (
+        report.refused_reason = _scrub_credentials(
             f"missing required environment variable(s): {', '.join(missing)} -- refusing to make "
-            f"any request ({NCBI_API_KEY_ENV_VAR} remains optional)"
+            f"any request ({NCBI_API_KEY_ENV_VAR} remains optional)",
+            secret_values,
         )
         return report
 
     if mode == "discovery":
         if not normalized_nct_id or not NCT_ID_RE.match(normalized_nct_id):
-            report.refused_reason = f"malformed or missing NCT ID for discovery mode: {nct_id!r}"
+            report.refused_reason = _scrub_credentials(
+                f"malformed or missing NCT ID for discovery mode: {nct_id!r}", secret_values
+            )
             return report
         limits, _, _ = _discovery_budget(max_articles, effective_max_fulltext_fetches)
         # Deliberately decoupled from max_articles: ESearch's own retmax is
@@ -612,7 +704,9 @@ def run_live_smoke(
         reference = LiteratureReference(nct_id=normalized_nct_id, max_pmids=MAX_PMIDS_PER_BATCH)
     else:
         if not normalized_pmid or not PMID_RE.match(normalized_pmid):
-            report.refused_reason = f"malformed or missing PMID for targeted mode: {pmid!r}"
+            report.refused_reason = _scrub_credentials(
+                f"malformed or missing PMID for targeted mode: {pmid!r}", secret_values
+            )
             return report
         limits, _, _ = _targeted_budget(effective_max_fulltext_fetches)
         reference = LiteratureReference(ct_pmid=normalized_pmid, max_pmids=1)
@@ -629,6 +723,7 @@ def run_live_smoke(
         # out of the persisted Capture Manifest itself, not just this
         # module's own in-memory diagnostics.
         additional_secret_query_params=frozenset({"tool"}),
+        on_first_attempt=on_first_attempt,
     )
 
     graph = _build_graph()
@@ -641,7 +736,7 @@ def run_live_smoke(
     executor = AcquisitionExecutor(adapters={LITERATURE_ADAPTER_ID: adapter}, document_store=store)
     execution_report = executor.run(graph, literature_references={"target_lit_smoke": reference})
     report.execution_report = execution_report
-    _collect_transport_diagnostics(client, report)
+    _collect_transport_diagnostics(client, report, secret_values)
 
     for target_report in execution_report.target_reports:
         for step_result in target_report.step_results:
@@ -687,7 +782,12 @@ def run_live_smoke(
             if step_result.status in (
                 StepStatus.FAILED, StepStatus.NOT_FOUND, StepStatus.ZERO_RESULTS, StepStatus.SKIPPED_DUE_TO_BUDGET,
             ):
-                report.errors.append(f"{step_result.step_id}: {step_result.status} -- {step_result.failure_reason}")
+                report.errors.append(
+                    _scrub_credentials(
+                        f"{step_result.step_id}: {step_result.status} -- {step_result.failure_reason}",
+                        secret_values,
+                    )
+                )
 
     for target_report in execution_report.target_reports:
         if target_report.outcome.value == "ACQUIRED":
@@ -740,6 +840,7 @@ def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> s
     lines.append(f"logical_request_count: {report.request_count}")
     lines.append(f"physical_attempt_count: {report.attempt_count}")
     lines.append(f"cache_hit_count: {report.cache_hit_count}")
+    lines.append(f"transport_outcomes: {report.transport_outcomes}")
     lines.append(f"pmids_located: {report.pmids_located}")
     lines.append(f"coverage_complete: {report.coverage_complete}")
     lines.append(f"budget_excluded_pmids: {report.budget_excluded_pmids}")
@@ -783,6 +884,7 @@ def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
         "logical_request_count": report.request_count,
         "physical_attempt_count": report.attempt_count,
         "cache_hit_count": report.cache_hit_count,
+        "transport_outcomes": report.transport_outcomes,
         "pmids_located": report.pmids_located,
         "articles": report.articles,
         "coverage_complete": report.coverage_complete,
@@ -947,7 +1049,10 @@ def analyze_capture(capture_dir: Path) -> dict[str, Any]:
     return results
 
 
-# -- one-time marker (Phase 3F.1 requirement 3: never written on refusal) ---
+# -- one-time marker (Phase 3F.1 requirement 3: never written on refusal;
+# Phase 3F.1 correction 2 requirement 1: tied to the FIRST physical HTTP
+# attempt via AllowlistedHttpClient.on_first_attempt/main()'s
+# _mark_first_attempt, never inferred from run_live_smoke() raising) ------
 
 
 def _marker_state(marker_path: Path) -> dict[str, Any] | None:
@@ -1050,23 +1155,40 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     secrets = [v for v in (credentials.ncbi_tool, credentials.ncbi_email, credentials.ncbi_api_key) if v]
-    try:
-        report = run_live_smoke(
-            mode=mode, nct_id=normalized_nct_id, pmid=args.pmid, max_articles=args.max_articles,
-            max_fulltext_fetches=args.max_fulltext_fetches, out_dir=out_dir,
-        )
-    except Exception:
-        # We are past every pre-flight refusal check above (credentials
-        # configured, marker guard passed, mode/ID already validated) --
-        # run_live_smoke() itself only ever raises here for a reason other
-        # than a designed refusal, meaning a real attempt was already
-        # underway when this raised. The marker must still be written,
-        # exactly as it would be for a FAILED (rather than REFUSED) report
-        # (Phase 3F.1 correction requirement 5: once the first outbound
-        # attempt has started, failure -- including an unhandled exception
-        # -- never erases that a live attempt was made).
+
+    def _mark_first_attempt() -> None:
+        # Fires exactly once, immediately before the very first real
+        # outbound HTTP attempt this run makes (see
+        # AllowlistedHttpClient.on_first_attempt) -- never for a missing
+        # credential, a malformed ID, an already-existing marker, or any
+        # other pre-send failure, and never merely because run_live_smoke()
+        # was CALLED (Phase 3F.1 correction 2 requirement 1: "preflight
+        # passed" is never conflated with "transmission started"). If
+        # writing the marker itself raises, that exception propagates out
+        # of AllowlistedHttpClient.get() uncaught -- no socket attempt is
+        # made this call. From there it is caught by
+        # literature_acquisition_adapter.py's own ``_safe_get`` (which
+        # catches ANY exception a transport's ``.get()`` raises, so a raw
+        # wire_url embedded in one can never leak outward unsanitized) and
+        # surfaces as an ordinary FAILED step in the returned report --
+        # this function makes no attempt to catch it a second time or paper
+        # over it; either way, zero real communication occurred.
         _write_marker(marker_path, refused=False)
-        raise
+
+    # No try/except around this call. Only a genuine bug OUTSIDE every
+    # adapter-wrapped client.get() call (e.g. in this module's own
+    # non-transport code) could still escape run_live_smoke() uncaught;
+    # every transport-layer failure -- including one from
+    # _mark_first_attempt above -- is already caught and reported via
+    # report.errors by the time this returns (Phase 3F.1 correction 2
+    # requirement 1 -- this replaces the previous, inaccurate try/except
+    # that wrote the marker on ANY exception regardless of whether a real
+    # attempt had begun).
+    report = run_live_smoke(
+        mode=mode, nct_id=normalized_nct_id, pmid=args.pmid, max_articles=args.max_articles,
+        max_fulltext_fetches=args.max_fulltext_fetches, out_dir=out_dir,
+        on_first_attempt=_mark_first_attempt,
+    )
     print()
     if args.json:
         # Defense in depth, matching the text path below: report_to_jsonable
@@ -1081,9 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
         # run_live_smoke() only ever sets refused_reason BEFORE constructing
         # a client (missing credentials, a malformed ID) -- zero network
         # activity occurred, so there is nothing for the one-time marker to
-        # protect against repeating.
+        # protect against repeating, and _mark_first_attempt above never ran.
         return 1
-    _write_marker(marker_path, refused=False)
     return 0 if not report.errors else 1
 
 

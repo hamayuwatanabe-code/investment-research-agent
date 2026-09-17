@@ -56,7 +56,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -297,6 +297,20 @@ class AllowlistedHttpClient:
     #: Smoke sets this to ``frozenset({"tool"})`` for its own, stricter
     #: policy (Phase 3F.1 correction requirement 2).
     additional_secret_query_params: frozenset[str] = field(default_factory=frozenset)
+    #: Invoked exactly once per client lifetime, immediately before the
+    #: FIRST real socket-level attempt (inside ``_get_with_retry``, before
+    #: its first call to ``_do_get``) -- never before, never again on a
+    #: retry or a later logical request. ``None`` (the default) preserves
+    #: every existing SEC/ClinicalTrials/Form4 caller's behaviour exactly:
+    #: nothing is called, nothing changes. A caller that DOES set it (e.g.
+    #: Literature Live Smoke's marker-writing callback) gets an accurate
+    #: signal of "real communication is about to start" that cannot be
+    #: forged by a caller-side try/except around a broader call, which
+    #: cannot distinguish "failed before any attempt" from "failed after
+    #: communication began" (Phase 3F.1 correction 2 requirement 1). If the
+    #: callback itself raises, that exception propagates uncaught and NO
+    #: socket attempt is made this call.
+    on_first_attempt: Callable[[], None] | None = None
     out_dir: Path | None = None
     #: Which live-smoke module this client belongs to ("sec" /
     #: "clinicaltrials") -- recorded in each capture's manifest so a shared
@@ -339,6 +353,12 @@ class AllowlistedHttpClient:
         #: purely for manifest purposes. Keyed by public_url (Phase 3F.1
         #: correction requirement 1), matching ``self._cache``.
         self._final_urls: dict[str, str] = {}
+        #: Set the moment ``on_first_attempt`` has been invoked -- ensures
+        #: exactly one invocation per client lifetime, never per retry and
+        #: never per logical request. Stays ``False`` for the lifetime of a
+        #: client with no callback configured (the guard at the call site
+        #: also requires ``self.on_first_attempt is not None``).
+        self._first_attempt_signaled = False
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -423,6 +443,16 @@ class AllowlistedHttpClient:
                     error=f"live GET cap of {self.max_requests} physical attempts reached before any "
                     "attempt could be made for this request",
                 )
+            if self.on_first_attempt is not None and not self._first_attempt_signaled:
+                # Fires exactly once, immediately before the very first
+                # real socket-level attempt this client will ever make --
+                # strictly before self._limiter.wait()/self._do_get() below,
+                # so no attempt (physical or rate-limit wait) can start
+                # before this returns. If it raises, this loop -- and every
+                # counter above (_attempts_made) -- is left untouched, and
+                # the exception propagates straight out of get() uncaught.
+                self.on_first_attempt()
+                self._first_attempt_signaled = True
             attempt += 1
             self._attempts_made += 1
             self._limiter.wait()

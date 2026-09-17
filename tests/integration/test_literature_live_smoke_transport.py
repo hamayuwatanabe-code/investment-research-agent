@@ -54,6 +54,7 @@ pytestmark = pytest.mark.integration
 _AGENT = "investment-research-agent-literature-live-smoke-test/1.0"
 _SECRET_EMAIL = "secret-contact@example.test"
 _SECRET_API_KEY = "secret-ncbi-api-key-12345"
+_SECRET_TOOL = "secret-tool-value"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -294,6 +295,78 @@ def test_offline_replay_of_a_corrupted_capture_is_reported_as_an_evidence_integr
     replay = live.analyze_capture(tmp_path)
     statuses = {f["status"] for f in replay["evidence_integrity_failures"]}
     assert "HASH_MISMATCH" in statuses
+
+
+# --- Phase 3F.1 correction 2 requirement 1: on_first_attempt marker timing,
+# against a REAL loopback server (not FakeHttpClient) ------------------------
+def test_on_first_attempt_fires_before_the_first_real_socket_attempt(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    assert Handler.state.get("counts", {}) == {}
+    result = client.get(f"{base_url}/entrez/eutils/esearch.fcgi?db=pubmed&term=x&retmode=json")
+    assert result.ok
+    assert events == ["callback"]
+    assert Handler.state["counts"] == {"/entrez/eutils/esearch.fcgi": 1}
+
+
+def test_on_first_attempt_fires_only_once_across_multiple_logical_requests(base_url):
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    client.get(f"{base_url}/entrez/eutils/esearch.fcgi?db=pubmed&term=x&retmode=json")
+    client.get(f"{base_url}/entrez/eutils/efetch.fcgi?db=pubmed&id=1&retmode=xml")
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_fires_even_though_the_request_then_fails(base_url):
+    """A definitive, non-OK outcome (404, here) still means the first real
+    socket-level attempt happened -- the callback already fired by the
+    time that outcome is known (Phase 3F.1 correction 2 requirement 1:
+    "sent, then failed" must never erase that a real attempt was made)."""
+    events: list[str] = []
+    client = _client(on_first_attempt=lambda: events.append("callback"))
+    result = client.get(f"{base_url}/does-not-exist")
+    assert result.outcome.value == "NOT_FOUND"
+    assert events == ["callback"]
+
+
+def test_on_first_attempt_raising_makes_zero_physical_attempts_and_zero_server_hits(base_url):
+    """If the callback itself raises (standing in for "the marker write
+    failed"), the real transport must make ZERO server hits -- proving
+    "HTTP communication must not begin" all the way down at the socket
+    level, not merely at some higher, mockable layer (Phase 3F.1
+    correction 2 requirement 1, test scenario (e))."""
+    def _boom() -> None:
+        raise OSError("simulated marker write failure")
+
+    client = _client(on_first_attempt=_boom)
+    with pytest.raises(OSError):
+        client.get(f"{base_url}/entrez/eutils/esearch.fcgi?db=pubmed&term=x&retmode=json")
+    assert Handler.state.get("counts", {}) == {}
+    assert client.attempts_made == 0
+    assert client.requests_made == 0
+
+
+# --- Phase 3F.1 correction 2 requirement 2: direct _cache inspection -------
+def test_real_client_cache_keys_never_contain_a_secret_value(base_url):
+    """Directly inspects AllowlistedHttpClient's own private ``_cache``
+    dict KEYS (not report.requested_urls, which is merely populated FROM
+    it) -- with literature_live_smoke's own stricter
+    ``additional_secret_query_params={"tool"}`` policy applied, exactly as
+    ``run_live_smoke`` configures it in production."""
+    client = _client(additional_secret_query_params=frozenset({"tool"}))
+    encoded_email = quote(_SECRET_EMAIL, safe="")
+    url = (
+        f"{base_url}/entrez/eutils/esearch.fcgi?db=pubmed&email={encoded_email}"
+        f"&api_key={_SECRET_API_KEY}&tool={_SECRET_TOOL}"
+    )
+    result = client.get(url)
+    assert result.ok
+    assert client._cache  # not empty -- there is something to inspect
+    for key in client._cache:
+        assert _SECRET_API_KEY not in key
+        assert _SECRET_EMAIL not in key
+        assert encoded_email not in key
+        assert _SECRET_TOOL not in key
 
 
 # --- Phase 3F.1 correction requirements 2 + 8: full orchestration over a
