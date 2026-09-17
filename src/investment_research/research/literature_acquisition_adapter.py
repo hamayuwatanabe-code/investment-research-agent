@@ -156,7 +156,17 @@ ALLOWED_HOSTS: frozenset[str] = frozenset(
 NCBI_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 NCBI_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-EUROPEPMC_FULLTEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{source}/{pmcid}/fullTextXML"
+#: Phase 3F.2 correction requirement 1: the real Europe PMC RESTful Web
+#: Service fullTextXML endpoint takes exactly ONE path segment after
+#: ``/rest/`` -- the PMCID itself (e.g.
+#: ``https://www.ebi.ac.uk/europepmc/webservices/rest/PMC2910600/fullTextXML``)
+#: -- never a ``{source}/{pmcid}`` two-segment path. The two-segment form
+#: was this module's own, never-live-tested guess; a real Phase 3F.2 Live
+#: Smoke run against a genuinely open-access PMCID (PMC2910600) returned
+#: HTTP 404 against it, confirming the mistake. Consolidated to this ONE
+#: constant, formatted at exactly ONE call site (``fetch_fulltext`` below)
+#: -- never duplicated or reconstructed elsewhere.
+EUROPEPMC_FULLTEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
 
 #: NCBI's own documented cap without an API key is 3 req/s -- this module's
 #: own default is deliberately more conservative (Phase 3F requirement 4).
@@ -188,6 +198,28 @@ DEFAULT_MAX_TOTAL_REQUESTS = MAX_REQUESTS_PER_RUN
 BUDGET_EXCEEDED_PREFIX = "BUDGET_EXCEEDED: "
 
 MIN_BODY_CHARS = 40
+
+#: Phase 3F.2 correction requirement 3: a STRUCTURED classification for
+#: every way ``EuropePmcFullTextAdapter.search``/``fetch_fulltext`` can
+#: fail to produce a result -- returned as an explicit 4th value from both
+#: methods, never left for a caller to infer by substring-matching the
+#: free-text ``failure_reason`` (which stays purely for a human to read).
+#: A bare ``FetchOutcome`` value (e.g. "NOT_FOUND"/"RATE_LIMITED"/
+#: "BLOCKED"/"TIMEOUT"/"ERROR") is also a valid ``failure_kind`` --  these
+#: four constants cover every failure mode that is NOT already a
+#: ``FetchOutcome`` (a transport-level exception, a 2xx response that did
+#: not parse, a budget exhaustion, and -- fulltext only -- a suspiciously
+#: short body).
+FAILURE_KIND_TRANSPORT_ERROR = "TRANSPORT_ERROR"
+FAILURE_KIND_MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
+FAILURE_KIND_BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+FAILURE_KIND_BODY_TOO_SHORT = "BODY_TOO_SHORT"
+#: fulltext only -- a 2xx response whose BODY does not match the expected
+#: JATS-like ``<article>`` shape. Distinct from
+#: ``FAILURE_KIND_MALFORMED_RESPONSE`` (search's own, unrelated failure
+#: mode) so a caller can tell "fetch failed" from "fetch succeeded, parse
+#: failed" apart (Phase 3F.2 correction requirement 3).
+FAILURE_KIND_PARSE_ERROR = "PARSE_ERROR"
 
 
 @dataclass(frozen=True)
@@ -461,12 +493,18 @@ class EuropePmcFullTextAdapter:
         #: never on ``self``.
         self.limits = limits if limits is not None else RequestBudgetLimits()
 
-    def search(self, pmid: str, context: ExecutionContext) -> tuple[EuropePmcSearchResult | None, int, str | None]:
-        """Returns ``(result, http_requests_made, failure_reason)``. Never
-        raises -- a malformed/failed search leaves OA status simply unknown
-        (never guessed ``True``). ``failure_reason`` is prefixed with
+    def search(
+        self, pmid: str, context: ExecutionContext
+    ) -> tuple[EuropePmcSearchResult | None, int, str | None, str | None]:
+        """Returns ``(result, http_requests_made, failure_reason,
+        failure_kind)``. Never raises -- a malformed/failed search leaves OA
+        status simply unknown (never guessed ``True``). ``failure_reason``
+        is a human-readable, sanitized string, prefixed with
         ``BUDGET_EXCEEDED_PREFIX`` when the search budget, not a real
-        transport failure, is why this did not run."""
+        transport failure, is why this did not run. ``failure_kind`` is the
+        SAME failure, structured (Phase 3F.2 correction requirement 3) --
+        see ``FAILURE_KIND_*``'s own module-level docstrings. ``(None,
+        None)`` for both exactly when a result was returned."""
         query = urlencode({"query": f"ext_id:{pmid} AND src:med", "format": "json"})
         wire_url = f"{EUROPEPMC_SEARCH_URL}?{query}"
         _require_allowed_host(wire_url)
@@ -475,31 +513,38 @@ class EuropePmcFullTextAdapter:
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
-                return None, 0, cached.failure_reason or "cached Europe PMC search failed"
+                kind = (cached.payload or {}).get("failure_kind")
+                return None, 0, cached.failure_reason or "cached Europe PMC search failed", kind
             results = parse_europepmc_search_response(cached.payload.get("body", ""))
-            return (results[0] if results else None), 0, None
+            if results is None:
+                return None, 0, f"malformed Europe PMC search response for PMID {pmid} (cached)", FAILURE_KIND_MALFORMED_RESPONSE
+            return (results[0] if results else None), 0, None, None
 
         usage = _budget_usage_for(context)
         if not usage.reserve_search(self.limits):
-            return None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC search budget exhausted for PMID {pmid}"
+            return (
+                None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC search budget exhausted for PMID {pmid}",
+                FAILURE_KIND_BUDGET_EXCEEDED,
+            )
 
         fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
         if transport_error is not None:
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
-                failure_reason=transport_error,
+                failure_reason=transport_error, payload={"failure_kind": FAILURE_KIND_TRANSPORT_ERROR},
             )
-            return None, 1, transport_error
+            return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR
         if not fetch.ok:
             failure = _sanitize_text(
                 f"Europe PMC search failed for PMID {pmid}: {fetch.outcome} {fetch.error}",
                 settings=self.settings, wire_url=wire_url, public_url=public_url,
             )
+            kind = fetch.outcome.value
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
-                failure_reason=failure,
+                failure_reason=failure, payload={"failure_kind": kind},
             )
-            return None, 1, failure
+            return None, 1, failure, kind
 
         results = parse_europepmc_search_response(fetch.text)
         context.request_cache[cache_key] = StepExecutionResult(
@@ -507,57 +552,65 @@ class EuropePmcFullTextAdapter:
             payload={"body": fetch.text}, http_requests_made=1,
         )
         if results is None:
-            return None, 1, f"malformed Europe PMC search response for PMID {pmid}"
-        return (results[0] if results else None), 1, None
+            return None, 1, f"malformed Europe PMC search response for PMID {pmid}", FAILURE_KIND_MALFORMED_RESPONSE
+        return (results[0] if results else None), 1, None, None
 
     def fetch_fulltext(
         self, pmcid: str, context: ExecutionContext
-    ) -> tuple[Document | None, int, str | None]:
+    ) -> tuple[Document | None, int, str | None, str | None]:
         """Only ever called by the caller after confirming OA/inEPMC --
         this method itself does not re-check that (single responsibility;
         the caller in ``PubMedLiteratureAdapter._fetch`` is the one place
         that decision is made, so it cannot be bypassed by a second code
-        path)."""
-        wire_url = EUROPEPMC_FULLTEXT_URL.format(source="PMC", pmcid=pmcid)
+        path). Returns ``(document, http_requests_made, failure_reason,
+        failure_kind)`` -- see ``search``'s own docstring for the general
+        shape; this method additionally uses ``FAILURE_KIND_BODY_TOO_SHORT``
+        and ``FAILURE_KIND_PARSE_ERROR`` (Phase 3F.2 correction
+        requirement 3)."""
+        wire_url = EUROPEPMC_FULLTEXT_URL.format(pmcid=pmcid)
         _require_allowed_host(wire_url)
         public_url = _public_request_url(wire_url)
         cache_key = f"http_get:{public_url}"
         cached = context.request_cache.get(cache_key)
         if cached is not None:
             if cached.status is not StepStatus.BODY_FETCHED:
-                return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed"
+                kind = (cached.payload or {}).get("failure_kind")
+                return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed", kind
             text = cached.payload.get("text", "")
         else:
             usage = _budget_usage_for(context)
             if not usage.reserve_fulltext(self.limits):
                 return None, 0, (
                     f"{BUDGET_EXCEEDED_PREFIX}Europe PMC full-text fetch budget exhausted for PMCID {pmcid}"
-                )
+                ), FAILURE_KIND_BUDGET_EXCEEDED
             fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
             if transport_error is not None:
                 context.request_cache[cache_key] = StepExecutionResult(
                     step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
                     http_requests_made=1, failure_reason=transport_error,
+                    payload={"failure_kind": FAILURE_KIND_TRANSPORT_ERROR},
                 )
-                return None, 1, transport_error
+                return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR
             if not fetch.ok:
                 failure = _sanitize_text(
                     f"Europe PMC full-text fetch failed for {pmcid}: {fetch.outcome} {fetch.error}",
                     settings=self.settings, wire_url=wire_url, public_url=public_url,
                 )
+                kind = fetch.outcome.value
                 context.request_cache[cache_key] = StepExecutionResult(
                     step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
-                    http_requests_made=1, failure_reason=failure,
+                    http_requests_made=1, failure_reason=failure, payload={"failure_kind": kind},
                 )
-                return None, 1, failure
+                return None, 1, failure, kind
             text = fetch.text
             if len(text.strip()) < MIN_BODY_CHARS:
                 failure = "Europe PMC full-text response body too short to be real full text"
                 context.request_cache[cache_key] = StepExecutionResult(
                     step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
                     http_requests_made=1, failure_reason=failure,
+                    payload={"failure_kind": FAILURE_KIND_BODY_TOO_SHORT},
                 )
-                return None, 1, failure
+                return None, 1, failure, FAILURE_KIND_BODY_TOO_SHORT
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.BODY_FETCHED,
                 payload={"text": text}, http_requests_made=1,
@@ -567,7 +620,7 @@ class EuropePmcFullTextAdapter:
         if parsed is None or not parsed.sections:
             return None, (0 if cached is not None else 1), (
                 "Europe PMC full-text body did not match the expected JATS-like <article> shape"
-            )
+            ), FAILURE_KIND_PARSE_ERROR
         # public_url only -- this is a genuine Europe PMC URL, never a wire
         # URL carrying NCBI courtesy params (Europe PMC calls never do), but
         # routed through the same public_url variable for consistency and
@@ -580,7 +633,7 @@ class EuropePmcFullTextAdapter:
             content_kind=ContentKind.FULL_DOCUMENT, provenance=Provenance.LIVE,
             retrieved_at=utc_now_iso(), authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
         )
-        return document, (0 if cached is not None else 1), None
+        return document, (0 if cached is not None else 1), None, None
 
 
 class PubMedLiteratureAdapter:
@@ -908,22 +961,54 @@ class PubMedLiteratureAdapter:
         total_epmc_reqs = 0
         budget_skipped_europepmc_search_pmids: list[str] = []
         budget_skipped_fulltext_pmcids: list[str] = []
+        # Phase 3F.2 correction requirement 2/3: a GENUINE (non-budget)
+        # Europe PMC search/fulltext failure must never be silently
+        # discarded -- a real Live Smoke run against PMID 20668659 found
+        # exactly this: Europe PMC search correctly reported
+        # isOpenAccess=true/inEPMC=true, but the (then-malformed-URL)
+        # fullTextXML fetch 404'd, and that 404 vanished entirely (not
+        # even recorded in this step's own payload) because only the
+        # BUDGET_EXCEEDED case was ever captured here. Both dicts below are
+        # keyed by pmid, structured (pmcid/stage/kind/reason -- never a
+        # free-text sentence a caller must substring-match), and flow
+        # straight into this step's payload untouched.
+        europepmc_search_failures: dict[str, dict[str, str]] = {}
+        europepmc_fulltext_failures: dict[str, dict[str, str]] = {}
         for pmid, article in articles.items():
-            search_result, search_reqs, search_failure = self.europepmc.search(pmid, context)
+            search_result, search_reqs, search_failure, search_kind = self.europepmc.search(pmid, context)
             total_epmc_reqs += search_reqs
             if search_result is None:
-                if search_failure and search_failure.startswith(BUDGET_EXCEEDED_PREFIX):
+                if search_kind == FAILURE_KIND_BUDGET_EXCEEDED:
                     budget_skipped_europepmc_search_pmids.append(pmid)
+                elif search_failure:
+                    europepmc_search_failures[pmid] = {
+                        "stage": "search", "kind": search_kind or "UNKNOWN", "reason": search_failure,
+                    }
                 continue
             fulltext_document = None
             if article.pmcid != UNKNOWN and search_result.is_open_access and search_result.in_epmc:
-                fulltext_document, fetch_reqs, fetch_failure = self.europepmc.fetch_fulltext(
+                fulltext_document, fetch_reqs, fetch_failure, fetch_kind = self.europepmc.fetch_fulltext(
                     article.pmcid, context
                 )
                 total_epmc_reqs += fetch_reqs
-                if fulltext_document is None and fetch_failure and fetch_failure.startswith(BUDGET_EXCEEDED_PREFIX):
-                    budget_skipped_fulltext_pmcids.append(article.pmcid)
+                if fulltext_document is None and fetch_failure:
+                    if fetch_kind == FAILURE_KIND_BUDGET_EXCEEDED:
+                        budget_skipped_fulltext_pmcids.append(article.pmcid)
+                    else:
+                        stage = "fulltext_parse" if fetch_kind == FAILURE_KIND_PARSE_ERROR else "fulltext_fetch"
+                        europepmc_fulltext_failures[pmid] = {
+                            "pmcid": article.pmcid, "stage": stage,
+                            "kind": fetch_kind or "UNKNOWN", "reason": fetch_failure,
+                        }
             europepmc_by_pmid[pmid] = {
+                # Only ever an entry here because search_result is not None
+                # above -- i.e. this key's mere presence already means
+                # Europe PMC search genuinely succeeded for this pmid;
+                # carried explicitly (not left implicit) so a caller like
+                # live_verified_candidates never has to reverse-engineer it
+                # from is_open_access/in_epmc, which are real, successfully-
+                # parsed values EVEN WHEN both are False.
+                "search_succeeded": True,
                 "search_result": search_result, "fulltext_document": fulltext_document,
             }
 
@@ -967,6 +1052,15 @@ class PubMedLiteratureAdapter:
             and not budget_excluded_pmids
             and not budget_skipped_europepmc_search_pmids
             and not budget_skipped_fulltext_pmcids
+            # Phase 3F.2 correction requirement 2: a genuine provider
+            # failure is exactly as much an incompleteness as a budget
+            # skip -- "we asked for full text and did not get it" must
+            # never read as coverage_complete=True just because the reason
+            # was a 404 rather than running out of budget. The distinct
+            # REASON (provider failure vs. budget) stays visible via the
+            # two separate dicts below -- never collapsed into one signal.
+            and not europepmc_search_failures
+            and not europepmc_fulltext_failures
         )
         return StepExecutionResult(
             step_id=step.step_id, status=StepStatus.BODY_FETCHED,
@@ -978,9 +1072,12 @@ class PubMedLiteratureAdapter:
                 "budget_excluded_pmids": budget_excluded_pmids,
                 "budget_skipped_europepmc_search_pmids": budget_skipped_europepmc_search_pmids,
                 "budget_skipped_fulltext_pmcids": budget_skipped_fulltext_pmcids,
+                "europepmc_search_failures": europepmc_search_failures,
+                "europepmc_fulltext_failures": europepmc_fulltext_failures,
                 "coverage_complete": coverage_complete,
                 "europepmc": {
                     pmid: {
+                        "search_succeeded": v["search_succeeded"],
                         "is_open_access": v["search_result"].is_open_access,
                         "in_epmc": v["search_result"].in_epmc,
                         "license": v["search_result"].license,
@@ -1025,6 +1122,7 @@ class PubMedLiteratureAdapter:
                     "retracted": article.is_retracted,
                     "is_correction_or_erratum": article.is_correction_or_erratum,
                     "nct_ids": list(article.nct_ids),
+                    "europepmc_search_succeeded": epmc_entry.get("search_succeeded", False),
                     "europepmc_is_open_access": epmc_entry.get("is_open_access", False),
                     "europepmc_in_epmc": epmc_entry.get("in_epmc", False),
                     "europepmc_license": epmc_entry.get("license", ""),
@@ -1053,6 +1151,11 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "EUROPEPMC_FULLTEXT_URL",
     "EUROPEPMC_SEARCH_URL",
+    "FAILURE_KIND_BODY_TOO_SHORT",
+    "FAILURE_KIND_BUDGET_EXCEEDED",
+    "FAILURE_KIND_MALFORMED_RESPONSE",
+    "FAILURE_KIND_PARSE_ERROR",
+    "FAILURE_KIND_TRANSPORT_ERROR",
     "LITERATURE_ADAPTER_ID",
     "MAX_PMIDS_PER_BATCH",
     "MAX_REQUESTS_PER_RUN",

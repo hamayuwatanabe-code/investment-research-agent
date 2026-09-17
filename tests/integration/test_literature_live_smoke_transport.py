@@ -81,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"resultList": {"result": [{"pmid": "90000008", "pmcid": "PMC9990008", "isOpenAccess": "Y", "inEPMC": "Y"}]}}
                 ).encode(),
             )
-        elif path == "/europepmc/webservices/rest/PMC/PMC9990008/fullTextXML":
+        elif path == "/europepmc/webservices/rest/PMC9990008/fullTextXML":
             self._send(200, _FULLTEXT_BODY.encode())
         elif path == "/redirect-to-disallowed-server":
             self._redirect(
@@ -227,7 +227,7 @@ def test_capture_then_offline_replay_classifies_every_request_kind(base_url, tmp
     esearch_url = f"{base_url}/entrez/eutils/esearch.fcgi?db=pubmed&term=NCT09990001%5Bsi%5D&retmode=json&retmax=3&tool=t&email={_SECRET_EMAIL}"
     efetch_url = f"{base_url}/entrez/eutils/efetch.fcgi?db=pubmed&id=90000008&retmode=xml&tool=t&email={_SECRET_EMAIL}"
     epmc_search_url = f"{base_url}/europepmc/webservices/rest/search?query=ext_id%3A90000008+AND+src%3Amed&format=json"
-    epmc_fulltext_url = f"{base_url}/europepmc/webservices/rest/PMC/PMC9990008/fullTextXML"
+    epmc_fulltext_url = f"{base_url}/europepmc/webservices/rest/PMC9990008/fullTextXML"
 
     for url in (esearch_url, efetch_url, epmc_search_url, epmc_fulltext_url):
         result = client.get(url)
@@ -369,6 +369,70 @@ def test_real_client_cache_keys_never_contain_a_secret_value(base_url):
         assert _SECRET_TOOL not in key
 
 
+# --- Phase 3F.2 correction requirements 5 + 6: failed-response Capture
+# Manifest + offline replay, over a REAL loopback 404 ------------------------
+def test_a_real_404_fulltext_response_is_captured_and_offline_replay_reports_it(base_url, tmp_path):
+    """Literature Live Smoke's own opt-in (save_failed_responses=True):
+    a fullTextXML 404 -- this run's own real-world finding -- gets an
+    offline-auditable Capture Manifest, never a silent absence. The
+    manifest is VERIFIED (Evidence Integrity is about "does the body
+    match its own manifest", never "did the acquisition succeed") while
+    analyze_capture's own per-entry result explicitly reports
+    http_status=404, parsed_ok=False, acquisition_failed=True."""
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    # An unregistered PMCID -- the loopback Handler's fallback branch
+    # returns a plain 404 with no body, exactly like a real Europe PMC
+    # 404 for a PMCID this test never registered a success response for.
+    result = client.get(f"{base_url}/europepmc/webservices/rest/PMC0000000/fullTextXML")
+    assert not result.ok
+    assert result.status == 404
+
+    manifests = list(tmp_path.glob("*.manifest.json"))
+    assert len(manifests) == 1
+
+    replay = live.analyze_capture(tmp_path)
+    assert replay["found"] is True
+    assert replay["evidence_integrity_failures"] == []  # VERIFIED, not corrupted
+    assert len(replay["europepmc_fulltext"]) == 1
+    entry = replay["europepmc_fulltext"][0]
+    assert entry["http_status"] == 404
+    assert entry["parsed_ok"] is False
+    assert entry["acquisition_failed"] is True
+    assert entry["capture_manifest_status"] == "VERIFIED"
+    assert entry["section_count"] == 0
+
+
+def test_a_corrupted_failed_capture_is_still_an_evidence_integrity_failure(base_url, tmp_path):
+    """A saved failed-response body that is later tampered with is still
+    caught as an Evidence Integrity failure -- the same guarantee a
+    successful capture already had, now extended to a failed one (Phase
+    3F.2 correction requirement 6: corrupted body/manifest stays an
+    Evidence Integrity failure regardless of http_status)."""
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    result = client.get(f"{base_url}/europepmc/webservices/rest/PMC0000001/fullTextXML")
+    assert not result.ok
+    assert result.status == 404
+
+    import hashlib
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    body_path = tmp_path / f"{digest}.bin"
+    body_path.write_bytes(b"tampered-after-capture")
+
+    replay = live.analyze_capture(tmp_path)
+    statuses = {f["status"] for f in replay["evidence_integrity_failures"]}
+    assert statuses  # non-empty -- a real integrity failure was detected
+    assert statuses <= {"HASH_MISMATCH", "CONTENT_LENGTH_MISMATCH"}
+
+
+def test_timeout_never_produces_a_capture_even_with_save_failed_responses(tmp_path):
+    client = _client(out_dir=tmp_path, save_failed_responses=True, timeout=1.0)
+    result = client.get("http://127.0.0.1:1/unreachable")
+    assert not result.ok
+    assert result.status is None
+    assert list(tmp_path.glob("*.manifest.json")) == []
+
+
 # --- Phase 3F.1 correction requirements 2 + 8: full orchestration over a
 # real loopback server, PLUS the comprehensive secret-non-leakage sweep ----
 def test_run_live_smoke_full_orchestration_and_secret_sweep_over_a_real_loopback_server(base_url, tmp_path, monkeypatch):
@@ -387,7 +451,7 @@ def test_run_live_smoke_full_orchestration_and_secret_sweep_over_a_real_loopback
     monkeypatch.setattr(adapter_module, "NCBI_EFETCH_URL", f"{base_url}/entrez/eutils/efetch.fcgi")
     monkeypatch.setattr(adapter_module, "EUROPEPMC_SEARCH_URL", f"{base_url}/europepmc/webservices/rest/search")
     monkeypatch.setattr(
-        adapter_module, "EUROPEPMC_FULLTEXT_URL", f"{base_url}/europepmc/webservices/rest/{{source}}/{{pmcid}}/fullTextXML",
+        adapter_module, "EUROPEPMC_FULLTEXT_URL", f"{base_url}/europepmc/webservices/rest/{{pmcid}}/fullTextXML",
     )
     # literature_live_smoke.py imported ALLOWED_HOSTS into its OWN
     # namespace (`from .literature_acquisition_adapter import ALLOWED_HOSTS`)

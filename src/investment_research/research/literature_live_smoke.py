@@ -421,9 +421,32 @@ class LiveSmokeReport:
     budget_excluded_pmids: list[str] = field(default_factory=list)
     budget_skipped_europepmc_search_pmids: list[str] = field(default_factory=list)
     budget_skipped_fulltext_pmcids: list[str] = field(default_factory=list)
-    #: Diagnostic only -- this phase never promotes anything, so this is
-    #: always empty in practice; kept for structural parity with
-    #: sec/clinicaltrials/form4's own Live Smoke reports.
+    #: A GENUINE (non-budget) Europe PMC search/fulltext-fetch/fulltext-
+    #: parse failure -- structured (never free text a caller must
+    #: substring-match), sanitized, one entry per failure. Distinct from
+    #: the two ``budget_skipped_*`` fields above: those mean "we chose not
+    #: to ask"; this means "we asked and the provider said no" (Phase
+    #: 3F.2 correction requirement 3 -- a real Live Smoke run against PMID
+    #: 20668659 found this exact case: Europe PMC search succeeded
+    #: (isOpenAccess=true, inEPMC=true) but the fullTextXML fetch 404'd,
+    #: and that 404 was previously never recorded anywhere in this report
+    #: at all). Each entry: ``{"pmid": str, "pmcid": str | None, "stage":
+    #: "search" | "fulltext_fetch" | "fulltext_parse", "kind": str,
+    #: "reason": str}`` -- ``kind`` is a bare ``FetchOutcome`` value or one
+    #: of ``literature_acquisition_adapter.FAILURE_KIND_*``, never inferred
+    #: from ``reason``'s free text.
+    europepmc_failures: list[dict[str, Any]] = field(default_factory=list)
+    #: Every entry reflects a step that ACTUALLY made (or, for a targeted
+    #: ct_pmid PMID, genuinely did not need to make) a real network call
+    #: this run -- never inferred from a target reaching ACQUIRED alone
+    #: (Phase 3F.2 correction requirement 4: targeted mode's own LOCATE
+    #: resolves synthetically, zero requests, and must never appear here;
+    #: a Europe PMC fulltext 404 -- this run's own real-world finding --
+    #: must never appear as a fulltext-success candidate either). Still
+    #: diagnostic only: this phase never promotes anything, and this
+    #: module's own internal graph (``_build_graph``) marks every step
+    #: OFFLINE_VERIFIED, never LIVE_VERIFIED, regardless of what this list
+    #: contains.
     live_verified_candidates: list[str] = field(default_factory=list)
     anthropic_api_calls: int = 0
     web_search_calls: int = 0
@@ -729,6 +752,13 @@ def run_live_smoke(
         # module's own in-memory diagnostics.
         additional_secret_query_params=frozenset({"tool"}),
         on_first_attempt=on_first_attempt,
+        # Literature's own opt-in (Phase 3F.2 correction requirement 5):
+        # SEC/ClinicalTrials/Form4 all keep the shared client's default
+        # (False) unchanged. A failed-but-responded Europe PMC/NCBI
+        # request (404/429/5xx) is still worth an offline-auditable
+        # Capture Manifest -- this run's own real finding (a genuine
+        # fullTextXML 404) would otherwise leave no on-disk trace at all.
+        save_failed_responses=True,
     )
 
     graph = _build_graph()
@@ -784,6 +814,7 @@ def run_live_smoke(
                             ),
                             "retracted": bool(doc.get("retracted", False)),
                             "is_correction_or_erratum": bool(doc.get("is_correction_or_erratum", False)),
+                            "europepmc_search_succeeded": bool(doc.get("europepmc_search_succeeded", False)),
                             "europepmc_is_open_access": bool(doc.get("europepmc_is_open_access", False)),
                             "europepmc_in_epmc": bool(doc.get("europepmc_in_epmc", False)),
                             "full_text_acquired": bool(doc.get("full_text_acquired", False)),
@@ -791,6 +822,37 @@ def run_live_smoke(
                             "document_authority": stored.document.authority.value if stored else None,
                             "document_content_kind": stored.document.content_kind.value if stored else None,
                         }
+                    )
+                # Only ever processed for "p" (the final step): "f"'s own
+                # payload carries the SAME two dicts (via **upstream
+                # passthrough), so extracting them at every step_result
+                # would double-report each failure. Every reachable state
+                # where these dicts are non-empty already implies "f"
+                # reached BODY_FETCHED (a genuine PubMed EFetch success --
+                # these Europe PMC calls only ever happen AFTER that), so
+                # "p" always runs too (Phase 3F.2 correction requirement 3).
+                for pmid, info in (payload.get("europepmc_search_failures") or {}).items():
+                    reason = _scrub_credentials(str(info.get("reason", "")), secret_values)
+                    report.europepmc_failures.append(
+                        {
+                            "pmid": pmid, "pmcid": None, "stage": info.get("stage", "search"),
+                            "kind": info.get("kind", "UNKNOWN"), "reason": reason,
+                        }
+                    )
+                    report.errors.append(
+                        _scrub_credentials(f"europepmc search failed for PMID {pmid}: {reason}", secret_values)
+                    )
+                for pmid, info in (payload.get("europepmc_fulltext_failures") or {}).items():
+                    reason = _scrub_credentials(str(info.get("reason", "")), secret_values)
+                    stage = info.get("stage", "fulltext_fetch")
+                    pmcid = info.get("pmcid")
+                    report.europepmc_failures.append(
+                        {"pmid": pmid, "pmcid": pmcid, "stage": stage, "kind": info.get("kind", "UNKNOWN"), "reason": reason}
+                    )
+                    report.errors.append(
+                        _scrub_credentials(
+                            f"europepmc {stage} failed for PMID {pmid} (PMCID {pmcid}): {reason}", secret_values
+                        )
                     )
             if step_result.status in (
                 StepStatus.FAILED, StepStatus.NOT_FOUND, StepStatus.ZERO_RESULTS, StepStatus.SKIPPED_DUE_TO_BUDGET,
@@ -802,11 +864,44 @@ def run_live_smoke(
                     )
                 )
 
+    # Every candidate below reflects a step that ACTUALLY made a real
+    # network call this run (Phase 3F.2 correction requirement 4) -- never
+    # derived from a target's overall ACQUIRED outcome, which is agnostic
+    # to whether a given step needed the network at all (targeted mode's
+    # own LOCATE) or whether a bundled sub-operation inside FETCH/PARSE
+    # (Europe PMC search/fulltext) genuinely succeeded.
     for target_report in execution_report.target_reports:
-        if target_report.outcome.value == "ACQUIRED":
-            report.live_verified_candidates.extend(
-                f"{target_report.target_id}:{r.step_id}" for r in target_report.step_results
-            )
+        step_by_id = {r.step_id: r for r in target_report.step_results}
+        l1 = step_by_id.get("l1")
+        if l1 is not None and l1.status is StepStatus.URL_RESOLVED and l1.http_requests_made > 0:
+            # A real NCBI ESearch call (discovery/alias mode, priority B/C)
+            # -- never targeted ct_pmid mode's priority A, which resolves
+            # synthetically with zero requests.
+            report.live_verified_candidates.append(f"{target_report.target_id}:l1:pubmed_esearch")
+        f = step_by_id.get("f")
+        if f is not None and f.status is StepStatus.BODY_FETCHED:
+            # BODY_FETCHED requires the batched PubMed EFetch to have
+            # succeeded -- true regardless of Europe PMC's own outcome, so
+            # this candidate is PubMed-scoped only; it is never extended to
+            # imply Europe PMC search/fulltext also succeeded.
+            report.live_verified_candidates.append(f"{target_report.target_id}:f:pubmed_efetch")
+        p = step_by_id.get("p")
+        if p is not None and p.status is StepStatus.PARSED:
+            report.live_verified_candidates.append(f"{target_report.target_id}:p:pubmed_parse")
+
+    target_id = "target_lit_smoke"
+    for article_entry in report.articles:
+        pmid = article_entry.get("pmid")
+        if article_entry.get("europepmc_search_succeeded"):
+            report.live_verified_candidates.append(f"{target_id}:europepmc_search:{pmid}")
+        if article_entry.get("full_text_acquired"):
+            # Only ever True when fetch_fulltext_document_id was actually
+            # set -- i.e. Europe PMC's fullTextXML fetch AND parse both
+            # genuinely succeeded this run. A 404/429/5xx/timeout/
+            # connection-error/malformed-body result (this run's own real
+            # finding, PMID 20668659 -> PMC2910600 -> 404) never reaches
+            # this branch (Phase 3F.2 correction requirement 4).
+            report.live_verified_candidates.append(f"{target_id}:europepmc_fulltext:{pmid}")
     return report
 
 
@@ -859,6 +954,7 @@ def format_report_for_print(report: LiveSmokeReport, *, secrets: list[str]) -> s
     lines.append(f"budget_excluded_pmids: {report.budget_excluded_pmids}")
     lines.append(f"budget_skipped_europepmc_search_pmids: {report.budget_skipped_europepmc_search_pmids}")
     lines.append(f"budget_skipped_fulltext_pmcids: {report.budget_skipped_fulltext_pmcids}")
+    lines.append(f"europepmc_failures: {report.europepmc_failures}")
     lines.append(f"articles ({len(report.articles)}) -- structural metadata only, never abstract/full-text body:")
     for a in report.articles:
         lines.append(f"  {json.dumps(a)}")
@@ -909,6 +1005,7 @@ def report_to_jsonable(report: LiveSmokeReport) -> dict[str, Any]:
         "budget_excluded_pmids": report.budget_excluded_pmids,
         "budget_skipped_europepmc_search_pmids": report.budget_skipped_europepmc_search_pmids,
         "budget_skipped_fulltext_pmcids": report.budget_skipped_fulltext_pmcids,
+        "europepmc_failures": report.europepmc_failures,
         "live_verified_candidates": report.live_verified_candidates,
         "anthropic_api_calls": report.anthropic_api_calls,
         "web_search_calls": report.web_search_calls,
@@ -998,6 +1095,15 @@ def analyze_capture(capture_dir: Path) -> dict[str, Any]:
             "http_status": manifest.http_status,
             "capture_retrieved_at": manifest.capture_retrieved_at,
             "capture_manifest_status": manifest_result.status.value,
+            # Explicit and structural (HTTP-status-based), never inferred
+            # from parsed_ok alone -- distinguishes "the manifest/body pair
+            # is trustworthy" (capture_manifest_status == VERIFIED, an
+            # Evidence Integrity question) from "the acquisition itself
+            # succeeded" (this field, an entirely different question). A
+            # VERIFIED manifest for a 404 capture is completely normal and
+            # is NOT an Evidence Integrity failure (Phase 3F.2 correction
+            # requirement 6) -- it just also has acquisition_failed=True.
+            "acquisition_failed": manifest.http_status is None or manifest.http_status >= 400,
         }
 
         if kind == "esearch":

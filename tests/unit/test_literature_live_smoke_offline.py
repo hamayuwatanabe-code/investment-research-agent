@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 from urllib.parse import urlencode
 
+import pytest
+
 from investment_research.research import literature_live_smoke as live
 from investment_research.research.capture_manifest import (
     CAPTURE_MANIFEST_SCHEMA_VERSION,
@@ -874,6 +876,182 @@ def test_live_verified_candidates_are_diagnostic_only_never_promoted():
     assert not any(step.implementation_status is ImplementationStatus.LIVE_VERIFIED for step in graph.steps)
 
 
+# --- Phase 3F.2 correction: OA fulltext failure is never silently
+# reported as success -------------------------------------------------------
+def test_fulltext_404_never_reported_as_completed_status():
+    """A real Live Smoke run against PMID 20668659 found exactly this:
+    Europe PMC search succeeded (isOpenAccess=true, inEPMC=true), but the
+    fullTextXML fetch 404'd, and the run was reported status=COMPLETED,
+    coverage_complete=true, errors=[] -- silently dropping the failure.
+    This must never happen again."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert report.status is not live.LiveSmokeStatus.COMPLETED
+    assert report.status is live.LiveSmokeStatus.FAILED
+    assert report.coverage_complete is False
+    assert report.errors  # never []
+    assert any("90000008" in e for e in report.errors)
+    assert any("fulltext" in e.lower() for e in report.errors)
+
+
+def test_fulltext_failure_preserves_the_structured_europepmc_failures_field():
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert len(report.europepmc_failures) == 1
+    entry = report.europepmc_failures[0]
+    assert entry["pmid"] == "90000008"
+    assert entry["pmcid"] == "PMC9990008"
+    assert entry["stage"] == "fulltext_fetch"
+    assert entry["kind"] == FetchOutcome.NOT_FOUND.value
+    assert entry["reason"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [FetchOutcome.NOT_FOUND, FetchOutcome.RATE_LIMITED, FetchOutcome.ERROR, FetchOutcome.BLOCKED],
+)
+def test_fulltext_failure_modes_all_set_coverage_incomplete_and_non_completed_status(outcome):
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.failed(outcome, f"{outcome.value} 999"),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert report.coverage_complete is False
+    assert report.status is not live.LiveSmokeStatus.COMPLETED
+    assert report.europepmc_failures[0]["kind"] == outcome.value
+
+
+def test_fulltext_timeout_and_connection_error_also_reported_never_silent():
+    """RaisingHttpClient raises for every .get() call -- including PubMed's
+    own EFetch -- exercising the "no HTTP response at all" case (timeout/
+    connection error) end to end through run_live_smoke()."""
+    http = RaisingHttpClient()
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert report.status is not live.LiveSmokeStatus.COMPLETED
+    assert report.errors
+
+
+def test_fulltext_malformed_xml_reported_as_parse_error_kind():
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.ok("<garbage>not a real JATS article</garbage>"),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert report.europepmc_failures[0]["kind"] == "PARSE_ERROR"
+    assert report.europepmc_failures[0]["stage"] == "fulltext_parse"
+    assert report.coverage_complete is False
+
+
+def test_pubmed_success_survives_a_fulltext_failure_partial_result():
+    """The PubMed excerpt's own successful acquisition must never be lost
+    just because Europe PMC's full text failed -- report.articles still
+    carries the pmid's full structural metadata."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert len(report.articles) == 1
+    article = report.articles[0]
+    assert article["pmid"] == "90000008"
+    assert article["europepmc_search_succeeded"] is True
+    assert article["europepmc_is_open_access"] is True
+    assert article["europepmc_in_epmc"] is True
+    assert article["full_text_acquired"] is False
+    assert article["document_id"] is not None  # the PubMed Document was still stored
+
+
+def test_search_failure_vs_fulltext_failure_are_distinct_stages():
+    """provider failure と budget skip の区別、および search failure と
+    fulltext failure の区別を同時に確認する."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            _epmc_search_url("90000001"): fx.failed(FetchOutcome.ERROR, "500"),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert report.europepmc_failures[0]["stage"] == "search"
+    assert report.budget_skipped_europepmc_search_pmids == []
+    assert report.coverage_complete is False
+
+
+# --- Phase 3F.2 correction requirement 4: live_verified_candidates scoped
+# to what actually made a real network call this run ------------------------
+def test_targeted_mode_never_includes_locate_in_live_verified_candidates():
+    """Targeted (ct_pmid) mode's own LOCATE resolves synthetically -- ZERO
+    NCBI ESearch requests -- so it must never appear as a live-verified
+    candidate."""
+    http = FakeHttpClient(responses={_efetch_wire_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    report = live.run_live_smoke(mode="targeted", pmid="90000001", http_client=http, env=_ENV)
+    assert not any(":l1:" in c for c in report.live_verified_candidates)
+    assert any(":f:pubmed_efetch" in c for c in report.live_verified_candidates)
+    assert any(":p:pubmed_parse" in c for c in report.live_verified_candidates)
+
+
+def test_discovery_mode_locate_is_a_live_verified_candidate():
+    """Discovery mode's LOCATE DOES make a real NCBI ESearch call, so it
+    correctly appears as a live-verified candidate -- the fix excludes
+    ONLY the zero-request targeted ct_pmid path, never a genuine ESearch."""
+    http = FakeHttpClient(responses=_discovery_responses("NCT09990001", ["90000007"], "nct_id_present.xml"))
+    report = live.run_live_smoke(mode="discovery", nct_id="NCT09990001", http_client=http, env=_ENV)
+    assert any(":l1:pubmed_esearch" in c for c in report.live_verified_candidates)
+
+
+def test_fulltext_404_never_appears_as_a_fulltext_success_candidate():
+    """This run's own real finding: a fullTextXML 404 must never surface
+    as a europepmc_fulltext live-verified candidate."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert not any("europepmc_fulltext" in c for c in report.live_verified_candidates)
+    # Europe PMC SEARCH did genuinely succeed, though -- that candidate is
+    # still correctly present, distinguishing the two sub-operations.
+    assert any("europepmc_search" in c for c in report.live_verified_candidates)
+
+
+def test_fulltext_success_is_its_own_distinct_live_verified_candidate():
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV)
+    assert any("europepmc_fulltext:90000008" in c for c in report.live_verified_candidates)
+    assert any("europepmc_search:90000008" in c for c in report.live_verified_candidates)
+    assert any(":f:pubmed_efetch" in c for c in report.live_verified_candidates)
+    assert any(":p:pubmed_parse" in c for c in report.live_verified_candidates)
+    assert not any(":l1:" in c for c in report.live_verified_candidates)
+
+
 def test_no_id_is_hardcoded_as_a_default_anywhere():
     import inspect
 
@@ -1142,16 +1320,23 @@ def test_budget_skip_never_reported_as_not_found_status():
     proven not to emit a NOT_FOUND error string elsewhere); this test
     additionally confirms the overall status still reflects COMPLETED
     (never FAILED) when the only "error-shaped" entries are budget skips
-    reported through coverage_complete, not report.errors."""
+    reported through coverage_complete, not report.errors. Europe PMC
+    search for the one article that DOES get processed must itself
+    succeed here (Phase 3F.2 correction requirement 2: an unregistered/
+    404 Europe PMC search URL is now correctly reported as a genuine
+    search failure, which WOULD legitimately mention NOT_FOUND -- this
+    test isolates the budget-skip-only scenario from that, unrelated,
+    case)."""
     http = FakeHttpClient(
         responses={
             _esearch_wire_url("NCT09990022[si]"): fx.ok(fx.esearch_response(["90000015", "90000016"])),
             _efetch_wire_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
-            _epmc_search_url("90000015"): fx.not_found(),
+            _epmc_search_url("90000015"): fx.ok(fx.fixture_text("europepmc_search_non_oa.json")),
         }
     )
     report = live.run_live_smoke(mode="discovery", nct_id="NCT09990022", max_articles=1, http_client=http, env=_ENV)
     assert report.coverage_complete is False
+    assert report.europepmc_failures == []
     assert not any("NOT_FOUND" in e for e in report.errors)
 
 
@@ -1517,4 +1702,25 @@ def test_recursive_sweep_successful_oa_fulltext_acquisition():
     report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV_WITH_KEY)
     assert report.status is live.LiveSmokeStatus.COMPLETED
     assert report.articles and report.articles[0]["full_text_acquired"] is True
+    _assert_report_carries_no_secret_or_body(report, env=_ENV_WITH_KEY)
+
+
+def test_recursive_sweep_oa_search_success_then_fulltext_404_with_every_secret():
+    """Phase 3F.2 correction: the NEW report.europepmc_failures field (and
+    the report.errors entries this scenario adds) must be just as clean as
+    every other field the recursive sweep already covers -- exercised with
+    every credential configured, over an UNSANITIZED FakeHttpClient, in
+    exactly this run's own real-world shape (search succeeds, fulltext
+    404s)."""
+    http = FakeHttpClient(
+        responses={
+            _efetch_wire_url(["90000008"], env=_ENV_WITH_KEY): fx.ok(fx.fixture_text("ids_complete.xml")),
+            _epmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            _epmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report = live.run_live_smoke(mode="targeted", pmid="90000008", http_client=http, env=_ENV_WITH_KEY)
+    assert report.status is not live.LiveSmokeStatus.COMPLETED
+    assert report.europepmc_failures  # non-empty -- there is something to sweep
+    assert report.errors
     _assert_report_carries_no_secret_or_body(report, env=_ENV_WITH_KEY)

@@ -15,6 +15,10 @@ from investment_research.research.checks import SubjectScope
 from investment_research.research.document_store import DocumentStore
 from investment_research.research.literature_acquisition_adapter import (
     ALLOWED_HOSTS,
+    EUROPEPMC_FULLTEXT_URL,
+    FAILURE_KIND_BODY_TOO_SHORT,
+    FAILURE_KIND_PARSE_ERROR,
+    FAILURE_KIND_TRANSPORT_ERROR,
     LITERATURE_ADAPTER_ID,
     LiteratureReference,
     PubMedLiteratureAdapter,
@@ -34,7 +38,12 @@ from investment_research.research.source_routing import (
     TargetAcquisitionOutcome,
     TargetKind,
 )
-from investment_research.schemas.enums import ContentKind, DocumentAuthority, ResearchDomain
+from investment_research.schemas.enums import (
+    ContentKind,
+    DocumentAuthority,
+    FetchOutcome,
+    ResearchDomain,
+)
 
 from . import _literature_fixture_support as fx
 
@@ -316,6 +325,198 @@ def test_non_open_access_never_marked_full_text_acquired_and_no_fulltext_fetch()
     assert not any("fullTextXML" in u for u in http.requested_urls)
 
 
+# --- Phase 3F.2 correction requirement 1: fullTextXML URL shape ------------
+def test_europepmc_fulltext_url_is_the_real_single_segment_shape():
+    """A real Live Smoke run against a genuinely open-access PMCID
+    (PMC2910600) 404'd against the OLD, two-segment
+    {source}/{pmcid}/fullTextXML path -- the real Europe PMC RESTful Web
+    Service takes exactly one path segment (the PMCID itself)."""
+    assert EUROPEPMC_FULLTEXT_URL == "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+    assert "{source}" not in EUROPEPMC_FULLTEXT_URL
+    assert (
+        fx.europepmc_fulltext_url("PMC2910600")
+        == "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC2910600/fullTextXML"
+    )
+
+
+def test_no_fixture_file_contains_the_real_identifiers_from_the_confirmed_live_run():
+    """Requirement: never add the real PMID/PMCID a confirmed Live Smoke
+    run actually used (20668659 / PMC2910600) into a fixture -- test only
+    with synthetic IDs (the PMC999#### / 9000#### convention this fixture
+    set already establishes). Scans every fixture file actually on disk,
+    rather than checking one hand-picked string, so a future fixture
+    addition is covered automatically."""
+    for path in fx.FIXTURE_DIR.glob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert "PMC2910600" not in text, f"real PMCID leaked into fixture {path.name}"
+        assert "20668659" not in text, f"real PMID leaked into fixture {path.name}"
+
+
+# --- Phase 3F.2 correction requirement 2/3: Europe PMC fulltext failure ----
+# is never silently swallowed -- structured, sanitized, and coverage_complete
+# is set False, while the PubMed abstract/excerpt success is preserved.
+def test_fulltext_404_is_reported_structured_never_silently_dropped():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.not_found(),
+        }
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.payload["coverage_complete"] is False
+    failures = fetch.payload["europepmc_fulltext_failures"]
+    assert list(failures.keys()) == ["90000008"]
+    entry = failures["90000008"]
+    assert entry["pmcid"] == "PMC9990008"
+    assert entry["stage"] == "fulltext_fetch"
+    assert entry["kind"] == FetchOutcome.NOT_FOUND.value
+    assert "reason" in entry and entry["reason"]
+    # PubMed's own success is never lost -- the article is still fetched
+    # and parsed, it simply carries no full-text document.
+    parsed = _by_step_prefix(report, 0, "p_").payload["parsed_documents"][0]
+    assert parsed["pmid"] == "90000008"
+    assert parsed["full_text_acquired"] is False
+    assert parsed["europepmc_search_succeeded"] is True
+    assert parsed["europepmc_fulltext_document_id"] is None
+    assert fetch.status is StepStatus.BODY_FETCHED  # never FAILED -- PubMed itself succeeded
+
+
+@pytest.mark.parametrize(
+    "outcome,expected_kind",
+    [
+        (FetchOutcome.NOT_FOUND, FetchOutcome.NOT_FOUND.value),
+        (FetchOutcome.RATE_LIMITED, FetchOutcome.RATE_LIMITED.value),
+        (FetchOutcome.ERROR, FetchOutcome.ERROR.value),
+        (FetchOutcome.BLOCKED, FetchOutcome.BLOCKED.value),
+    ],
+)
+def test_fulltext_fetch_failure_kinds_are_structured_not_free_text(outcome, expected_kind):
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.failed(outcome, f"{outcome.value} 999"),
+        }
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    entry = fetch.payload["europepmc_fulltext_failures"]["90000008"]
+    assert entry["kind"] == expected_kind
+
+
+class _RaisesOnlyForUrl:
+    """A minimal transport double that raises ConnectionError for exactly
+    ONE URL and otherwise delegates to a real FakeHttpClient -- lets a test
+    isolate a transport-level exception to a single request (e.g. only the
+    Europe PMC fulltext fetch) while every other call in the SAME run
+    still succeeds normally, which RaisingHttpClient (raises for every
+    call) cannot exercise."""
+
+    def __init__(self, raises_for_url: str, responses: dict) -> None:
+        self._raises_for_url = raises_for_url
+        self._delegate = fx.FakeHttpClient(responses=responses)
+
+    def get(self, url, **kwargs):
+        self._delegate.requested_urls.append(url)
+        if url == self._raises_for_url:
+            raise ConnectionError(f"simulated connection error for {url}")
+        return self._delegate.responses.get(url, fx.not_found())
+
+    @property
+    def requested_urls(self):
+        return self._delegate.requested_urls
+
+
+def test_fulltext_transport_exception_reported_as_transport_error_kind():
+    """A connection-level exception (never an HTTP response at all) during
+    the Europe PMC fulltext fetch specifically -- PubMed EFetch and Europe
+    PMC search both still succeed -- is classified
+    FAILURE_KIND_TRANSPORT_ERROR, distinct from any FetchOutcome value
+    (which requires an actual HTTP response)."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    fulltext_url = fx.europepmc_fulltext_url("PMC9990008")
+    http = _RaisesOnlyForUrl(
+        raises_for_url=fulltext_url,
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+        },
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.status is StepStatus.BODY_FETCHED  # PubMed itself still succeeded
+    entry = fetch.payload["europepmc_fulltext_failures"]["90000008"]
+    assert entry["kind"] == FAILURE_KIND_TRANSPORT_ERROR
+    assert entry["stage"] == "fulltext_fetch"
+
+
+def test_fulltext_malformed_xml_reported_as_parse_error_not_fetch_failure():
+    """A 2xx Europe PMC response whose body does NOT match the expected
+    JATS-like <article> shape is a PARSE failure, structurally distinct
+    from a fetch-level failure (404/429/5xx/timeout/transport error) --
+    Phase 3F.2 correction requirement 3's "distinguish fetch failure from
+    parse failure"."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok("<not-jats-at-all>this is not a real article body</not-jats-at-all>"),
+        }
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    entry = fetch.payload["europepmc_fulltext_failures"]["90000008"]
+    assert entry["kind"] == FAILURE_KIND_PARSE_ERROR
+    assert entry["stage"] == "fulltext_parse"
+    parsed = _by_step_prefix(report, 0, "p_").payload["parsed_documents"][0]
+    assert parsed["full_text_acquired"] is False
+
+
+def test_fulltext_body_too_short_reported_structured():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok("too short"),
+        }
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    entry = fetch.payload["europepmc_fulltext_failures"]["90000008"]
+    assert entry["kind"] == FAILURE_KIND_BODY_TOO_SHORT
+
+
+def test_search_failure_is_reported_structured_and_distinct_from_budget_skip():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.failed(FetchOutcome.ERROR, "500"),
+        }
+    )
+    report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
+    fetch = _by_step_prefix(report, 0, "f_")
+    assert fetch.payload["coverage_complete"] is False
+    assert fetch.payload["budget_skipped_europepmc_search_pmids"] == []  # not a budget skip
+    entry = fetch.payload["europepmc_search_failures"]["90000001"]
+    assert entry["kind"] == FetchOutcome.ERROR.value
+    assert entry["stage"] == "search"
+
+
 def test_pubmed_abstract_document_is_never_full_document_content_kind():
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
@@ -449,14 +650,28 @@ def test_zero_fulltext_budget_skips_europepmc_fetch_but_article_still_acquired()
 
 
 def test_default_budgets_never_trigger_on_ordinary_single_article_run():
-    """The default caps never interfere with normal, small-scale usage."""
+    """The default caps never interfere with normal, small-scale usage.
+    Registers a real (non-OA) Europe PMC search response too -- Phase 3F.2
+    correction requirement 2 means an UNREGISTERED Europe PMC search URL
+    now correctly counts as a genuine (non-budget) provider failure and
+    sets coverage_complete=False, so a test asserting "ordinary, complete
+    run" must make Europe PMC search actually succeed, not rely on that
+    failure being silently swallowed (the very bug this correction
+    fixes)."""
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(fx.fixture_text("europepmc_search_non_oa.json")),
+        }
+    )
     report, store, _ = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
     parse = _by_step_prefix(report, 0, "p_")
     assert parse.payload["coverage_complete"] is True
     assert parse.payload["budget_excluded_pmids"] == []
+    assert parse.payload["europepmc_search_failures"] == {}
+    assert parse.payload["europepmc_fulltext_failures"] == {}
 
 
 # --- external LLM / Pipeline isolation ----------------------------------------

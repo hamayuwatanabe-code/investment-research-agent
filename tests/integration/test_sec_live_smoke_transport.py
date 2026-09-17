@@ -110,6 +110,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif path == "/error-with-body":
+            # Phase 3F.2 correction requirement 5: a 404 whose error BODY
+            # echoes the request back (path + full query string, secrets
+            # included) -- mirrors a real API's own error page naming the
+            # URL/params it could not satisfy.
+            body = json.dumps({"error": "not found", "path": self.path}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -743,3 +754,95 @@ def test_5xx_retry_then_success_reports_correct_physical_attempts(base_url):
     assert result.attempts == 3
     assert client.attempts_made == 3
     assert client.requests_made == 1
+
+
+# --- save_failed_responses (Phase 3F.2 correction requirement 5) -----------
+# Generic to AllowlistedHttpClient -- SEC/ClinicalTrials/Form4 all keep the
+# default (False) unchanged; Literature Live Smoke's own opt-in usage is
+# exercised in tests/integration/test_literature_live_smoke_transport.py.
+def test_save_failed_responses_default_false_never_saves_a_failed_response(base_url, tmp_path):
+    client = _client(out_dir=tmp_path)  # save_failed_responses defaults False
+    result = client.get(f"{base_url}/always-500")
+    assert not result.ok
+    assert list(tmp_path.glob("*.manifest.json")) == []
+    assert list(tmp_path.glob("*.bin")) == []
+
+
+def test_save_failed_responses_true_saves_a_404_body_and_manifest(base_url, tmp_path):
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    result = client.get(f"{base_url}/error-with-body")
+    assert not result.ok
+    assert result.status == 404
+    manifests = list(tmp_path.glob("*.manifest.json"))
+    assert len(manifests) == 1
+    import hashlib
+
+    from investment_research.research.capture_manifest import read_manifest
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    body_path = tmp_path / f"{digest}.bin"
+    assert body_path.is_file()
+    saved_body = body_path.read_bytes()
+    read_result = read_manifest(tmp_path, digest, body=saved_body)
+    assert read_result.status.value == "VERIFIED"
+    assert read_result.manifest.http_status == 404
+    assert read_result.manifest.content_length == len(saved_body)
+    assert read_result.manifest.content_hash == hashlib.sha256(saved_body).hexdigest()
+
+
+def test_save_failed_responses_true_scrubs_secret_values_from_the_saved_body_raw_and_percent_encoded(base_url, tmp_path):
+    """The loopback server's own /error-with-body echoes the full request
+    path -- including the query string -- back in its 404 body. The
+    SAVED body must never carry the secret value, raw or percent-encoded,
+    even though the server genuinely received and echoed it (proven via
+    Handler.last_raw_path, mirroring the existing wire-level proof
+    pattern in this file)."""
+    secret_api_key = "SECRET-ERROR-BODY-KEY-12345"
+    encoded_email = "secret-body-contact%40example.test"
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    url = f"{base_url}/error-with-body?api_key={secret_api_key}&email={encoded_email}"
+    result = client.get(url)
+    assert not result.ok
+    assert result.status == 404
+
+    import hashlib
+
+    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
+    body_path = tmp_path / f"{digest}.bin"
+    saved_text = body_path.read_text(encoding="utf-8")
+    assert secret_api_key not in saved_text
+    assert encoded_email not in saved_text
+    assert "secret-body-contact" not in saved_text
+    manifest_text = (tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8")
+    assert secret_api_key not in manifest_text
+    assert encoded_email not in manifest_text
+
+
+def test_save_failed_responses_true_still_saves_nothing_for_a_timeout(tmp_path):
+    """A timeout/connection error never produces an HTTP response at all
+    (result.status stays None) -- distinct from a 404/429/5xx, and must
+    never be saved even with save_failed_responses=True."""
+    client = _client(out_dir=tmp_path, save_failed_responses=True, timeout=1.0, max_retries=0)
+    result = client.get("http://127.0.0.1:1/unreachable")
+    assert not result.ok
+    assert result.status is None
+    assert list(tmp_path.glob("*.manifest.json")) == []
+
+
+def test_save_failed_responses_true_never_changes_successful_capture_behavior(base_url, tmp_path):
+    """A genuinely OK response's saved body/manifest is byte-for-byte the
+    same regardless of save_failed_responses -- the flag only ever adds
+    NEW captures (for failed-but-responded requests), never changes an
+    existing successful one."""
+    client_a = _client(out_dir=tmp_path / "a")
+    client_b = _client(out_dir=tmp_path / "b", save_failed_responses=True)
+    result_a = client_a.get(f"{base_url}/ok")
+    result_b = client_b.get(f"{base_url}/ok")
+    assert result_a.body == result_b.body
+
+    import hashlib
+
+    digest = hashlib.sha256(result_a.url.encode()).hexdigest()[:24]
+    body_a = (tmp_path / "a" / f"{digest}.bin" if not str(result_a.url).endswith(".json") else tmp_path / "a" / f"{digest}.json")
+    body_b = (tmp_path / "b" / f"{digest}.bin" if not str(result_b.url).endswith(".json") else tmp_path / "b" / f"{digest}.json")
+    assert body_a.read_bytes() == body_b.read_bytes()

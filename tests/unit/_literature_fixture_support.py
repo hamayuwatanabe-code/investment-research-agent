@@ -45,7 +45,7 @@ def europepmc_search_url(pmid: str) -> str:
 
 
 def europepmc_fulltext_url(pmcid: str) -> str:
-    return EUROPEPMC_FULLTEXT_URL.format(source="PMC", pmcid=pmcid)
+    return EUROPEPMC_FULLTEXT_URL.format(pmcid=pmcid)
 
 
 def esearch_response(pmids: list[str]) -> str:

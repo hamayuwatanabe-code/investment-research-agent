@@ -272,6 +272,38 @@ def _strip_extra_params(url: str, extra_param_names: frozenset[str]) -> str:
     return prefix + ("?" + "&".join(kept) if kept else "")
 
 
+def _stripped_query_values(wire_url: str, public_url: str) -> list[str]:
+    """The VALUES of every query parameter present in ``wire_url`` but
+    absent from ``public_url`` -- exactly what ``_sanitize_url``/
+    ``_strip_extra_params`` removed to compute ``public_url`` in the first
+    place (email/api_key always; ``tool``/etc. when a caller's own
+    ``additional_secret_query_params`` configures it). Used to scrub a
+    response BODY (never a URL, which is already sanitized by
+    construction) of the same secret values, in case a failed response
+    echoes the request back -- an API error page naming the URL/params it
+    could not satisfy (Phase 3F.2 correction requirement 5)."""
+    wire_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(wire_url).query))
+    public_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(public_url).query))
+    return [value for name, value in wire_query.items() if public_query.get(name) != value]
+
+
+def _scrub_body_of_secrets(body: bytes, secret_values: list[str]) -> bytes:
+    """Value-based redaction over raw bytes (never decoded/re-encoded, so
+    this can never corrupt a binary body it doesn't otherwise touch) --
+    catches a secret value whether it appears raw or percent-encoded in an
+    error response's own text (Phase 3F.2 correction requirement 5)."""
+    for value in secret_values:
+        if not value:
+            continue
+        raw = value.encode("utf-8", errors="ignore")
+        if raw:
+            body = body.replace(raw, b"[REDACTED]")
+        encoded = urllib.parse.quote(value, safe="").encode("utf-8", errors="ignore")
+        if encoded and encoded != raw:
+            body = body.replace(encoded, b"[REDACTED]")
+    return body
+
+
 @dataclass
 class AllowlistedHttpClient:
     """A minimal, purpose-built, read-only GET client for this smoke test
@@ -311,6 +343,20 @@ class AllowlistedHttpClient:
     #: callback itself raises, that exception propagates uncaught and NO
     #: socket attempt is made this call.
     on_first_attempt: Callable[[], None] | None = None
+    #: Opt-in, empty/``False`` by default (every existing SEC/ClinicalTrials/
+    #: Form4 caller keeps its exact current behaviour: a captured body is
+    #: only ever saved for a genuinely OK response). When ``True``, a
+    #: response that carries a real HTTP status but was NOT ok (404/429/
+    #: 403/407/5xx) is ALSO saved -- body plus Capture Manifest -- so an
+    #: offline ``analyze_capture`` can audit a failed acquisition, not just
+    #: a successful one (Phase 3F.2 correction requirement 5). Literature
+    #: Live Smoke sets this ``True``; a request with NO HTTP response at
+    #: all (timeout, connection error, a pre-send host-allowlist refusal)
+    #: is never saved either way -- there is no response to save, and
+    #: ``result.status is None`` for every one of those outcomes, which
+    #: ``get()`` checks explicitly rather than trying to infer "no
+    #: response" from ``outcome`` alone.
+    save_failed_responses: bool = False
     out_dir: Path | None = None
     #: Which live-smoke module this client belongs to ("sec" /
     #: "clinicaltrials") -- recorded in each capture's manifest so a shared
@@ -419,8 +465,14 @@ class AllowlistedHttpClient:
         result = self._get_with_retry(url, public_url=public_url)
         self._requests_made += 1
         self._cache[public_url] = result
-        if self.out_dir is not None and result.ok:
-            self._save_response(public_url, result)
+        # result.status is not None exactly when a real HTTP response was
+        # actually received (404/429/403/407/5xx all set it; a timeout,
+        # connection error, or pre-send/redirect host-allowlist refusal
+        # never does) -- this is what distinguishes "an HTTP response
+        # exists to audit" from "there is nothing to capture" (Phase 3F.2
+        # correction requirement 5), never outcome alone.
+        if self.out_dir is not None and (result.ok or (self.save_failed_responses and result.status is not None)):
+            self._save_response(public_url, result, wire_url=url)
         return result
 
     def _get_with_retry(self, url: str, *, public_url: str) -> FetchResult:
@@ -502,13 +554,26 @@ class AllowlistedHttpClient:
                 )
         except urllib.error.HTTPError as exc:
             status = int(exc.code)
+            # Only read/keep the error response BODY when a caller has
+            # opted in (Phase 3F.2 correction requirement 5) -- every
+            # existing SEC/ClinicalTrials/Form4 caller leaves this
+            # ``b""``, byte-for-byte identical to before this was added.
+            # Reading is best-effort: a stream that cannot be read/
+            # decompressed simply leaves the body empty, never raises.
+            error_body = b""
+            if self.save_failed_responses:
+                with contextlib.suppress(OSError, ValueError, AttributeError):
+                    error_body = exc.read()
+                    if exc.headers is not None and exc.headers.get("Content-Encoding") == "gzip":
+                        with contextlib.suppress(OSError):
+                            error_body = gzip.decompress(error_body)
             if status == 404:
-                return FetchResult(url=public_url, outcome=FetchOutcome.NOT_FOUND, status=status, attempts=attempt, error=f"HTTP {status}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.NOT_FOUND, status=status, body=error_body, attempts=attempt, error=f"HTTP {status}")
             if status == 429:
-                return FetchResult(url=public_url, outcome=FetchOutcome.RATE_LIMITED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.RATE_LIMITED, status=status, body=error_body, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
             if status in (403, 407):
-                return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
-            return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, status=status, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+                return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, status=status, body=error_body, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
+            return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, status=status, body=error_body, attempts=attempt, error=f"HTTP {status}: {exc.reason}")
         except HostAllowlistError as exc:
             return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
         except TooManyRedirectsError as exc:
@@ -519,7 +584,7 @@ class AllowlistedHttpClient:
             error = _strip_wire_url(f"{type(exc).__name__}: {exc}", url, public_url)
             return FetchResult(url=public_url, outcome=FetchOutcome.ERROR, attempts=attempt, error=error)
 
-    def _save_response(self, public_url: str, result: FetchResult) -> None:
+    def _save_response(self, public_url: str, result: FetchResult, *, wire_url: str = "") -> None:
         """Body bytes, plus a Capture Manifest recording the real UTC
         retrieval time -- never headers (which could echo request metadata)
         and never the User-Agent/API key/email (Phase 3C requirement 29,
@@ -530,7 +595,18 @@ class AllowlistedHttpClient:
         reaching the same logical resource with a different secret value
         (e.g. a rotated api_key) still produces the same capture filename
         and manifest, rather than a spurious duplicate keyed off the
-        secret."""
+        secret.
+
+        For a NON-ok result saved under ``save_failed_responses`` (Phase
+        3F.2 correction requirement 5), the body is additionally scrubbed
+        of every secret value ``wire_url`` carried that ``public_url``
+        does not -- an error page can echo the request (URL, email, tool,
+        api_key) back verbatim, and that must never reach disk. The
+        manifest's own ``content_hash``/``content_length`` are computed
+        from the body actually written (post-scrub), so a later
+        ``read_manifest`` verifies correctly against what is really on
+        disk. A successful (``result.ok``) response is never scrubbed --
+        unchanged from every prior phase."""
         assert self.out_dir is not None
         digest = hashlib.sha256(public_url.encode()).hexdigest()[:24]
         suffix = (
@@ -538,8 +614,11 @@ class AllowlistedHttpClient:
             else (".htm" if public_url.endswith((".htm", ".html")) or "index.htm" in public_url else ".bin")
         )
         path = self.out_dir / f"{digest}{suffix}"
+        body = result.body
+        if not result.ok and self.save_failed_responses and wire_url:
+            body = _scrub_body_of_secrets(body, _stripped_query_values(wire_url, public_url))
         with contextlib.suppress(OSError):
-            path.write_bytes(result.body)
+            path.write_bytes(body)
         with contextlib.suppress(OSError):
             manifest = CaptureManifest(
                 schema_version=CAPTURE_MANIFEST_SCHEMA_VERSION,
@@ -551,8 +630,8 @@ class AllowlistedHttpClient:
                 # out_dir's name, a file's mtime, or anything the caller
                 # supplies later (Phase 3D.4 requirements 1/7).
                 capture_retrieved_at=utc_now_iso(),
-                content_hash=compute_content_hash(result.body),
-                content_length=len(result.body),
+                content_hash=compute_content_hash(body),
+                content_length=len(body),
             )
             write_manifest(self.out_dir, digest, manifest)
 
