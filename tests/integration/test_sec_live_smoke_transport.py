@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -36,6 +37,31 @@ pytestmark = pytest.mark.integration
 _AGENT = "investment-research-agent-test smoke-test-contact@example.test"
 
 
+def _echo_fields(path: str, user_agent: str = "") -> dict:
+    """Every encoding the fail-closed detection gate (Phase 3F.2
+    correction 3 requirement 1/2) must catch, computed from the
+    wire-received ``path`` (query string included) -- the raw wire form,
+    the decoded/raw values, a server-recomputed ``quote_plus()``
+    rendition, and a server-recomputed rendition whose percent-escapes are
+    lowercased -- plus the received User-Agent header (never present in a
+    URL/query at all). Shared by every echo route so each one exercises
+    the full encoding sweep, not just whichever encoding the CLIENT
+    happened to send."""
+    query = path.split("?", 1)[1] if "?" in path else ""
+    decoded = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+    return {
+        "path": path,  # exactly as received on the wire
+        "raw_query": query,
+        "decoded_query": decoded,
+        "quote_plus_query": {k: urllib.parse.quote_plus(v) for k, v in decoded.items()},
+        "lowercase_percent_query": {
+            k: re.sub(r"%[0-9A-Fa-f]{2}", lambda m: m.group(0).lower(), urllib.parse.quote(v, safe=""))
+            for k, v in decoded.items()
+        },
+        "user_agent": user_agent,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -43,6 +69,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/ok" or path.startswith("/ok/"):
+            # Records the RAW request line, like /echo/-secrets do, but
+            # (deliberately, unlike them) never echoes it into the BODY --
+            # /ok is this file's "a real query-string secret was sent, but
+            # the response body itself says nothing about it" control, used
+            # by tests that are about requested_url/manifest sanitization,
+            # never about the fail-closed credential-echo rejection gate.
+            Handler.last_raw_path = self.path
             body = json.dumps({"ok": True, "path": path}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -114,51 +147,92 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/error-with-body":
             # Phase 3F.2 correction requirement 5: a 404 whose error BODY
             # echoes the request back (path + full query string, secrets
-            # included, RAW and percent-encoded, plus the received
-            # User-Agent header) -- mirrors a real API's own error page
-            # naming the URL/params/client it could not satisfy.
+            # included, in every encoding Phase 3F.2 correction 3
+            # requirement 1 checks, plus the received User-Agent header) --
+            # mirrors a real API's own error page naming the URL/params/
+            # client it could not satisfy.
             Handler.last_raw_path = self.path
-            body = json.dumps(
-                {
-                    "error": "not found",
-                    "path": self.path,  # as received on the wire (percent-encoded)
-                    "decoded_path": urllib.parse.unquote(self.path),  # raw/decoded form
-                    "user_agent": self.headers.get("User-Agent", ""),
-                }
-            ).encode()
+            fields = _echo_fields(self.path, self.headers.get("User-Agent", ""))
+            body = json.dumps({**fields, "error": "not found"}).encode()
             self.send_response(404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         elif path == "/echo-secrets":
-            # Phase 3F.2 correction 2 requirement 3: a genuinely SUCCESSFUL
-            # (200) response that echoes everything a secret-scrubbing
-            # pass must catch -- the wire-encoded query string, its
-            # decoded/raw form, and the received User-Agent header (which
-            # never appears in a URL at all). Records the RAW path too
-            # (like /echo), so a test can independently prove the server
-            # really did receive the secret before checking it was scrubbed.
+            # Phase 3F.2 correction 2 requirement 3 / correction 3
+            # requirement 1: a genuinely SUCCESSFUL (200) response that
+            # echoes everything the fail-closed detection gate must catch,
+            # in every encoding it checks. Records the RAW path too (like
+            # /echo), so a test can independently prove the server really
+            # did receive the secret before checking the response was
+            # rejected.
             Handler.last_raw_path = self.path
-            body = json.dumps(
-                {
-                    "raw_query": self.path.split("?", 1)[1] if "?" in self.path else "",
-                    "decoded_query": urllib.parse.unquote(self.path),
-                    "user_agent": self.headers.get("User-Agent", ""),
-                }
-            ).encode()
+            body = json.dumps(_echo_fields(self.path, self.headers.get("User-Agent", ""))).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif path == "/echo-secret-in-header":
+            # Phase 3F.2 correction 3 requirement 1/4: the secret is
+            # echoed ONLY in a response HEADER (raw and percent-encoded
+            # variants) -- the body itself says nothing -- isolating the
+            # header-inspection half of the fail-closed detection gate
+            # from the body-inspection half.
+            Handler.last_raw_path = self.path
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            decoded = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            for key, value in decoded.items():
+                self.send_header(f"X-Echo-{key}", value)
+                self.send_header(f"X-Echo-{key}-Encoded", urllib.parse.quote(value, safe=""))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/error-with-secret-reason":
+            # Phase 3F.2 correction 3 requirement 1/4: the secret is
+            # echoed ONLY in the HTTP error reason phrase (never the
+            # body, never a header) -- urllib.error.HTTPError.reason is
+            # populated from exactly this, so this isolates the
+            # error-text half of the detection gate. Deliberately a 500,
+            # not a 404: ``_do_get``'s existing 404 branch never folds
+            # ``exc.reason`` into ``FetchResult.error`` at all (by design,
+            # predating this correction), so a 404 here would give the
+            # detection gate nothing to see; the default (ERROR) branch
+            # does include ``exc.reason``.
+            Handler.last_raw_path = self.path
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            decoded = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+            secret_val = decoded.get("api_key", "")
+            self.send_response(500, f"Internal Error: {secret_val}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif path == "/redirect-to-allowed-404":
             # Phase 3F.2 correction 2 requirement 4: a redirect to an
             # ALLOWED-host target that itself then 404s -- the final_url a
             # Capture Manifest records must reflect THIS target, not the
-            # original pre-redirect URL.
+            # original pre-redirect URL. /error-with-body always echoes
+            # the User-Agent, so THIS route's own response is now always
+            # rejected by the fail-closed gate -- see
+            # /redirect-to-allowed-404-no-echo for the "normal failed
+            # redirect, final_url still tracked" case, and
+            # /redirect-to-echo-secrets for the "redirect target's
+            # response is rejected" case.
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/error-with-body")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/redirect-to-allowed-404-no-echo":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/genuinely-not-found-no-echo")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/redirect-to-echo-secrets":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/echo-secrets")
             self.send_header("Content-Length", "0")
             self.end_headers()
         else:
@@ -514,10 +588,13 @@ def test_capture_manifest_never_contains_a_secret_query_param(base_url, tmp_path
     not simply never sending the value). The capture filename's own digest
     is derived from the PUBLIC (sanitized) url, not the wire url, so it is
     computed here from result.url -- never a hash of the secret-bearing
-    request url itself."""
+    request url itself. Uses /ok (never /echo): /ok's own BODY never
+    echoes the query string, so this test stays about requested_url/
+    manifest sanitization specifically, never triggering the separate
+    fail-closed credential-echo rejection gate (Phase 3F.2 correction 3)."""
     secret = "topsecret-manifest-value"
     client = _client(out_dir=tmp_path, source="sec")
-    url = f"{base_url}/echo?api_key={secret}&x=1"
+    url = f"{base_url}/ok?api_key={secret}&x=1"
     result = client.get(url)
     assert result.ok
     assert secret in Handler.last_raw_path  # the server DID receive it
@@ -542,14 +619,15 @@ def test_capture_filename_digest_is_derived_from_the_public_url_not_the_wire_url
     """Two requests to the SAME logical (public) resource, differing only
     in secret query parameter VALUES, must produce the SAME capture
     filename/digest -- never two spurious duplicate captures keyed off the
-    secret (Phase 3F.1 correction requirement 1)."""
+    secret (Phase 3F.1 correction requirement 1). Uses /ok, not /echo: see
+    test_capture_manifest_never_contains_a_secret_query_param's own note."""
     client_a = _client(out_dir=tmp_path, source="sec")
-    url_a = f"{base_url}/echo?api_key=secret-value-one&x=1"
+    url_a = f"{base_url}/ok?api_key=secret-value-one&x=1"
     result_a = client_a.get(url_a)
     assert result_a.ok
 
     client_b = _client(out_dir=tmp_path, source="sec")
-    url_b = f"{base_url}/echo?api_key=secret-value-two&x=1"
+    url_b = f"{base_url}/ok?api_key=secret-value-two&x=1"
     result_b = client_b.get(url_b)
     assert result_b.ok
 
@@ -678,10 +756,11 @@ def test_cache_is_stable_across_different_secret_values_for_the_same_public_url(
     """Two requests to the SAME logical resource, differing only in a
     secret query parameter's VALUE, must be recognized as the same entry
     for caching/dedup -- the second is a cache hit, not a second real GET,
-    and only ONE capture is ever written to disk."""
+    and only ONE capture is ever written to disk. Uses /ok, not /echo: see
+    test_capture_manifest_never_contains_a_secret_query_param's own note."""
     client = _client(out_dir=tmp_path, max_requests=1)
-    first = client.get(f"{base_url}/echo?api_key=secret-value-one&x=1")
-    second = client.get(f"{base_url}/echo?api_key=secret-value-two&x=1")
+    first = client.get(f"{base_url}/ok?api_key=secret-value-one&x=1")
+    second = client.get(f"{base_url}/ok?api_key=secret-value-two&x=1")
     assert first.ok and second.ok
     assert second.from_cache
     assert client.requests_made == 1
@@ -809,8 +888,13 @@ def test_save_failed_responses_default_false_never_saves_a_failed_response(base_
 
 
 def test_save_failed_responses_true_saves_a_404_body_and_manifest(base_url, tmp_path):
+    """A plain 404 with NOTHING echoed in it (unlike /error-with-body,
+    which always echoes the User-Agent and so always triggers the
+    fail-closed rejection gate -- see the dedicated rejection tests below)
+    -- proving save_failed_responses=True's ordinary capture path still
+    works for a ordinary provider failure."""
     client = _client(out_dir=tmp_path, save_failed_responses=True)
-    result = client.get(f"{base_url}/error-with-body")
+    result = client.get(f"{base_url}/genuinely-not-found-no-echo")
     assert not result.ok
     assert result.status == 404
     manifests = list(tmp_path.glob("*.manifest.json"))
@@ -830,32 +914,25 @@ def test_save_failed_responses_true_saves_a_404_body_and_manifest(base_url, tmp_
     assert read_result.manifest.content_hash == hashlib.sha256(saved_body).hexdigest()
 
 
-def test_save_failed_responses_true_scrubs_secret_values_from_the_saved_body_raw_and_percent_encoded(base_url, tmp_path):
-    """The loopback server's own /error-with-body echoes the full request
-    path -- including the query string -- back in its 404 body. The
-    SAVED body must never carry the secret value, raw or percent-encoded,
-    even though the server genuinely received and echoed it (proven via
-    Handler.last_raw_path, mirroring the existing wire-level proof
-    pattern in this file)."""
+def test_save_failed_responses_true_never_saves_a_credential_echoing_404_at_all(base_url, tmp_path):
+    """Phase 3F.2 correction 3 requirement 2 superseded the OLD behavior
+    this test used to verify (scrub the echoed secret and save it anyway):
+    the loopback server's own /error-with-body echoes the full request
+    path back in its 404 body, so this response is now REJECTED outright
+    -- never saved as a Capture at all, successful or failed. See the
+    dedicated fail-closed rejection test suite below for the full sweep;
+    this test specifically confirms save_failed_responses=True does not
+    override the rejection."""
     secret_api_key = "SECRET-ERROR-BODY-KEY-12345"
     encoded_email = "secret-body-contact%40example.test"
     client = _client(out_dir=tmp_path, save_failed_responses=True)
     url = f"{base_url}/error-with-body?api_key={secret_api_key}&email={encoded_email}"
     result = client.get(url)
     assert not result.ok
-    assert result.status == 404
-
-    import hashlib
-
-    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
-    body_path = tmp_path / f"{digest}.bin"
-    saved_text = body_path.read_text(encoding="utf-8")
-    assert secret_api_key not in saved_text
-    assert encoded_email not in saved_text
-    assert "secret-body-contact" not in saved_text
-    manifest_text = (tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8")
-    assert secret_api_key not in manifest_text
-    assert encoded_email not in manifest_text
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert result.error == "response rejected because it echoed request credentials"
+    assert list(tmp_path.glob("*.manifest.json")) == []
+    assert list(tmp_path.glob("*.bin")) == []
 
 
 def test_save_failed_responses_true_still_saves_nothing_for_a_timeout(tmp_path):
@@ -888,137 +965,172 @@ def test_save_failed_responses_true_never_changes_successful_capture_behavior(ba
     assert body_a.read_bytes() == body_b.read_bytes()
 
 
-# --- Phase 3F.2 correction 2: sanitize the response body BEFORE caching ----
-# requirement 1: one sanitize point (immediately after _get_with_retry
-# returns, before self._cache[public_url] = result), not a second,
-# save-time-only one -- result.body, the cached value's own body, the
-# saved capture, and every downstream parser/Document all see the SAME
-# already-sanitized bytes.
+# --- Phase 3F.2 correction 3: fail-closed credential-echo rejection --------
+# requirement 1/2: the WHOLE FetchResult (body, header names/values, error
+# text, requested/final URL, cache key) is inspected for a secret value --
+# email/api_key/tool/User-Agent, raw/quote()/quote_plus()/lowercase-percent
+# -- immediately after _get_with_retry returns, before it is cached,
+# returned, saved, or handed to any parser/adapter. A positive hit DISCARDS
+# the entire response (never redacts-and-continues): outcome=BLOCKED, body
+# and headers empty, a FIXED secret-free error, status/attempts/elapsed_ms
+# preserved. A response with NO secret in it is returned completely
+# untouched -- not even a byte-identical reallocation (requirement 3).
 def _all_secret_forms(value: str) -> list[str]:
-    import urllib.parse as _up
-
-    return [value, _up.quote(value, safe=""), _up.quote_plus(value, safe="")]
+    return [value, urllib.parse.quote(value, safe=""), urllib.parse.quote_plus(value, safe="")]
 
 
-def test_cache_stores_a_sanitized_body_not_the_raw_wire_response(base_url):
-    """Directly inspects AllowlistedHttpClient's own private _cache VALUE
-    (its .body, not merely result.body returned to the caller) -- proving
-    the cached copy itself is sanitized, not only what happens to be
-    handed back this one time."""
-    secret_api_key = "cache-secret-api-key-777"
-    secret_email = "cache-secret-contact@example.test"
-    client = _client()
-    url = f"{base_url}/echo-secrets?api_key={secret_api_key}&email={urllib.parse.quote(secret_email, safe='')}"
-    result = client.get(url)
-    assert result.ok
-
-    cached = client._cache[result.url]
-    cached_text = cached.body.decode("utf-8")
-    for secret in (*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT):
-        assert secret not in cached_text, f"{secret!r} leaked into client._cache[...].body"
-
-
-def test_successful_response_body_is_scrubbed_of_every_secret_form_end_to_end(base_url, tmp_path):
-    """The full sweep requirement 3 asks for for a GENUINELY SUCCESSFUL
-    (200) response: the loopback server echoes the received email/
-    api_key/User-Agent back, raw AND percent-encoded (both quote() and
-    quote_plus() shapes, since the configured User-Agent itself contains
-    a space) -- none of it may survive into FetchResult.body, the
-    client's own _cache value, the saved Capture body, the Capture
-    Manifest, or what a parser reading fetch.text()/.json() would see."""
-    secret_api_key = "success-sweep-api-key-42"
-    secret_email = "success-sweep-contact@example.test"
+def test_normal_response_body_is_byte_for_byte_unchanged_when_no_secret_present(base_url, tmp_path):
+    """Requirement 3: a response body that echoes NOTHING secret-shaped
+    must not be altered by even 1 byte -- raw wire bytes, FetchResult.body,
+    the cached value's own body, and the saved Capture body must all be
+    the exact same object/bytes."""
     client = _client(out_dir=tmp_path)
-    url = (
-        f"{base_url}/echo-secrets?api_key={secret_api_key}"
-        f"&email={urllib.parse.quote(secret_email, safe='')}"
-    )
-    result = client.get(url)
+    result = client.get(f"{base_url}/ok?x=1")
     assert result.ok
-    # Confirms the server genuinely received and echoed the secrets --
-    # every check below is real sanitization, not "never sent". This is
-    # checked against the SERVER's own record (Handler.last_raw_path),
-    # independent of the client's own (by-now-sanitized) result.
-    assert secret_api_key in Handler.last_raw_path
-
-    secrets_to_check = [*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT]
-
-    haystacks: list[str] = [
-        result.body.decode("utf-8"),
-        client._cache[result.url].body.decode("utf-8"),
-        result.text,
-        json.dumps(result.json()),  # what a parser reading fetch.json() would see
-    ]
-
+    raw_bytes = json.dumps({"ok": True, "path": "/ok"}).encode()
+    assert result.body == raw_bytes
+    assert client._cache[result.url].body == raw_bytes
     digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
-    saved_body_path = tmp_path / f"{digest}.json"
-    if not saved_body_path.is_file():
-        saved_body_path = tmp_path / f"{digest}.bin"
-    haystacks.append(saved_body_path.read_text(encoding="utf-8"))
-    haystacks.append((tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8"))
+    saved_path = tmp_path / f"{digest}.json"
+    if not saved_path.is_file():
+        saved_path = tmp_path / f"{digest}.bin"
+    assert saved_path.read_bytes() == raw_bytes
+    read_result = read_manifest(tmp_path, digest, body=raw_bytes)
+    assert read_result.status.value == "VERIFIED"
+    assert read_result.manifest.content_length == len(raw_bytes)
+    assert read_result.manifest.content_hash == hashlib.sha256(raw_bytes).hexdigest()
 
-    for secret in secrets_to_check:
-        for haystack in haystacks:
-            assert secret not in haystack, f"{secret!r} leaked into {haystack!r}"
+
+def test_credential_echo_in_body_is_rejected_for_every_encoding(base_url):
+    """requirement 1/2/4: the server's 200 response echoes the secret in
+    ITS OWN raw/decoded/quote_plus/lowercase-percent renditions
+    (/echo-secrets, via _echo_fields) -- ANY ONE of these appearing
+    anywhere in the body must trigger rejection. Proven once per secret
+    (api_key, email), each confirmed genuinely received by the server
+    first."""
+    for param, secret in (("api_key", "body-echo-api-key-1"), ("email", "body-echo-contact@example.test")):
+        client = _client()
+        url = f"{base_url}/echo-secrets?{param}={urllib.parse.quote(secret, safe='')}"
+        result = client.get(url)
+        # the server genuinely received it -- as sent on the wire, which is
+        # percent-encoded (e.g. "@" -> "%40" for the email case), not the
+        # raw secret substring.
+        assert urllib.parse.quote(secret, safe="") in Handler.last_raw_path
+        assert not result.ok
+        assert result.outcome is FetchOutcome.BLOCKED
+        assert result.error == "response rejected because it echoed request credentials"
+        assert result.body == b""
 
 
-def test_failed_response_body_is_scrubbed_of_every_secret_form_end_to_end(base_url, tmp_path):
-    """The same full sweep as the success-path test above, for a FAILED
-    (404) response whose body echoes the request back -- requirement 3's
-    "failure responseについても同じ検証を行う"."""
-    secret_api_key = "failure-sweep-api-key-42"
-    secret_email = "failure-sweep-contact@example.test"
+def test_credential_echo_in_response_header_is_rejected(base_url):
+    """requirement 1/4: the secret is echoed ONLY in a response HEADER
+    (name X-Echo-api_key, both raw and percent-encoded header values) --
+    /echo-secret-in-header's own BODY says nothing at all, isolating the
+    header-inspection half of the detection gate."""
+    secret = "header-echo-api-key-999"
+    client = _client()
+    url = f"{base_url}/echo-secret-in-header?api_key={secret}"
+    result = client.get(url)
+    assert secret in Handler.last_raw_path
+    assert not result.ok
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert result.error == "response rejected because it echoed request credentials"
+    assert result.body == b""
+    assert result.headers == {}
+
+
+def test_credential_echo_in_error_reason_phrase_is_rejected(base_url):
+    """requirement 1/4: the secret is echoed ONLY in the HTTP error REASON
+    PHRASE (urllib.error.HTTPError.reason, which becomes part of
+    FetchResult.error) -- /error-with-secret-reason's body and headers say
+    nothing, isolating the error-text half of the detection gate."""
+    secret = "reason-phrase-secret-777"
+    client = _client()
+    # ``api_key`` (not an arbitrary param name) -- ``_sanitize_url`` only
+    # treats ``email``/``api_key`` as secret-shaped, so only these produce a
+    # value for ``_stripped_query_values`` (and hence the detection gate)
+    # to check against.
+    url = f"{base_url}/error-with-secret-reason?api_key={secret}"
+    result = client.get(url)
+    assert secret in Handler.last_raw_path
+    assert not result.ok
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert result.error == "response rejected because it echoed request credentials"
+    assert secret not in result.error
+
+
+def test_credential_echo_rejection_preserves_status_attempts_and_communication_fact(base_url):
+    """requirement 2: "HTTP status、attempt count、通信済みという事実は保持"
+    -- a rejection is not the same as "nothing happened"; the transport
+    facts about what DID happen stay visible."""
+    client = _client(max_retries=0)
+    result = client.get(f"{base_url}/echo-secrets?api_key=preserve-status-secret")
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert result.status == 200  # the server DID respond 200 -- preserved
+    assert result.attempts == 1
+    assert client.attempts_made == 1
+    assert client.requests_made == 1  # a real logical request was made, not refused pre-send
+
+
+def test_credential_echo_rejection_never_caches_the_raw_body(base_url):
+    """requirement 1: client._cache's own stored value must never carry
+    the raw echoed body either -- inspects the private _cache dict
+    directly, not merely the returned FetchResult."""
+    secret = "cache-rejection-secret-555"
+    client = _client()
+    url = f"{base_url}/echo-secrets?api_key={secret}"
+    result = client.get(url)
+    cached = client._cache[result.url]
+    assert cached.outcome is FetchOutcome.BLOCKED
+    assert cached.body == b""
+    assert secret not in cached.error
+
+
+@pytest.mark.parametrize("route", ["/echo-secrets", "/error-with-body"])
+def test_credential_echo_rejection_never_saves_any_capture(base_url, tmp_path, route):
+    """requirement 2: "成功Captureとして保存しない" -- and, just as much,
+    never saved as a FAILED-response capture either, even with
+    save_failed_responses=True. Exercised for both a 200-shaped
+    (/echo-secrets) and a 404-shaped (/error-with-body) echo route."""
     client = _client(out_dir=tmp_path, save_failed_responses=True)
-    url = (
-        f"{base_url}/error-with-body?api_key={secret_api_key}"
-        f"&email={urllib.parse.quote(secret_email, safe='')}"
-    )
+    secret = "no-capture-secret-333"
+    result = client.get(f"{base_url}{route}?api_key={secret}")
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert list(tmp_path.glob("*.manifest.json")) == []
+    assert list(tmp_path.glob("*.bin")) == []
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_credential_echo_via_allowed_redirect_final_response_is_rejected(base_url, tmp_path):
+    """requirement 4: a redirect to an ALLOWED host whose FINAL response
+    echoes credentials (here, via the always-echoed User-Agent header at
+    /echo-secrets) must still be rejected -- the redirect itself is
+    permitted (the target IS allowlisted), but the response it returns is
+    not trusted. Neither the (popped) final_url tracking nor anything
+    else leaks the secret, and nothing is saved."""
+    client = _client(out_dir=tmp_path, save_failed_responses=True)
+    secret = "redirect-echo-secret-111"
+    url = f"{base_url}/redirect-to-echo-secrets?api_key={secret}"
     result = client.get(url)
     assert not result.ok
-    assert result.status == 404
-    assert secret_api_key in Handler.last_raw_path  # the server genuinely received it
-
-    secrets_to_check = [*_all_secret_forms(secret_api_key), *_all_secret_forms(secret_email), _AGENT]
-
-    haystacks: list[str] = [
-        result.body.decode("utf-8"),
-        client._cache[result.url].body.decode("utf-8"),
-        result.text,
-        result.error,
-    ]
-
-    digest = hashlib.sha256(result.url.encode()).hexdigest()[:24]
-    haystacks.append((tmp_path / f"{digest}.bin").read_text(encoding="utf-8"))
-    haystacks.append((tmp_path / f"{digest}.manifest.json").read_text(encoding="utf-8"))
-
-    for secret in secrets_to_check:
-        for haystack in haystacks:
-            assert secret not in haystack, f"{secret!r} leaked into {haystack!r}"
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert result.error == "response rejected because it echoed request credentials"
+    assert secret not in result.url
+    assert client._final_urls.get(result.url) is None  # never left behind for a rejected response
+    assert list(tmp_path.glob("*.manifest.json")) == []
 
 
-def test_cache_hit_replays_the_already_sanitized_body_never_a_later_secret_either(base_url):
-    """Two requests to the same logical (public) resource, differing only
-    in secret VALUES -- the second is a cache hit, replaying the FIRST
-    request's own already-sanitized body. Neither request's secret value
-    may appear in either returned FetchResult.body."""
-    client = _client(max_requests=1)
-    first = client.get(f"{base_url}/echo-secrets?api_key=cache-hit-secret-one&x=1")
-    second = client.get(f"{base_url}/echo-secrets?api_key=cache-hit-secret-two&x=1")
-    assert first.ok and second.ok
-    assert second.from_cache
-    assert "cache-hit-secret-one" not in first.body.decode("utf-8")
-    assert "cache-hit-secret-two" not in second.body.decode("utf-8")
-
-
-# --- Phase 3F.2 correction 2 requirement 4: a failed response AFTER an
-# allowed-host redirect still tracks the REAL final (post-redirect) URL ----
-def test_redirect_to_an_allowed_host_that_then_404s_tracks_the_real_final_url(base_url, tmp_path):
+# --- Phase 3F.2 correction 2 requirement 4 (still true after correction 3):
+# a failed response AFTER an allowed-host redirect, that does NOT echo
+# credentials, still tracks the REAL final (post-redirect) URL -----------
+def test_redirect_to_an_allowed_host_that_then_404s_with_no_echo_tracks_the_real_final_url(base_url, tmp_path):
     client = _client(out_dir=tmp_path, save_failed_responses=True)
     secret = "redirect-final-url-secret-999"
-    url = f"{base_url}/redirect-to-allowed-404?api_key={secret}"
+    url = f"{base_url}/redirect-to-allowed-404-no-echo?api_key={secret}"
     result = client.get(url)
     assert not result.ok
     assert result.status == 404
+    assert result.outcome is FetchOutcome.NOT_FOUND  # a genuine 404, never rejected -- nothing was echoed
     assert secret not in result.url
     assert secret not in result.body.decode("utf-8")
 
@@ -1031,11 +1143,11 @@ def test_redirect_to_an_allowed_host_that_then_404s_tracks_the_real_final_url(ba
     manifest = read_result.manifest
     assert manifest is not None
     # requested_url is the ORIGINAL (pre-redirect) sanitized URL...
-    assert "/redirect-to-allowed-404" in manifest.requested_url
+    assert "/redirect-to-allowed-404-no-echo" in manifest.requested_url
     assert manifest.requested_url == result.url
     # ...final_url is the ACTUAL URL that returned the response, after the
     # allowed-host redirect was followed -- never the original one.
-    assert "/error-with-body" in manifest.final_url
+    assert "/genuinely-not-found-no-echo" in manifest.final_url
     assert manifest.requested_url != manifest.final_url
     assert secret not in manifest.final_url
 

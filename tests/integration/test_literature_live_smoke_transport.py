@@ -529,3 +529,180 @@ def test_run_live_smoke_full_orchestration_and_secret_sweep_over_a_real_loopback
     for cache_key in report.requested_urls:
         for value in secrets_to_check:
             assert value not in cache_key, f"{value!r} leaked into a cache key"
+
+
+# --- Phase 3F.2 correction 3 requirement 4: the fail-closed credential-echo
+# gate, exercised end to end through run_live_smoke() itself -- a dedicated
+# server/handler (not the shared Handler/base_url above) so this scenario's
+# Europe PMC full-text response, which deliberately echoes the literature
+# client's own User-Agent back, can never affect any other test in this
+# file. ---------------------------------------------------------------------
+_CREDENTIAL_ECHO_EFETCH_BODY = """<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000009</PMID>
+<Article PubModel="Print-Electronic">
+<Journal><Title>Fictional Journal of Credential Echo Handling</Title></Journal>
+<ArticleTitle>A fictional article whose full text server echoes request credentials</ArticleTitle>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+</MedlineCitation>
+<PubmedData>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000009</ArticleId>
+<ArticleId IdType="pmc">PMC9990009</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
+
+class CredentialEchoHandler(BaseHTTPRequestHandler):
+    """Identical LOCATE/FETCH shape to ``Handler`` above (a single PMID that
+    resolves to an open-access, in-EPMC PMCID), except its fullTextXML
+    route echoes the request's own User-Agent header value into a
+    genuinely-200 JSON body -- standing in for a real provider's error/
+    debug page that echoes request metadata back to the caller."""
+
+    state: dict = {}
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        CredentialEchoHandler.state.setdefault("raw_paths", []).append(self.path)
+        if path == "/entrez/eutils/esearch.fcgi":
+            self._send(200, json.dumps({"esearchresult": {"idlist": ["90000009"]}}).encode())
+        elif path == "/entrez/eutils/efetch.fcgi":
+            self._send(200, _CREDENTIAL_ECHO_EFETCH_BODY.encode())
+        elif path == "/europepmc/webservices/rest/search":
+            self._send(
+                200,
+                json.dumps(
+                    {"resultList": {"result": [{"pmid": "90000009", "pmcid": "PMC9990009", "isOpenAccess": "Y", "inEPMC": "Y"}]}}
+                ).encode(),
+            )
+        elif path == "/europepmc/webservices/rest/PMC9990009/fullTextXML":
+            ua = self.headers.get("User-Agent", "")
+            body = json.dumps({"echoed_user_agent": ua}).encode()
+            self._send(200, body)
+        else:
+            self._send(404, b"")
+
+    def _send(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def credential_echo_base_url():
+    CredentialEchoHandler.state = {}
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), CredentialEchoHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_port}"
+    httpd.shutdown()
+
+
+def test_run_live_smoke_rejects_a_credential_echoing_europepmc_fulltext_response(
+    credential_echo_base_url, tmp_path, monkeypatch,
+):
+    """Phase 3F.2 correction 3 requirement 4: drives run_live_smoke() end to
+    end (real loopback sockets, LOCATE->FETCH->PARSE) against a Europe PMC
+    fullTextXML response that echoes the literature client's own
+    User-Agent -- confirming the fail-closed gate's downstream effects at
+    the LITERATURE level (not just AllowlistedHttpClient's own FetchResult,
+    already covered by test_sec_live_smoke_transport.py):
+      - the parser (parse_europepmc_fulltext_xml) is never invoked for this
+        response,
+      - no fulltext Document is produced (full_text_acquired stays False),
+      - report.coverage_complete is False,
+      - report.status is BLOCKED,
+      - this article's fulltext fetch never enters live_verified_candidates.
+    None of this required any change to literature_live_smoke.py or
+    literature_acquisition_adapter.py -- it is the existing Phase 3F.2
+    correction machinery (transport_outcomes -> _compute_status,
+    europepmc_fulltext_failures -> coverage_complete, live_verified_
+    candidates gated on full_text_acquired) automatically propagating a
+    FetchOutcome.BLOCKED result up from AllowlistedHttpClient."""
+    import investment_research.research.literature_acquisition_adapter as adapter_module
+
+    parse_calls: list[str] = []
+    real_parse = adapter_module.parse_europepmc_fulltext_xml
+
+    def _spy_parse(text: str):
+        parse_calls.append(text)
+        return real_parse(text)
+
+    loopback_hosts = frozenset({"127.0.0.1"})
+    monkeypatch.setattr(adapter_module, "ALLOWED_HOSTS", loopback_hosts)
+    monkeypatch.setattr(adapter_module, "NCBI_ESEARCH_URL", f"{credential_echo_base_url}/entrez/eutils/esearch.fcgi")
+    monkeypatch.setattr(adapter_module, "NCBI_EFETCH_URL", f"{credential_echo_base_url}/entrez/eutils/efetch.fcgi")
+    monkeypatch.setattr(
+        adapter_module, "EUROPEPMC_SEARCH_URL", f"{credential_echo_base_url}/europepmc/webservices/rest/search",
+    )
+    monkeypatch.setattr(
+        adapter_module, "EUROPEPMC_FULLTEXT_URL",
+        f"{credential_echo_base_url}/europepmc/webservices/rest/{{pmcid}}/fullTextXML",
+    )
+    monkeypatch.setattr(adapter_module, "parse_europepmc_fulltext_xml", _spy_parse)
+    monkeypatch.setattr(live, "ALLOWED_HOSTS", loopback_hosts)
+
+    # Deliberately realistic (multi-character) credential values -- a
+    # single-character IRA_NCBI_TOOL like the bare "t" some other tests use
+    # would itself, as a secret value, match almost any English text via
+    # the detection gate, producing a false-positive rejection on the
+    # ESearch/EFetch legs unrelated to this test's actual scenario.
+    env = {
+        "IRA_NCBI_TOOL": "credential-echo-smoke-test-tool",
+        "IRA_NCBI_EMAIL": "credential-echo-smoke@example.test",
+        "IRA_NCBI_API_KEY": "credential-echo-smoke-key-12345",
+    }
+
+    report = live.run_live_smoke(
+        mode="discovery", nct_id="NCT09990002", max_articles=3, max_fulltext_fetches=1,
+        out_dir=tmp_path, env=env,
+    )
+
+    # The server genuinely received a real request for the full-text route,
+    # and genuinely echoed the User-Agent back -- this is a real rejection
+    # of real server behaviour, not "the request never happened".
+    assert any(
+        "/europepmc/webservices/rest/PMC9990009/fullTextXML" in p
+        for p in CredentialEchoHandler.state.get("raw_paths", [])
+    )
+
+    # 1. The parser was never invoked for the rejected response.
+    assert parse_calls == []
+
+    # 2. No fulltext Document was produced for this article.
+    assert report.articles, "PubMed article step must still have run"
+    article_entry = report.articles[0]
+    assert article_entry["pmid"] == "90000009"
+    assert article_entry["europepmc_search_succeeded"] is True
+    assert article_entry["full_text_acquired"] is False
+
+    # 3. coverage_complete is False -- a genuine provider failure, not a
+    # budget skip, but incompleteness either way.
+    assert report.coverage_complete is False
+    assert any(f.get("kind") == "BLOCKED" and f.get("pmid") == "90000009" for f in report.europepmc_failures)
+
+    # 4. The whole-run status reflects the BLOCKED transport outcome.
+    assert report.status is live.LiveSmokeStatus.BLOCKED
+
+    # 5. This article's fulltext fetch never became a "live verified"
+    # candidate -- only its search half did (search_result really did
+    # come back OA/inEPMC; the fulltext half is what got rejected).
+    assert "target_lit_smoke:europepmc_search:90000009" in report.live_verified_candidates
+    assert "target_lit_smoke:europepmc_fulltext:90000009" not in report.live_verified_candidates
+
+    # 6. The fixed, secret-free rejection message reached the report's own
+    # error surface, never the raw echoed User-Agent value.
+    combined_errors = " ".join(report.errors)
+    assert "response rejected because it echoed request credentials" in combined_errors
+    assert live.LITERATURE_LIVE_SMOKE_USER_AGENT not in combined_errors
+    assert live.LITERATURE_LIVE_SMOKE_USER_AGENT not in repr(report)

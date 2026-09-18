@@ -57,7 +57,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -277,13 +277,12 @@ def _stripped_query_values(wire_url: str, public_url: str) -> list[str]:
     absent from ``public_url`` -- exactly what ``_sanitize_url``/
     ``_strip_extra_params`` removed to compute ``public_url`` in the first
     place (email/api_key always; ``tool``/etc. when a caller's own
-    ``additional_secret_query_params`` configures it). Used to scrub a
-    response BODY (never a URL, which is already sanitized by
-    construction) of the same secret values, in case the response echoes
-    the request back -- an API error page (or, in principle, any
-    response) naming the URL/params it received (Phase 3F.2 correction 2
-    requirement 1: every response body is scrubbed this way, not only a
-    failed one)."""
+    ``additional_secret_query_params`` configures it). Used to detect
+    whether a response echoes the request back -- an API error page (or,
+    in principle, any response) naming the URL/params it received (Phase
+    3F.2 correction 3: every response is CHECKED this way, whole-result,
+    not only its body, and a positive match rejects the response outright
+    rather than redacting and continuing)."""
     wire_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(wire_url).query))
     public_query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(public_url).query))
     return [value for name, value in wire_query.items() if public_query.get(name) != value]
@@ -338,15 +337,21 @@ def _secret_body_patterns(secret_values: list[str]) -> list[re.Pattern[bytes]]:
     return patterns
 
 
-def _scrub_body_of_secrets(body: bytes, secret_values: list[str]) -> bytes:
-    """Value-based redaction over raw bytes (never decoded/re-encoded as a
-    whole, so this can never corrupt binary content it doesn't otherwise
-    touch) -- catches a secret value whether it appears raw, ``quote()``-
-    encoded, or ``quote_plus()``-encoded, in any percent-escape case, in a
-    response body (Phase 3F.2 correction 2 requirement 1/2)."""
-    for pattern in _secret_body_patterns(secret_values):
-        body = pattern.sub(b"[REDACTED]", body)
-    return body
+#: The fixed, secret-free error message a caller sees whenever a response
+#: is rejected for echoing request credentials -- deliberately a single
+#: constant string, never interpolated with anything about THIS request,
+#: so it can never itself become a leak vector (Phase 3F.2 correction 3
+#: requirement 2).
+CREDENTIAL_ECHO_REJECTED_ERROR = "response rejected because it echoed request credentials"
+
+
+def _any_pattern_matches(patterns: list[re.Pattern[bytes]], haystacks: list[bytes]) -> bool:
+    """True the moment any compiled secret pattern matches any haystack --
+    short-circuits on the first hit, never builds a combined/redacted copy
+    (Phase 3F.2 correction 3 requirement 2: detection only, never
+    redact-and-continue -- a positive hit here means the caller discards
+    the ENTIRE response, not just the matched substring)."""
+    return any(pattern.search(haystack) for haystack in haystacks for pattern in patterns)
 
 
 @dataclass
@@ -508,15 +513,24 @@ class AllowlistedHttpClient:
             )
 
         result = self._get_with_retry(url, public_url=public_url)
-        # Phase 3F.2 correction 2 requirement 1: sanitize the response BODY
-        # here -- immediately after _get_with_retry returns, before it is
-        # cached, returned, or handed to any downstream parser/adapter.
-        # Applies to EVERY result (a 2xx body AND a failure body alike):
-        # an echoed secret must never survive into result.body,
-        # self._cache's own stored value, a Document a caller builds from
-        # fetch.text/.json(), or (via the SAME already-scrubbed result)
-        # the Capture Manifest _save_response writes below.
-        result = self._sanitize_result_body(result, wire_url=url, public_url=public_url)
+        # Phase 3F.2 correction 3 requirement 1/2: inspect the WHOLE result
+        # -- body, header names/values, error text, and the (already-
+        # sanitized-by-construction) requested/final URL -- for an echoed
+        # secret, immediately after _get_with_retry returns and before
+        # anything is cached, returned, saved, or handed to a downstream
+        # parser/adapter. FAIL-CLOSED, never redact-and-continue: a
+        # positive hit discards the entire response (see
+        # _reject_for_echoed_credentials) rather than passing a
+        # [REDACTED]-rewritten body through as if it were real evidence.
+        # A body with NO secret in it is returned completely untouched --
+        # not even a byte-identical reallocation.
+        rejected = self._fetch_result_echoes_a_secret(result, wire_url=url, public_url=public_url)
+        if rejected:
+            result = self._reject_for_echoed_credentials(result)
+            # Never let a rejected response's final_url linger for a later
+            # _save_response call to (not that one will happen -- see the
+            # save condition below -- but this keeps no trace behind).
+            self._final_urls.pop(public_url, None)
         self._requests_made += 1
         self._cache[public_url] = result
         # result.status is not None exactly when a real HTTP response was
@@ -524,33 +538,78 @@ class AllowlistedHttpClient:
         # connection error, or pre-send/redirect host-allowlist refusal
         # never does) -- this is what distinguishes "an HTTP response
         # exists to audit" from "there is nothing to capture" (Phase 3F.2
-        # correction requirement 5), never outcome alone.
-        if self.out_dir is not None and (result.ok or (self.save_failed_responses and result.status is not None)):
+        # correction requirement 5), never outcome alone. A credential-echo
+        # rejection is NEVER saved either way -- not as a successful
+        # capture (it manifestly is not one) and not as a failed-response
+        # capture either (Phase 3F.2 correction 3 requirement 2: this is a
+        # security rejection, not a provider failure worth auditing on
+        # disk with an empty body under a status code that no longer means
+        # what it normally would).
+        if (
+            self.out_dir is not None and not rejected
+            and (result.ok or (self.save_failed_responses and result.status is not None))
+        ):
             self._save_response(public_url, result)
         return result
 
-    def _sanitize_result_body(self, result: FetchResult, *, wire_url: str, public_url: str) -> FetchResult:
-        """Returns a NEW ``FetchResult`` whose ``.body`` has every
-        configured secret value scrubbed out: the query-parameter values
-        ``_sanitize_url``/``_strip_extra_params`` removed to compute
-        ``public_url`` (email/api_key always; ``tool``/etc. when
-        ``additional_secret_query_params`` configures it) PLUS
-        ``self.user_agent`` -- the one secret value that never appears in
-        a URL at all, only in the request header a server's error
-        diagnostics could echo back (Phase 3F.2 correction 2 requirement
-        1). Every OTHER ``FetchResult`` field (url/outcome/status/headers/
-        attempts/error/elapsed_ms/final_url) is passed through completely
-        unchanged -- this never touches metadata, only body bytes. A
-        no-op (returns ``result`` itself) when the body is empty or no
-        configured secret actually appears in it, so an unrelated body is
-        never reallocated."""
-        if not result.body:
-            return result
-        secret_values = [*_stripped_query_values(wire_url, public_url), self.user_agent]
-        scrubbed = _scrub_body_of_secrets(result.body, secret_values)
-        if scrubbed == result.body:
-            return result
-        return replace(result, body=scrubbed)
+    def _secret_values_for(self, wire_url: str, public_url: str) -> list[str]:
+        """Every secret VALUE this client's OWN request could have carried
+        this call: the query-parameter values ``_sanitize_url``/
+        ``_strip_extra_params`` removed to compute ``public_url`` (email/
+        api_key always; ``tool``/etc. when ``additional_secret_query_params``
+        configures it) PLUS ``self.user_agent`` -- the one secret that
+        never appears in a URL at all, only in the request header a
+        server's own diagnostics could echo back."""
+        return [*_stripped_query_values(wire_url, public_url), self.user_agent]
+
+    def _fetch_result_echoes_a_secret(self, result: FetchResult, *, wire_url: str, public_url: str) -> bool:
+        """True if ANY field of ``result`` that a server response could
+        ever have populated -- body, every header NAME and VALUE, error
+        text -- contains a configured secret value, in ANY form
+        (``_secret_body_patterns``: raw, ``quote()``-encoded,
+        ``quote_plus()``-encoded, any percent-escape case). Also checks
+        ``result.url`` and this call's own tracked final URL
+        (``self._final_urls``) -- both are already sanitized-by-
+        construction and should never match, but this gate never assumes
+        that instead of verifying it (Phase 3F.2 correction 3 requirement
+        1: FetchResult AS A WHOLE, not merely the body, is the unit of
+        trust)."""
+        secret_values = self._secret_values_for(wire_url, public_url)
+        patterns = _secret_body_patterns(secret_values)
+        if not patterns:
+            return False
+        haystacks: list[bytes] = [
+            result.body,
+            result.url.encode("utf-8", errors="ignore"),
+            result.error.encode("utf-8", errors="ignore"),
+        ]
+        final_url = self._final_urls.get(public_url, "")
+        if final_url:
+            haystacks.append(final_url.encode("utf-8", errors="ignore"))
+        for name, value in result.headers.items():
+            haystacks.append(name.encode("utf-8", errors="ignore"))
+            haystacks.append(value.encode("utf-8", errors="ignore"))
+        return _any_pattern_matches(patterns, haystacks)
+
+    def _reject_for_echoed_credentials(self, result: FetchResult) -> FetchResult:
+        """Phase 3F.2 correction 3 requirement 2: fail-closed. The raw
+        body and headers are discarded outright -- never cached, never
+        handed to a parser, never used to build a Document, never saved as
+        a Capture -- and ``outcome`` becomes ``BLOCKED``, the same
+        security-rejection outcome a disallowed host/redirect already
+        uses, with a FIXED, secret-free error message
+        (``CREDENTIAL_ECHO_REJECTED_ERROR``) that never interpolates
+        anything about this specific request. ``status``/``attempts``/
+        ``elapsed_ms`` are preserved: the HTTP status code, how many
+        physical attempts this took, and how long it took are facts about
+        the TRANSPORT, not secrets, and this run's diagnostics (physical
+        attempt counts, "a real attempt was made") must stay accurate even
+        for a rejected response."""
+        return FetchResult(
+            url=result.url, outcome=FetchOutcome.BLOCKED, status=result.status,
+            attempts=result.attempts, elapsed_ms=result.elapsed_ms,
+            error=CREDENTIAL_ECHO_REJECTED_ERROR,
+        )
 
     def _get_with_retry(self, url: str, *, public_url: str) -> FetchResult:
         attempt = 0
@@ -696,12 +755,15 @@ class AllowlistedHttpClient:
         and manifest, rather than a spurious duplicate keyed off the
         secret.
 
-        ``result.body`` is ALREADY sanitized by the time this is called --
-        ``get()`` scrubs it via ``_sanitize_result_body`` immediately after
-        ``_get_with_retry`` returns, before caching, so this method (and
-        the ``content_hash``/``content_length`` it computes) never needs
-        its own scrub pass (Phase 3F.2 correction 2 requirement 1: one
-        sanitize point, not a second, save-time-only one)."""
+        ``result`` is ALREADY guaranteed free of every configured secret by
+        the time this is called -- ``get()`` runs
+        ``_fetch_result_echoes_a_secret`` immediately after
+        ``_get_with_retry`` returns, before caching, and NEVER calls this
+        method at all when that check is positive (Phase 3F.2 correction 3
+        requirement 2: a credential-echoing response is rejected, never
+        saved under any status). So this method never needs a scrub pass
+        of its own, and its own ``content_hash``/``content_length`` always
+        describe an already-trustworthy body."""
         assert self.out_dir is not None
         digest = hashlib.sha256(public_url.encode()).hexdigest()[:24]
         suffix = (
