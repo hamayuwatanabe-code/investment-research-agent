@@ -496,16 +496,28 @@ class EuropePmcFullTextAdapter:
 
     def search(
         self, pmid: str, context: ExecutionContext
-    ) -> tuple[EuropePmcSearchResult | None, int, str | None, str | None]:
+    ) -> tuple[EuropePmcSearchResult | None, int, str | None, str | None, str | None]:
         """Returns ``(result, http_requests_made, failure_reason,
-        failure_kind)``. Never raises -- a malformed/failed search leaves OA
-        status simply unknown (never guessed ``True``). ``failure_reason``
-        is a human-readable, sanitized string, prefixed with
-        ``BUDGET_EXCEEDED_PREFIX`` when the search budget, not a real
-        transport failure, is why this did not run. ``failure_kind`` is the
-        SAME failure, structured (Phase 3F.2 correction requirement 3) --
-        see ``FAILURE_KIND_*``'s own module-level docstrings. ``(None,
-        None)`` for both exactly when a result was returned."""
+        failure_kind, search_document_id)``. Never raises -- a malformed/
+        failed search leaves OA status simply unknown (never guessed
+        ``True``). ``failure_reason`` is a human-readable, sanitized
+        string, prefixed with ``BUDGET_EXCEEDED_PREFIX`` when the search
+        budget, not a real transport failure, is why this did not run.
+        ``failure_kind`` is the SAME failure, structured (Phase 3F.2
+        correction requirement 3) -- see ``FAILURE_KIND_*``'s own
+        module-level docstrings. ``(None, None)`` for both exactly when a
+        result was returned.
+
+        ``search_document_id`` (Phase 4.1A correction) is the
+        ``DocumentStore`` identity of the Europe PMC search RESPONSE
+        itself -- the ONE document Europe PMC search-derived RawFacts
+        (open-access status, the ``source``-code peer-review signal) may
+        be attributed to; never the PubMed EFetch document, and never a
+        full-text document that may not even be fetched yet. Populated
+        whenever the response body parsed successfully (even a genuine
+        zero-match body), on both the fresh-fetch and cache-hit paths;
+        ``None`` on every transport/budget/malformed-body failure,
+        mirroring ``result`` itself being ``None`` there."""
         query = urlencode({"query": f"ext_id:{pmid} AND src:med", "format": "json"})
         wire_url = f"{EUROPEPMC_SEARCH_URL}?{query}"
         _require_allowed_host(wire_url)
@@ -515,17 +527,19 @@ class EuropePmcFullTextAdapter:
         if cached is not None:
             if cached.status is not StepStatus.URL_RESOLVED:
                 kind = (cached.payload or {}).get("failure_kind")
-                return None, 0, cached.failure_reason or "cached Europe PMC search failed", kind
-            results = parse_europepmc_search_response(cached.payload.get("body", ""))
+                return None, 0, cached.failure_reason or "cached Europe PMC search failed", kind, None
+            body = cached.payload.get("body", "")
+            results = parse_europepmc_search_response(body)
             if results is None:
-                return None, 0, f"malformed Europe PMC search response for PMID {pmid} (cached)", FAILURE_KIND_MALFORMED_RESPONSE
-            return (results[0] if results else None), 0, None, None
+                return None, 0, f"malformed Europe PMC search response for PMID {pmid} (cached)", FAILURE_KIND_MALFORMED_RESPONSE, None
+            search_document_id = self._store_search_document(context, public_url, body)
+            return (results[0] if results else None), 0, None, None, search_document_id
 
         usage = _budget_usage_for(context)
         if not usage.reserve_search(self.limits):
             return (
                 None, 0, f"{BUDGET_EXCEEDED_PREFIX}Europe PMC search budget exhausted for PMID {pmid}",
-                FAILURE_KIND_BUDGET_EXCEEDED,
+                FAILURE_KIND_BUDGET_EXCEEDED, None,
             )
 
         fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
@@ -534,7 +548,7 @@ class EuropePmcFullTextAdapter:
                 step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
                 failure_reason=transport_error, payload={"failure_kind": FAILURE_KIND_TRANSPORT_ERROR},
             )
-            return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR
+            return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR, None
         if not fetch.ok:
             failure = _sanitize_text(
                 f"Europe PMC search failed for PMID {pmid}: {fetch.outcome} {fetch.error}",
@@ -545,7 +559,7 @@ class EuropePmcFullTextAdapter:
                 step_id=f"_cache_epmc_search_{pmid}", status=StepStatus.FAILED, http_requests_made=1,
                 failure_reason=failure, payload={"failure_kind": kind},
             )
-            return None, 1, failure, kind
+            return None, 1, failure, kind, None
 
         results = parse_europepmc_search_response(fetch.text)
         context.request_cache[cache_key] = StepExecutionResult(
@@ -553,8 +567,38 @@ class EuropePmcFullTextAdapter:
             payload={"body": fetch.text}, http_requests_made=1,
         )
         if results is None:
-            return None, 1, f"malformed Europe PMC search response for PMID {pmid}", FAILURE_KIND_MALFORMED_RESPONSE
-        return (results[0] if results else None), 1, None, None
+            return None, 1, f"malformed Europe PMC search response for PMID {pmid}", FAILURE_KIND_MALFORMED_RESPONSE, None
+        search_document_id = self._store_search_document(context, public_url, fetch.text)
+        return (results[0] if results else None), 1, None, None, search_document_id
+
+    @staticmethod
+    def _store_search_document(context: ExecutionContext, public_url: str, body: str) -> str:
+        """Stores the Europe PMC search RESPONSE BODY itself as its own
+        ``Document`` -- ``METADATA_ONLY``/``STRUCTURED_API_RECORD``, never
+        given a guessed ``tier`` (the field is simply left at
+        ``Document``'s own default, ``SourceTier.UNKNOWN``, exactly like
+        every other Document this module constructs) -- so Europe PMC
+        search-derived RawFacts can be attributed to the document that
+        actually said them, never borrowed from the PubMed EFetch
+        document or a later full-text fetch (Phase 4.1A correction).
+        ``DocumentStore.put()`` is idempotent by (URL, content): a second
+        call for the SAME pmid's search (e.g. a later target re-searching
+        the same pmid within one run) is a no-op here too, on top of this
+        method's own caller-side ``request_cache`` short-circuit -- no
+        duplicate Document, no new version, and (since this is called
+        only from already-cached or already-fetched paths) no new HTTP
+        request either."""
+        doc_id = derive_document_id("literature_europepmc_search", public_url, body)
+        document = Document(
+            doc_id=doc_id, url=public_url, title="Europe PMC search response",
+            publisher="Europe PMC", is_company_ir=False, text=body,
+            content_kind=ContentKind.METADATA_ONLY, provenance=Provenance.LIVE,
+            retrieved_at=utc_now_iso(), authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
+        )
+        stored = context.document_store.put(
+            document, document_id=doc_id, document_role=DocumentRole.STRUCTURED_API_RECORD,
+        )
+        return stored.document_id
 
     def fetch_fulltext(
         self, pmcid: str, context: ExecutionContext
@@ -983,7 +1027,9 @@ class PubMedLiteratureAdapter:
         europepmc_search_failures: dict[str, dict[str, str]] = {}
         europepmc_fulltext_failures: dict[str, dict[str, str]] = {}
         for pmid, article in articles.items():
-            search_result, search_reqs, search_failure, search_kind = self.europepmc.search(pmid, context)
+            search_result, search_reqs, search_failure, search_kind, search_document_id = self.europepmc.search(
+                pmid, context
+            )
             total_epmc_reqs += search_reqs
             if search_result is None:
                 if search_kind == FAILURE_KIND_BUDGET_EXCEEDED:
@@ -994,12 +1040,20 @@ class PubMedLiteratureAdapter:
                     }
                 continue
             fulltext_document = None
-            parsed_fulltext = None
+            fulltext_section_count = 0
             if article.pmcid != UNKNOWN and search_result.is_open_access and search_result.in_epmc:
                 fulltext_document, fetch_reqs, fetch_failure, fetch_kind, parsed_fulltext = self.europepmc.fetch_fulltext(
                     article.pmcid, context
                 )
                 total_epmc_reqs += fetch_reqs
+                # Phase 4.1A correction: only the section COUNT survives past
+                # this scope -- the full ParsedEuropePmcFullText (including
+                # any raw section title/text) is never carried into this
+                # step's own payload. raw_facts_from_europepmc_fulltext_
+                # availability() (collectors/literature.py) needs only the
+                # count to phrase its "N section(s)" claim correctly.
+                if parsed_fulltext is not None:
+                    fulltext_section_count = len(parsed_fulltext.sections)
                 if fulltext_document is None and fetch_failure:
                     if fetch_kind == FAILURE_KIND_BUDGET_EXCEEDED:
                         budget_skipped_fulltext_pmcids.append(article.pmcid)
@@ -1019,17 +1073,16 @@ class PubMedLiteratureAdapter:
                 # parsed values EVEN WHEN both are False.
                 "search_succeeded": True,
                 "search_result": search_result, "fulltext_document": fulltext_document,
-                # Phase 4.1A addition (additive only -- every existing key
-                # above is untouched): the SAME structured
-                # ParsedEuropePmcFullText fetch_fulltext already computed,
-                # carried alongside search_result so a downstream, purely
-                # offline Evidence Projection Bridge can call
-                # collectors.literature.raw_facts_from_europepmc_fulltext()
-                # without re-deriving or guessing either value -- never
-                # consumed by literature_live_smoke.py, which reads neither
-                # this dict's "search_result"/"fulltext_document" keys nor
-                # this new one.
-                "parsed_fulltext": parsed_fulltext,
+                # Phase 4.1A correction: the DocumentStore identity of the
+                # Europe PMC SEARCH RESPONSE document (never the PubMed
+                # EFetch document, never the fulltext document) -- the
+                # document search-derived RawFacts (open-access status,
+                # source-code peer-review signal) must be attributed to.
+                "search_document_id": search_document_id,
+                # The real, structured-value-derived section count only --
+                # never the parsed body/section content itself (see comment
+                # above).
+                "fulltext_section_count": fulltext_section_count,
             }
 
         # Store the PubMed Document(s) now (PARSE only re-reads text already
@@ -1107,8 +1160,8 @@ class PubMedLiteratureAdapter:
                         # offline Evidence Projection Bridge needs to
                         # rebuild a faithful EuropePmcSearchResult for
                         # collectors.literature.raw_facts_from_europepmc_
-                        # fulltext() -- notably "source", the ONLY signal
-                        # EuropePmcSearchResult.peer_review_status/
+                        # search_result() -- notably "source", the ONLY
+                        # signal EuropePmcSearchResult.peer_review_status/
                         # publication_stage read (see collectors/
                         # literature.py). None of these were previously
                         # exposed here; every key above is unchanged.
@@ -1118,10 +1171,16 @@ class PubMedLiteratureAdapter:
                         "journal_title": v["search_result"].journal_title,
                         "pub_year": v["search_result"].pub_year,
                         "source": v["search_result"].source,
-                        # The genuine structured full-text parse (never a
-                        # section count or other lossy summary) -- None
-                        # whenever no full text was acquired for this pmid.
-                        "parsed_fulltext": v.get("parsed_fulltext"),
+                        # Phase 4.1A correction: the DocumentStore identity
+                        # of the Europe PMC SEARCH RESPONSE document (never
+                        # the PubMed EFetch document, never the fulltext
+                        # document) -- what search-derived facts must be
+                        # attributed to. Only the real, structured section
+                        # COUNT is exposed for the full-text side; the raw
+                        # parsed body/section content is never carried into
+                        # this (or any) StepExecutionResult payload.
+                        "search_document_id": v.get("search_document_id"),
+                        "fulltext_section_count": v.get("fulltext_section_count", 0),
                     }
                     for pmid, v in europepmc_by_pmid.items()
                 },

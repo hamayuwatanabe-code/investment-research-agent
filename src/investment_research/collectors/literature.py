@@ -805,28 +805,28 @@ def raw_facts_from_pubmed_article(
     return facts
 
 
-def raw_facts_from_europepmc_fulltext(
+def raw_facts_from_europepmc_search_result(
     ticker: str,
     pmid: str,
     search_result: EuropePmcSearchResult,
-    parsed_fulltext: ParsedEuropePmcFullText | None,
     source: Source,
     *,
     collector: str = "literature_europepmc",
     document_id: str | None = None,
 ) -> list[RawFact]:
-    """Open-access status and full-text availability are always their own,
-    SEPARATE facts (Phase 3F requirement 3/8's "must clearly separate
-    metadata-only, abstract-only, and open-access-full-text" and
-    requirement 6's non-OA-never-full-text-acquired boundary).
+    """Facts attributable to the Europe PMC SEARCH RESPONSE itself: open-
+    access status, and the ``source``-code-derived peer-review signal
+    (Phase 3F requirement 3/8's "must clearly separate metadata-only,
+    abstract-only, and open-access-full-text").
 
-    Phase 3F.0.1: ``ContentKind.FULL_DOCUMENT`` on the full-text-acquired
-    fact below means only "the full text was retrieved" -- it carries no
-    implication about peer review, and ``search_result.peer_review_status``
-    is surfaced as its own, separate fact so nothing downstream can read
-    "full text acquired" as "peer-reviewed and confirmed".
+    ``source``/``document_id`` here (Phase 4.1A correction) must identify
+    the Europe PMC search response DOCUMENT -- never a PubMed EFetch
+    document, and never a later full-text document that may not even
+    have been fetched. The search response is what these two facts are
+    actually drawn from; lineage to a different document would
+    misattribute what confirms them.
     """
-    facts = [
+    return [
         _make_raw_fact(
             ticker,
             f"Europe PMC open-access status (PMID {pmid}): isOpenAccess="
@@ -843,27 +843,90 @@ def raw_facts_from_europepmc_fulltext(
             collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
         ),
     ]
-    if parsed_fulltext is not None and parsed_fulltext.sections:
-        facts.append(
+
+
+def raw_facts_from_europepmc_fulltext_availability(
+    ticker: str,
+    pmid: str,
+    section_count: int,
+    source: Source,
+    *,
+    collector: str = "literature_europepmc",
+    document_id: str | None = None,
+) -> list[RawFact]:
+    """The single fact attributable to full-text ACQUISITION itself:
+    acquired (with its real section count, never a guessed or synthetic
+    one) or unavailable.
+
+    Phase 3F.0.1: ``ContentKind.FULL_DOCUMENT`` on the acquired fact
+    means only "the full text was retrieved" -- it carries no implication
+    about peer review; ``raw_facts_from_europepmc_search_result``'s own
+    peer-review fact is what covers that, kept separate on purpose, so
+    nothing downstream can read "full text acquired" as "peer-reviewed
+    and confirmed".
+
+    ``source``/``document_id`` (Phase 4.1A correction) must identify the
+    Europe PMC full-text DOCUMENT when ``section_count > 0`` -- never a
+    PubMed EFetch document and never the search-response document, which
+    said nothing about the full text's own content. Takes a plain
+    ``section_count`` rather than a ``ParsedEuropePmcFullText`` object so
+    no full-text body/section content is ever required to call this
+    (or carried in whatever payload a caller derived ``section_count``
+    from) -- only the count this fact's own wording needs.
+    """
+    if section_count > 0:
+        return [
             _make_raw_fact(
                 ticker,
                 f"Europe PMC open-access full text acquired (PMID {pmid}, "
-                f"{len(parsed_fulltext.sections)} section(s)); this means only that the full "
+                f"{section_count} section(s)); this means only that the full "
                 "text was retrieved, not that it is peer-reviewed, high-quality, or "
                 "independently confirmed",
                 source, unit="full_text_availability", value=True,
                 collector=collector, document_id=document_id, content_kind=ContentKind.FULL_DOCUMENT,
             )
+        ]
+    return [
+        _make_raw_fact(
+            ticker, f"Europe PMC full text unavailable (PMID {pmid}): abstract only",
+            source, unit="full_text_availability", value=False,
+            collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
         )
-    else:
-        facts.append(
-            _make_raw_fact(
-                ticker, f"Europe PMC full text unavailable (PMID {pmid}): abstract only",
-                source, unit="full_text_availability", value=False,
-                collector=collector, document_id=document_id, content_kind=ContentKind.METADATA_ONLY,
-            )
-        )
-    return facts
+    ]
+
+
+def raw_facts_from_europepmc_fulltext(
+    ticker: str,
+    pmid: str,
+    search_result: EuropePmcSearchResult,
+    parsed_fulltext: ParsedEuropePmcFullText | None,
+    source: Source,
+    *,
+    collector: str = "literature_europepmc",
+    document_id: str | None = None,
+) -> list[RawFact]:
+    """Backward-compatible convenience wrapper: every one of this PMID's
+    Europe PMC facts (search metadata AND full-text availability)
+    attributed to the SAME single ``source``/``document_id`` -- the shape
+    this function has always had, preserved exactly for callers that have
+    (or want) only one Document for the whole Europe PMC side.
+
+    A caller that must keep each fact's lineage to the DIFFERENT Document
+    it actually came from (the search response vs. the full-text
+    document, which are fetched from different URLs and may not both
+    exist) calls ``raw_facts_from_europepmc_search_result``/
+    ``raw_facts_from_europepmc_fulltext_availability`` directly instead
+    -- ``research/literature_evidence_projection.py`` does exactly that
+    (Phase 4.1A correction)."""
+    section_count = len(parsed_fulltext.sections) if parsed_fulltext is not None else 0
+    return [
+        *raw_facts_from_europepmc_search_result(
+            ticker, pmid, search_result, source, collector=collector, document_id=document_id,
+        ),
+        *raw_facts_from_europepmc_fulltext_availability(
+            ticker, pmid, section_count, source, collector=collector, document_id=document_id,
+        ),
+    ]
 
 
 __all__ = [
@@ -884,5 +947,7 @@ __all__ = [
     "parse_europepmc_search_response",
     "parse_pubmed_articleset",
     "raw_facts_from_europepmc_fulltext",
+    "raw_facts_from_europepmc_fulltext_availability",
+    "raw_facts_from_europepmc_search_result",
     "raw_facts_from_pubmed_article",
 ]

@@ -46,12 +46,26 @@ change; raise the question instead, per CLAUDE.md):
   in tests) ``AcquisitionExecutor.run()`` call; this module makes zero
   network calls of its own, by construction -- it does not even import
   anything HTTP-shaped.
-* Never infers ``SourceTier`` from ``DocumentAuthority`` -- ``Source``
-  projection uses one fixed, explicit, documented constant
-  (``LITERATURE_SOURCE_TIER``) for every literature source, matching every
-  existing literature test fixture's own choice and ``SourceTier``'s own
-  docstring ("TIER_2 = peer-reviewed, ..."). It is never computed from
-  ``document.authority`` or any other field.
+* Never infers ``SourceTier`` -- ``Source.tier`` is always the SAME
+  ``StoredDocument.document.tier`` DocumentStore already holds, copied
+  verbatim, never a fixed constant and never derived from
+  ``document.authority``/``publication_stage``/open-access status/
+  ``ContentKind``. Every existing PubMed/Europe PMC ``Document`` this
+  repository's adapters construct leaves ``tier`` at its own class
+  default (``SourceTier.UNKNOWN`` -- see ``collectors/documents.py``'s
+  ``Document``), so today every literature ``Source`` this module
+  produces reads ``UNKNOWN`` too. Peer review, PubMed/Europe PMC
+  indexing, ``PublicationStage.JOURNAL_ARTICLE``, and
+  ``ContentKind.FULL_DOCUMENT`` are each explicitly NOT evidence of a
+  source's tier (an earlier version of this module got this wrong,
+  hard-coding ``SourceTier.TIER_2`` -- "peer-reviewed" per
+  ``SourceTier``'s own docstring -- for every literature Source
+  regardless of whether peer review was ever confirmed; corrected here).
+  A future adapter that DOES set a real, evidenced ``Document.tier``
+  (e.g. once this repository has a genuine, source-specific tier
+  determination for a literature record) is respected automatically,
+  with zero change to this module, because the value is read straight
+  through rather than overridden.
 * Never copies a document's full abstract/full-text body into
   ``Source.excerpt`` -- ``Source.excerpt`` is left at its default (empty);
   the relevant excerpted text already lives in each ``RawFact.claim``,
@@ -74,34 +88,87 @@ change; raise the question instead, per CLAUDE.md):
   -- see ``EuropePmcFullTextAdapter.fetch_fulltext``'s own docstring), and
   this phase does not decide how -- or whether -- either should be
   chunked. Chunk projection is Phase 4.1B's separate, later concern.
+* Never substitutes one Document for another as a citation of
+  convenience -- see "Document lineage" below. A RawFact's
+  ``source``/``document_id`` must be the document that fact's own claim
+  is actually drawn from, never a nearby document that happens to be
+  available.
 
-Europe PMC metadata gap this module's own Phase 4.1A change closed
-(documented here, not just in the commit message, since it explains why
-``research/literature_acquisition_adapter.py`` gained two small additive
-fields): ``collectors.literature.raw_facts_from_europepmc_fulltext()``
-needs a full ``EuropePmcSearchResult`` (six scalar fields:
+Document lineage (Phase 4.1A correction -- an earlier version of this
+module got this wrong): a literature target's PubMed EFetch response, its
+Europe PMC SEARCH response, and its Europe PMC full-text response are
+THREE separate documents, fetched from three different URLs, and each may
+exist without the others (a non-OA article has no full-text document at
+all; a search failure means no search document either). Conflating any
+two of them -- e.g. attributing an Europe PMC open-access-status fact to
+the PubMed document, or a full-text-acquired fact to the search document
+-- misrepresents which document actually said what this bridge claims it
+said. This module therefore:
+
+* Resolves and projects a SEPARATE ``Source``/``document_id`` for each of
+  the three documents a PMID can have, from three separate
+  ``DocumentStore`` entries.
+* Attributes PubMed-parsed-article facts (``raw_facts_from_pubmed_
+  article``) to the PubMed EFetch document.
+* Attributes Europe PMC search-derived facts (open-access status, the
+  ``source``-code peer-review signal -- ``raw_facts_from_europepmc_
+  search_result``) to the Europe PMC SEARCH RESPONSE document -- a new
+  Document this module's companion change in
+  ``literature_acquisition_adapter.py`` now stores (``EuropePmcFullText
+  Adapter._store_search_document``, ``METADATA_ONLY``/
+  ``STRUCTURED_API_RECORD``, ``tier`` left at ``Document``'s own default
+  rather than guessed), never the PubMed document, and never a full-text
+  document that may not exist.
+* Attributes the full-text-acquired fact (``raw_facts_from_europepmc_
+  fulltext_availability``) to the Europe PMC FULL-TEXT document when one
+  was genuinely fetched; when full text was never attempted at all (a
+  genuinely non-OA/no-PMCID article -- not a failure), the resulting
+  "unavailable" fact is attributed to the SEARCH document instead, since
+  that is the document that actually established non-open-access status.
+  A GENUINE fetch/parse failure or budget skip for the full-text step is
+  never silently reinterpreted as "unavailable" this way -- see "Failure
+  semantics" below; no RawFact is generated for that PMID's full-text
+  side at all, and the failure is recorded as an unresolved reason
+  instead.
+* Never falls back to a different document when the RIGHT one cannot be
+  resolved (missing from ``DocumentStore``, or a corrupted version
+  chain): the affected RawFacts are simply not generated, and the gap is
+  recorded as an unresolved reason with ``coverage_complete=False`` --
+  never quietly attributed to whichever document happens to still be in
+  hand.
+
+Europe PMC metadata gap this module's own Phase 4.1A change closed, and
+the Phase 4.1A correction narrowed further (documented here, not just in
+the commit message, since it explains two small, additive changes in
+``research/literature_acquisition_adapter.py``): ``collectors.literature.
+raw_facts_from_europepmc_search_result()`` needs a full
+``EuropePmcSearchResult`` (six scalar fields:
 ``pmcid``/``doi``/``title``/``journal_title``/``pub_year``/``source`` --
 the last of which is the ONLY signal ``EuropePmcSearchResult.
-peer_review_status``/``publication_stage`` read) and the genuine,
-structured ``ParsedEuropePmcFullText`` the adapter already computed
-internally. Before Phase 4.1A, ``PubMedLiteratureAdapter``'s own PARSE
-payload exposed only four of those six scalars (never ``pmcid``/``doi``/
-``title``/``journal_title``/``pub_year``/``source``) and never the parsed
-full-text structure at all. Rather than re-deriving either from
-``DocumentStore`` (impossible for the parsed structure: the stored
-Europe PMC full-text ``Document.text`` is already ``parsed.full_text``,
-the section-joined PLAIN TEXT, not the raw XML -- ``parse_europepmc_
-fulltext_xml()`` cannot be re-run over it), this module's companion change
-in ``literature_acquisition_adapter.py`` makes ``EuropePmcFullTextAdapter.
-fetch_fulltext()`` additionally return the ``ParsedEuropePmcFullText`` it
-already computes (a 5th, additive tuple element -- ``None`` on every
-failure path), and threads it plus the missing scalar fields into the
-SAME per-pmid dict this module already reads from
-``StepExecutionResult.payload["europepmc"]``. Zero new HTTP requests, zero
-re-fetching of any body from a different URL, and
-``literature_live_smoke.py`` is untouched -- it never read that dict's
-pre-existing keys either (confirmed by inspection before this change was
-made), so it cannot regress from new ones being added beside them.
+peer_review_status``/``publication_stage`` read), and
+``raw_facts_from_europepmc_fulltext_availability()`` needs only a plain
+section COUNT (an ``int``), never the parsed full-text body/structure
+itself. Before Phase 4.1A, ``PubMedLiteratureAdapter``'s own PARSE
+payload exposed only three ``EuropePmcSearchResult`` scalars (never
+``pmcid``/``doi``/``title``/``journal_title``/``pub_year``/``source``)
+and no full-text section information at all. The Phase 4.1A correction
+in this file replaced the FIRST version's approach -- carrying the whole
+``ParsedEuropePmcFullText`` object into ``StepExecutionResult.payload`` --
+with something narrower: ``EuropePmcFullTextAdapter.fetch_fulltext()``
+still additionally returns the ``ParsedEuropePmcFullText`` it already
+computes internally (a 5th tuple element, ``None`` on every failure
+path), but its caller (``PubMedLiteratureAdapter._fetch()``) now reduces
+it to ``len(parsed.sections)`` before it ever reaches
+``StepExecutionResult.payload["europepmc"][pmid]["fulltext_section_
+count"]`` -- no full-text section title/body content is ever carried
+into an ``ExecutionReport``, a Live Smoke report, or this bridge's own
+output. The genuine full-text body lives in exactly one place: the
+Europe PMC full-text ``Document`` itself, inside ``DocumentStore``.
+``literature_live_smoke.py`` is untouched by any of this -- it never
+read this dict's pre-existing keys, the short-lived ``parsed_fulltext``
+key the first Phase 4.1A commit added, or the ``search_document_id``/
+``fulltext_section_count`` keys that replaced it (confirmed by
+inspection), so it cannot regress from any of these changes.
 """
 
 from __future__ import annotations
@@ -116,25 +183,17 @@ from ..collectors.documents import Document
 from ..collectors.literature import (
     EuropePmcSearchResult,
     ParsedPubmedArticle,
-    raw_facts_from_europepmc_fulltext,
+    raw_facts_from_europepmc_fulltext_availability,
+    raw_facts_from_europepmc_search_result,
     raw_facts_from_pubmed_article,
 )
-from ..schemas.enums import FetchOutcome, SourceTier
+from ..schemas.enums import UNKNOWN, FetchOutcome
 from ..schemas.fact import RawFact, Source, make_source_id
 from .acquisition_executor import StepExecutionResult, TargetExecutionReport
 from .document_store import CorruptVersionChainError, DocumentStore, StoredDocument
 from .source_routing import StepStatus
 
 log = logging.getLogger(__name__)
-
-#: Deliberate, fixed, and documented -- never derived from
-#: ``DocumentAuthority.BIOMEDICAL_LITERATURE`` or any other field (see
-#: module docstring). Matches ``SourceTier``'s own docstring ("TIER_2 =
-#: peer-reviewed, company IR / transcripts, gov research") and every
-#: existing literature test fixture's own choice
-#: (``tests/unit/test_literature_evidence_boundary.py``,
-#: ``tests/unit/test_literature_collector.py``).
-LITERATURE_SOURCE_TIER = SourceTier.TIER_2
 
 #: The whole-``CollectionResult``-level collector label this bridge
 #: stamps -- distinct from the PER-RAWFACT ``collector`` values
@@ -296,6 +355,29 @@ def project_literature_target_reports(
             if not epmc_entry.get("search_succeeded"):
                 continue
 
+            # -- Europe PMC SEARCH document: required for ANY Europe PMC
+            # RawFact this PMID can produce (search-metadata facts are
+            # drawn from it directly; the fulltext-unavailable fact, when
+            # applicable, is too -- see module docstring's "Document
+            # lineage"). Never falls back to the PubMed document above.
+            search_document_id = epmc_entry.get("search_document_id")
+            if not search_document_id:
+                target_had_problem = True
+                unresolved_reasons.append(
+                    f"PMID {pmid}: Europe PMC search succeeded but no search_document_id was "
+                    "recorded -- excluded from Europe PMC RawFact generation (PubMed facts for "
+                    "this PMID are unaffected)"
+                )
+                continue
+            search_stored = _resolve_document(document_store, search_document_id, pmid, unresolved_reasons)
+            if search_stored is None:
+                target_had_problem = True
+                continue
+            search_source = _project_source(search_stored.document)
+            sources_by_id.setdefault(search_source.source_id, search_source)
+            if search_document_id not in document_ids:
+                document_ids.append(search_document_id)
+
             search_result = _rebuild_europepmc_search_result(pmid, epmc_entry)
             if search_result is None:
                 target_had_problem = True
@@ -307,32 +389,51 @@ def project_literature_target_reports(
                 )
                 continue
 
-            epmc_source, epmc_document_id = source, document_id
+            search_facts = raw_facts_from_europepmc_search_result(
+                ticker, pmid, search_result, search_source, document_id=search_document_id,
+            )
+            raw_fact_count_before_dedup += len(search_facts)
+            raw_facts.extend(search_facts)
+
+            # -- Full-text availability: a GENUINE fetch/parse failure or
+            # budget skip for this PMID's full text (already recorded as
+            # an unresolved reason above) is never reinterpreted as a
+            # clean "unavailable" RawFact -- no fact is generated for it
+            # at all. Only a genuine non-attempt (no PMCID, or the search
+            # result's own OA/inEPMC flags were false -- PubMedLiterature
+            # Adapter's own condition for ever attempting a fetch) reaches
+            # the "unavailable" branch below.
+            would_have_attempted_fulltext = (
+                article.pmcid != UNKNOWN and search_result.is_open_access and search_result.in_epmc
+            )
             fulltext_document_id = epmc_entry.get("fulltext_document_id")
+            if fulltext_document_id is None and would_have_attempted_fulltext:
+                continue  # a real failure/budget-skip, already recorded above
+
             if fulltext_document_id:
                 fulltext_stored = _resolve_document(
                     document_store, fulltext_document_id, pmid, unresolved_reasons
                 )
-                if fulltext_stored is not None:
-                    epmc_source = _project_source(fulltext_stored.document)
-                    sources_by_id.setdefault(epmc_source.source_id, epmc_source)
-                    epmc_document_id = fulltext_document_id
-                    if fulltext_document_id not in document_ids:
-                        document_ids.append(fulltext_document_id)
-                else:
+                if fulltext_stored is None:
                     target_had_problem = True
-                    # Fall back to the PubMed abstract's own source/document_id
-                    # below -- the Europe PMC metadata facts are still worth
-                    # projecting even though the fulltext Document itself
-                    # could not be resolved.
-
-            parsed_fulltext = epmc_entry.get("parsed_fulltext")
-            epmc_facts = raw_facts_from_europepmc_fulltext(
-                ticker, pmid, search_result, parsed_fulltext, epmc_source,
-                document_id=epmc_document_id,
-            )
-            raw_fact_count_before_dedup += len(epmc_facts)
-            raw_facts.extend(epmc_facts)
+                    continue  # never fall back to the search or PubMed document
+                fulltext_source = _project_source(fulltext_stored.document)
+                sources_by_id.setdefault(fulltext_source.source_id, fulltext_source)
+                if fulltext_document_id not in document_ids:
+                    document_ids.append(fulltext_document_id)
+                availability_facts = raw_facts_from_europepmc_fulltext_availability(
+                    ticker, pmid, epmc_entry.get("fulltext_section_count", 0), fulltext_source,
+                    document_id=fulltext_document_id,
+                )
+            else:
+                # Genuinely never attempted (non-OA / no PMCID) -- the
+                # "unavailable" determination was made FROM the search
+                # response, so that is what this fact is attributed to.
+                availability_facts = raw_facts_from_europepmc_fulltext_availability(
+                    ticker, pmid, 0, search_source, document_id=search_document_id,
+                )
+            raw_fact_count_before_dedup += len(availability_facts)
+            raw_facts.extend(availability_facts)
 
         if target_acquired_anything:
             acquired_targets += 1
@@ -459,15 +560,17 @@ def _project_source(document: Document) -> Source:
     ``DocumentStore``-held ``Document``. Every date/identity field maps
     1:1 from the SAME-NAMED ``Document`` field -- never cross-assigned
     (``retrieved_at`` never becomes ``event_date``/``published_date``),
-    never partially filled, and ``tier`` is the fixed
-    ``LITERATURE_SOURCE_TIER`` constant, never derived from
-    ``document.authority``. ``excerpt`` is left at its default (empty):
-    the document body is never copied into it (see module docstring)."""
+    never partially filled. ``tier`` is ``document.tier`` verbatim (Phase
+    4.1A correction): never a fixed constant, never derived from
+    ``document.authority``/``publication_stage``/open-access status/
+    ``content_kind`` -- see the module docstring's "Never infers
+    SourceTier" boundary. ``excerpt`` is left at its default (empty): the
+    document body is never copied into it (see module docstring)."""
     return Source(
         source_id=make_source_id(document.url, document.title),
         url=document.url,
         title=document.title,
-        tier=LITERATURE_SOURCE_TIER,
+        tier=document.tier,
         publisher=document.publisher,
         published_date=document.published_date,
         event_date=document.event_date,
@@ -508,7 +611,6 @@ def _rebuild_europepmc_search_result(pmid: str, epmc_entry: dict[str, Any]) -> E
 
 __all__ = [
     "BRIDGE_COLLECTOR_LABEL",
-    "LITERATURE_SOURCE_TIER",
     "LiteratureEvidenceProjection",
     "project_literature_target_reports",
 ]

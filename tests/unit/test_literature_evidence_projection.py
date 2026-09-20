@@ -1,10 +1,23 @@
-"""Phase 4.1A: Literature Evidence Projection Bridge.
+"""Phase 4.1A (corrected): Literature Evidence Projection Bridge.
 
 Offline end-to-end: AcquisitionExecutor -> PubMedLiteratureAdapter ->
 DocumentStore -> literature_evidence_projection -> CollectionResult ->
 FactCollectorAgent -> EvidenceIntegrityAgent, against the SAME real-format
 fixtures/FakeHttpClient double ``test_literature_acquisition_adapter.py``
 uses. No real network call anywhere in this file.
+
+Two Evidence Integrity corrections this file exists to pin down (the
+first version of this bridge got both wrong):
+
+1. ``Source.tier`` is ``StoredDocument.document.tier`` verbatim -- never
+   a fixed ``SourceTier.TIER_2`` constant. Every literature Document this
+   repository's adapter constructs leaves ``tier`` at its own class
+   default (``SourceTier.UNKNOWN``), so every literature Source this
+   bridge produces today reads ``UNKNOWN`` too.
+2. A PubMed EFetch document, an Europe PMC search-response document, and
+   an Europe PMC full-text document are three SEPARATE documents. A
+   RawFact's ``source``/``document_id`` must be the document that fact's
+   claim is actually drawn from -- never borrowed from a different one.
 """
 
 from __future__ import annotations
@@ -26,7 +39,6 @@ from investment_research.research.literature_acquisition_adapter import (
     PubMedLiteratureAdapter,
 )
 from investment_research.research.literature_evidence_projection import (
-    LITERATURE_SOURCE_TIER,
     project_literature_target_reports,
 )
 from investment_research.research.source_routing import (
@@ -46,6 +58,7 @@ from investment_research.schemas.enums import (
     FetchOutcome,
     PeerReviewStatus,
     ResearchDomain,
+    SourceTier,
 )
 
 from . import _literature_fixture_support as fx
@@ -56,7 +69,11 @@ from . import _literature_fixture_support as fx
 #: treat as clean). Every test below whose subject is the PubMed side only
 #: still registers this for the PMID it uses, since
 #: PubMedLiteratureAdapter._fetch() always attempts a Europe PMC search
-#: for every fetched PMID regardless of that article's own PMCID.
+#: for every fetched PMID regardless of that article's own PMCID. A
+#: genuinely empty result list means no europepmc_by_pmid entry is ever
+#: recorded for this PMID (mirrors "not found"), so no Europe PMC
+#: RawFact/Source/Document is produced for it either -- exactly like
+#: never having searched Europe PMC for it at all.
 _EPMC_EMPTY = '{"resultList": {"result": []}}'
 
 
@@ -195,7 +212,9 @@ def test_open_access_fulltext_is_biomedical_publication_assertion_never_decision
     projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
     cr = projection.collection_result
     assert cr.outcome is FetchOutcome.OK
-    assert len(projection.document_ids) == 2  # PubMed abstract doc + Europe PMC fulltext doc, distinct
+    # PubMed EFetch doc + Europe PMC search doc + Europe PMC fulltext doc:
+    # three DIFFERENT documents, never collapsed to fewer.
+    assert len(projection.document_ids) == 3
 
     fulltext_raw = next(f for f in cr.raw_facts if f.unit == "literature_full_text_availability" and f.value is True)
     assert "3 section(s)" in fulltext_raw.claim  # the REAL parsed section count, never guessed
@@ -233,9 +252,9 @@ def test_non_open_access_never_produces_fulltext_acquired_fact():
         f.unit == "literature_full_text_availability" and f.value is True for f in cr.raw_facts
     )
     assert any(f.unit == "literature_open_access_status" for f in cr.raw_facts)
-    # No second Europe PMC fulltext Document exists -- only the PubMed
-    # abstract document was ever projected.
-    assert len(projection.document_ids) == 1
+    # PubMed doc + Europe PMC SEARCH doc -- no fulltext document exists,
+    # since it was never fetched.
+    assert len(projection.document_ids) == 2
     assert not any("fullTextXML" in u for u in http.requested_urls)  # no fulltext GET was made
 
 
@@ -291,9 +310,14 @@ def test_correction_recorded_as_its_own_fact():
 
 
 # --- Dedup across multiple semantic targets ----------------------------------
-def test_same_pmid_across_three_targets_deduplicated_by_bridge():
+def test_same_pmid_across_three_targets_deduplicated_by_bridge_pubmed_only():
     graph = _literature_graph("a", "b", "c")
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
     refs = {t.target_id: LiteratureReference(ct_pmid="90000001") for t in graph.targets}
     report, store = _run(refs, http, graph=graph)
 
@@ -307,15 +331,45 @@ def test_same_pmid_across_three_targets_deduplicated_by_bridge():
     assert len(fact_ids) == len(set(fact_ids))
     # Zero extra HTTP requests from having 3 targets share one PMID --
     # AcquisitionExecutor's own dedup (not this bridge) is what bounds this
-    # to one EFetch; the bridge makes zero requests of its own either way.
+    # to one EFetch/one Europe PMC search; the bridge makes zero requests
+    # of its own either way.
     efetch_calls = [u for u in http.requested_urls if "efetch.fcgi" in u]
     assert len(efetch_calls) == 1
+    search_calls = [u for u in http.requested_urls if "/search" in u]
+    assert len(search_calls) == 1
 
     # Feeding the deduplicated CollectionResult through FactCollectorAgent
     # produces no further duplicates either -- the canonical path's own
     # dedup (fact_id-keyed) agrees with the bridge's.
     collector_output, _ = _through_fact_collector_and_evidence_integrity(cr)
     assert len(collector_output.facts) == len(cr.raw_facts)
+
+
+def test_same_pmid_across_three_targets_deduplicated_by_bridge_oa_fulltext():
+    """The full three-document (PubMed/search/fulltext) case, deduplicated
+    across three targets sharing one PMID: each Document is stored once,
+    dedup never crosses document identity (a PubMed-doc dedup never
+    silently absorbs the search or fulltext document, or vice versa)."""
+    graph = _literature_graph("a", "b", "c")
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    refs = {t.target_id: LiteratureReference(ct_pmid="90000008") for t in graph.targets}
+    report, store = _run(refs, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    assert len(cr.sources) == 3
+    assert len(projection.document_ids) == 3
+    assert projection.duplicate_source_count == 2
+    fact_ids = [f.fact_id() for f in cr.raw_facts]
+    assert len(fact_ids) == len(set(fact_ids))
+    for kind, count in (("efetch.fcgi", 1), ("/search", 1), ("fullTextXML", 1)):
+        assert len([u for u in http.requested_urls if kind in u]) == count
 
 
 # --- Failure / completeness semantics ----------------------------------------
@@ -325,6 +379,7 @@ def test_budget_excluded_pmid_recorded_as_unresolved_and_degraded_never_clean():
         responses={
             fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
             fx.efetch_url(["90000002"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
         }
     )
     refs = {
@@ -400,7 +455,12 @@ def test_genuine_zero_result_search_is_reported_as_zero_results_and_not_degraded
 def test_missing_document_in_document_store_is_recorded_and_excluded():
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
     report, _real_store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
 
     empty_store = DocumentStore()  # simulates a document_id the caller's own store never saw
@@ -411,10 +471,84 @@ def test_missing_document_in_document_store_is_recorded_and_excluded():
     assert any("not found in DocumentStore" in r for r in projection.unresolved_reasons)
 
 
+def test_missing_europepmc_search_document_never_falls_back_to_pubmed_document():
+    """The search Document itself is missing from DocumentStore (never
+    the PubMed one) -- the bridge must exclude the Europe PMC facts, not
+    silently attribute them to the PubMed document instead."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    search_document_id = parse_result.payload["europepmc"]["90000008"]["search_document_id"]
+    del store._by_id[search_document_id]  # noqa: SLF001 - test-only direct removal
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    assert cr.degraded
+    assert projection.coverage_complete is False
+    assert any("not found in DocumentStore" in r for r in projection.unresolved_reasons)
+    # PubMed facts still projected (partial success preserved).
+    assert any(f.unit == "literature_publication_exists" for f in cr.raw_facts)
+    # No Europe PMC-only fact (never produced by the PubMed extractor)
+    # was misattributed to the PubMed document. "peer_review_status" is
+    # excluded from this check since PubMed's OWN extractor also
+    # legitimately produces a fact under that same unit name.
+    pubmed_doc_id = parse_result.payload["parsed_documents"][0]["document_id"]
+    epmc_only_units = {"open_access_status", "full_text_availability"}
+    assert not any(
+        f"literature_{u}" == f.unit and f.document_id == pubmed_doc_id
+        for f in cr.raw_facts
+        for u in epmc_only_units
+    )
+    assert not any("Europe PMC source=" in f.claim and f.document_id == pubmed_doc_id for f in cr.raw_facts)
+
+
+def test_missing_fulltext_document_never_falls_back_to_search_or_pubmed_document():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    epmc_entry = parse_result.payload["europepmc"]["90000008"]
+    fulltext_document_id = epmc_entry["fulltext_document_id"]
+    del store._by_id[fulltext_document_id]  # noqa: SLF001 - test-only direct removal
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    assert cr.degraded
+    assert projection.coverage_complete is False
+    assert any("not found in DocumentStore" in r for r in projection.unresolved_reasons)
+    # No "full text acquired"/"unavailable" fact was fabricated from a
+    # different document.
+    assert not any(f.unit == "literature_full_text_availability" for f in cr.raw_facts)
+    # Search-derived facts (open-access status etc.) are unaffected.
+    assert any(f.unit == "literature_open_access_status" for f in cr.raw_facts)
+
+
 def test_corrupted_version_chain_is_recorded_and_excluded_never_raised():
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
     report, store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
 
     parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
@@ -427,23 +561,58 @@ def test_corrupted_version_chain_is_recorded_and_excluded_never_raised():
     assert any("version chain corrupted" in r for r in projection.unresolved_reasons)
 
 
+def test_corrupted_europepmc_search_document_version_chain_excludes_only_that_document():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    search_document_id = parse_result.payload["europepmc"]["90000008"]["search_document_id"]
+    existing = store._by_id[search_document_id]  # noqa: SLF001
+    store._by_id[search_document_id] = dc_replace(existing, previous_version_id=search_document_id)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    assert cr.degraded
+    assert any("version chain corrupted" in r for r in projection.unresolved_reasons)
+    # PubMed facts unaffected by the search document's own corruption.
+    assert any(f.unit == "literature_publication_exists" for f in cr.raw_facts)
+    assert not any(f.unit == "literature_open_access_status" for f in cr.raw_facts)
+
+
 # --- Lineage / Source projection rules ---------------------------------------
 def test_source_projection_never_copies_document_body_into_excerpt():
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
     report, store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
 
     projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
     for source in projection.collection_result.sources:
         assert source.excerpt == ""
-        assert source.tier is LITERATURE_SOURCE_TIER
 
 
 def test_source_and_raw_fact_document_id_lineage_preserved_through_to_fact():
     graph = _literature_graph("a")
     target_id = graph.targets[0].target_id
-    http = fx.FakeHttpClient(responses={fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml"))})
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
     report, store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
 
     projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
@@ -457,6 +626,196 @@ def test_source_and_raw_fact_document_id_lineage_preserved_through_to_fact():
     for fact in integrity_output.facts:
         assert fact.document_id in projection.document_ids
         assert fact.source_authority is DocumentAuthority.BIOMEDICAL_LITERATURE
+
+
+def test_pubmed_fact_lineage_is_the_pubmed_efetch_document():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    pubmed_doc_id = parse_result.payload["parsed_documents"][0]["document_id"]
+    pubmed_public_url = store.get(pubmed_doc_id).document.url
+
+    pubmed_facts = [f for f in cr.raw_facts if f.unit.startswith("literature_publication_")]
+    assert pubmed_facts
+    for f in pubmed_facts:
+        assert f.document_id == pubmed_doc_id
+        assert f.source.url == pubmed_public_url
+
+
+def test_europepmc_search_metadata_fact_lineage_is_the_search_document_not_pubmed_or_fulltext():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    epmc_entry = parse_result.payload["europepmc"]["90000008"]
+    pubmed_doc_id = parse_result.payload["parsed_documents"][0]["document_id"]
+    search_document_id = epmc_entry["search_document_id"]
+    fulltext_document_id = epmc_entry["fulltext_document_id"]
+    search_public_url = store.get(search_document_id).document.url
+    assert "europepmc.org" in search_public_url or "ebi.ac.uk" in search_public_url
+    assert "search" in search_public_url
+
+    open_access_fact = next(f for f in cr.raw_facts if f.unit == "literature_open_access_status")
+    assert open_access_fact.document_id == search_document_id
+    assert open_access_fact.document_id != pubmed_doc_id
+    assert open_access_fact.document_id != fulltext_document_id
+    assert open_access_fact.source.url == search_public_url
+
+
+def test_europepmc_fulltext_acquired_fact_lineage_is_the_fulltext_document_not_search_or_pubmed():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    epmc_entry = parse_result.payload["europepmc"]["90000008"]
+    pubmed_doc_id = parse_result.payload["parsed_documents"][0]["document_id"]
+    search_document_id = epmc_entry["search_document_id"]
+    fulltext_document_id = epmc_entry["fulltext_document_id"]
+    fulltext_public_url = store.get(fulltext_document_id).document.url
+    assert "fullTextXML" in fulltext_public_url
+
+    acquired_fact = next(
+        f for f in cr.raw_facts if f.unit == "literature_full_text_availability" and f.value is True
+    )
+    assert acquired_fact.document_id == fulltext_document_id
+    assert acquired_fact.document_id != pubmed_doc_id
+    assert acquired_fact.document_id != search_document_id
+    assert acquired_fact.source.url == fulltext_public_url
+
+
+def test_non_oa_unavailable_fact_lineage_is_the_search_document():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(fx.fixture_text("europepmc_search_non_oa.json")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    cr = projection.collection_result
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    epmc_entry = parse_result.payload["europepmc"]["90000001"]
+    pubmed_doc_id = parse_result.payload["parsed_documents"][0]["document_id"]
+    search_document_id = epmc_entry["search_document_id"]
+    assert epmc_entry.get("fulltext_document_id") is None
+
+    unavailable_fact = next(
+        f for f in cr.raw_facts if f.unit == "literature_full_text_availability" and f.value is False
+    )
+    assert unavailable_fact.document_id == search_document_id
+    assert unavailable_fact.document_id != pubmed_doc_id
+
+
+# --- Tier: never inferred, never a fixed constant -----------------------------
+def test_preprint_source_tier_is_unknown_never_tier_2():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000022"]): fx.ok(fx.fixture_text("preprint.xml")),
+            fx.europepmc_search_url("90000022"): fx.ok(fx.fixture_text("europepmc_search_preprint.json")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000022")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    for source in projection.collection_result.sources:
+        assert source.tier is SourceTier.UNKNOWN
+        assert source.tier is not SourceTier.TIER_2
+
+
+def test_pubmed_journal_article_source_tier_is_unknown_never_auto_tier_2():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000001"]): fx.ok(fx.fixture_text("normal_abstract.xml")),
+            fx.europepmc_search_url("90000001"): fx.ok(_EPMC_EMPTY),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000001")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    for source in projection.collection_result.sources:
+        assert source.tier is SourceTier.UNKNOWN
+
+
+def test_europepmc_search_and_fulltext_source_tier_are_both_unknown():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    assert len(projection.collection_result.sources) == 3
+    for source in projection.collection_result.sources:
+        assert source.tier is SourceTier.UNKNOWN
+
+
+def test_tier_never_promotes_evidence_class_or_independent_confirmation():
+    """Whatever Source.tier reads, BIOMEDICAL_PUBLICATION_ASSERTION /
+    independent_confirmation=False / is_decision_grade=False are driven
+    by source_authority, not tier -- unaffected by the tier fix."""
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    projection = project_literature_target_reports("DEMOBIO", report.target_reports, store)
+    _, integrity_output = _through_fact_collector_and_evidence_integrity(projection.collection_result)
+    fulltext_fact = next(
+        f for f in integrity_output.facts
+        if f.unit == "literature_full_text_availability" and f.value is True
+    )
+    assert fulltext_fact.source_tier is SourceTier.UNKNOWN
+    assert fulltext_fact.evidence_class is EvidenceClass.BIOMEDICAL_PUBLICATION_ASSERTION
+    assert fulltext_fact.independent_confirmation is False
+    assert fulltext_fact.is_decision_grade is False
 
 
 # --- Zero external requests made by the bridge itself ------------------------
@@ -476,6 +835,25 @@ def test_bridge_itself_makes_zero_additional_requests():
     project_literature_target_reports("DEMOBIO", report.target_reports, store)
 
     assert http.requested_urls == before  # not one more request was made
+
+
+# --- Payload no longer carries full-text body/section content ----------------
+def test_execution_report_payload_never_carries_parsed_fulltext_body():
+    graph = _literature_graph("a")
+    target_id = graph.targets[0].target_id
+    http = fx.FakeHttpClient(
+        responses={
+            fx.efetch_url(["90000008"]): fx.ok(fx.fixture_text("ids_complete.xml")),
+            fx.europepmc_search_url("90000008"): fx.ok(fx.fixture_text("europepmc_search_oa.json")),
+            fx.europepmc_fulltext_url("PMC9990008"): fx.ok(fx.fixture_text("europepmc_fulltext_oa.xml")),
+        }
+    )
+    report, store = _run({target_id: LiteratureReference(ct_pmid="90000008")}, http, graph=graph)
+    parse_result = next(r for r in report.target_reports[0].step_results if r.step_id == "p_a")
+    epmc_entry = parse_result.payload["europepmc"]["90000008"]
+    assert "parsed_fulltext" not in epmc_entry
+    assert epmc_entry.get("fulltext_section_count") == 3
+    assert "fictional full-text introduction content" not in str(parse_result.payload)
 
 
 # --- Production non-connection ------------------------------------------------
