@@ -3,11 +3,18 @@
 A peer-reviewed-literature acquisition path ClinicalTrials.gov alone cannot
 provide: a ClinicalTrials.gov record is the sponsor's own structured trial
 registration; it never contains a published paper's actual reported result,
-methodology critique, or independent replication. This phase goes only as
-far as OFFLINE_VERIFIED -- no Live communication is ever made (see
-``ALLOWED_HOSTS``/the module's HTTP-safety section below for what a FUTURE
-Live Smoke phase would need to respect), and this module is never called
-from ``Pipeline.run()`` (CLAUDE.md's standing prohibition, unchanged).
+methodology critique, or independent replication. This module's own
+``ImplementationStatus`` never exceeds OFFLINE_VERIFIED -- no test in this
+repository, or in Literature Live Smoke (Phase 3F.1), makes a real Live
+call. Production reachability: Phase 4.2A narrowly, explicitly authorized
+``cli.py::run_one()`` to construct this adapter (via
+``research/literature_pipeline_integration.py``) and drive it through
+``AcquisitionExecutor.run()`` -- but ONLY when a default-OFF CLI flag
+(``--document-first-literature``) is passed together with exactly one
+explicit PMID/NCT-ID reference and ``--live``; every other invocation of
+this CLI never reaches this adapter at all. This module itself still
+imports nothing from ``cli.py``/``pipeline.py`` and knows nothing about
+either.
 
 Official specs modeled: NCBI E-utilities
 (https://www.ncbi.nlm.nih.gov/books/NBK25497/) and the Europe PMC RESTful
@@ -29,9 +36,10 @@ sequence per ``LiteratureReference``:
        independently, elsewhere.
 
 Registered with an ``AcquisitionExecutor`` by the caller under adapter_id
-``"pubmed_europepmc"`` -- like every other adapter in this repository, NOT
-called from the production pipeline. Every test drives it against a fake
-HTTP double loaded from ``tests/fixtures/literature_real_format/``, so
+``"pubmed_europepmc"`` -- see the module docstring's "Production
+reachability" note above for the one, narrow, flag-gated path that now
+reaches this adapter. Every test drives it against a fake HTTP double
+loaded from ``tests/fixtures/literature_real_format/``, so
 ``ImplementationStatus`` for the steps this adapter backs tops out at
 OFFLINE_VERIFIED, never LIVE_VERIFIED (mirrors
 ``research/form4_acquisition_adapter.py``'s own precedent exactly).
@@ -135,11 +143,23 @@ from ..collectors.literature import (
     parse_europepmc_search_response,
     parse_pubmed_articleset,
 )
-from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, Provenance
+from ..schemas.enums import UNKNOWN, ContentKind, DocumentAuthority, Provenance, ResearchDomain
 from ..schemas.fact import utc_now_iso
 from .acquisition_executor import ExecutionContext, StepExecutionResult
+from .acquisition_planning import AcquisitionMethod
+from .checks import SubjectScope
 from .document_store import DocumentRole, derive_document_id
-from .source_routing import AcquisitionStep, StepKind, StepStatus
+from .source_routing import (
+    AcquisitionStep,
+    AcquisitionTarget,
+    EvidenceRequirement,
+    FailurePolicy,
+    ImplementationStatus,
+    SourceRoutingGraph,
+    StepKind,
+    StepStatus,
+    TargetKind,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1243,6 +1263,89 @@ class PubMedLiteratureAdapter:
         )
 
 
+#: The shared, single-target LOCATE->FETCH->PARSE step ids
+#: ``build_single_target_literature_graph`` always uses -- kept as named
+#: constants (never re-literalized at a second call site) so Literature
+#: Live Smoke (Phase 3F.1, ``literature_live_smoke.py::_build_graph``) and
+#: the Phase 4.2A production integration
+#: (``research/literature_pipeline_integration.py``) read the exact same
+#: step-id shape from one place.
+SINGLE_TARGET_LOCATE_STEP_ID = "l1"
+SINGLE_TARGET_FETCH_STEP_ID = "f"
+SINGLE_TARGET_PARSE_STEP_ID = "p"
+
+
+def build_single_target_literature_graph(
+    target_id: str = "target_literature",
+    *,
+    requirement_id: str | None = None,
+    legacy_need_id: str = "literature_explicit_reference",
+    implementation_status: ImplementationStatus = ImplementationStatus.OFFLINE_VERIFIED,
+) -> SourceRoutingGraph:
+    """The single-target LOCATE->FETCH->PARSE graph for acquiring ONE
+    explicit literature reference (a PMID or an NCT ID) -- the ONE shared
+    definition of this 3-step shape in this repository. Both Literature
+    Live Smoke (``literature_live_smoke.py::_build_graph``, Phase 3F.1) and
+    the Phase 4.2A production Literature Pipeline Integration
+    (``literature_pipeline_integration.py``) call this function rather than
+    each hand-rolling their own copy, so the two can never silently drift
+    apart.
+
+    This is deliberately NOT the 31-group master catalog's own
+    ``SourceRoutingGraph`` (see
+    ``source_routing_catalog.py::build_source_routing_graph``) -- it exists
+    only to drive ONE explicit acquisition through an
+    ``AcquisitionExecutor``, targets exactly one ``AcquisitionTarget``, and
+    is never passed to ``routing_coverage_counts()`` (which always defaults
+    to the master catalog's own graph when none is given, never this one).
+    Building this graph therefore can never change
+    ``OFFLINE_VERIFIED``/``LIVE_VERIFIED``/``legacy_needs``/
+    ``equivalence_groups`` counts, and ``serves_requirement_ids`` here names
+    only THIS graph's own single, locally-scoped requirement -- never one
+    of the 31-group catalog's real ``EvidenceRequirement`` ids, so this
+    graph is never mistaken for coverage of any of the 31 ResearchNeeds.
+
+    ``implementation_status`` defaults to ``OFFLINE_VERIFIED`` -- matching
+    Literature Live Smoke's own existing choice for this graph: every step
+    here is (a) actually invoked by a real ``AcquisitionExecutor`` (so, by
+    ``ImplementationStatus.rank``, it already implies ``PIPELINE_WIRED``
+    once a caller wires it into ``Pipeline.run()``, which Phase 4.2A's
+    caller does, conditionally, under a default-OFF flag) and (b) verified
+    only against injected fake transport/a local loopback server in this
+    repository's own test suite -- never against the real NCBI/Europe PMC
+    hosts, so it is never ``LIVE_VERIFIED``.
+    """
+    resolved_requirement_id = requirement_id or f"req_{target_id}"
+    l1 = AcquisitionStep(
+        step_id=SINGLE_TARGET_LOCATE_STEP_ID, target_id=target_id, step_kind=StepKind.LOCATE,
+        acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER, adapter_id=LITERATURE_ADAPTER_ID,
+        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.REQUIRED,
+        implementation_status=implementation_status,
+    )
+    f = AcquisitionStep(
+        step_id=SINGLE_TARGET_FETCH_STEP_ID, target_id=target_id, step_kind=StepKind.FETCH,
+        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=LITERATURE_ADAPTER_ID,
+        depends_on_step_ids=(SINGLE_TARGET_LOCATE_STEP_ID,), completion_condition=StepStatus.BODY_FETCHED,
+        implementation_status=implementation_status,
+    )
+    p = AcquisitionStep(
+        step_id=SINGLE_TARGET_PARSE_STEP_ID, target_id=target_id, step_kind=StepKind.PARSE,
+        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=LITERATURE_ADAPTER_ID,
+        depends_on_step_ids=(SINGLE_TARGET_FETCH_STEP_ID,), completion_condition=StepStatus.PARSED,
+        implementation_status=implementation_status,
+    )
+    requirement = EvidenceRequirement(
+        requirement_id=resolved_requirement_id, serves_legacy_need_ids=(legacy_need_id,),
+        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.SCIENCE_TECHNOLOGY,
+    )
+    target = AcquisitionTarget(
+        target_id=target_id, target_kind=TargetKind.LITERATURE_ARTICLE,
+        required_step_ids=(SINGLE_TARGET_LOCATE_STEP_ID, SINGLE_TARGET_FETCH_STEP_ID, SINGLE_TARGET_PARSE_STEP_ID),
+        serves_requirement_ids=(resolved_requirement_id,),
+    )
+    return SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(l1, f, p))
+
+
 __all__ = [
     "ALLOWED_HOSTS",
     "DEFAULT_MAX_RETRIES",
@@ -1260,10 +1363,14 @@ __all__ = [
     "MAX_REQUESTS_PER_RUN",
     "NCBI_EFETCH_URL",
     "NCBI_ESEARCH_URL",
+    "SINGLE_TARGET_FETCH_STEP_ID",
+    "SINGLE_TARGET_LOCATE_STEP_ID",
+    "SINGLE_TARGET_PARSE_STEP_ID",
     "EuropePmcFullTextAdapter",
     "LiteratureReference",
     "LiteratureSearchQuery",
     "PubMedLiteratureAdapter",
     "RequestBudgetLimits",
     "RequestBudgetUsage",
+    "build_single_target_literature_graph",
 ]

@@ -38,6 +38,19 @@ from .reporting.report import render_report
 from .research.adversarial import build_plan, run_adversarial_search
 from .research.anthropic_web import AnthropicWebResearchProvider
 from .research.corpus import CorpusResearchProvider
+from .research.literature_pipeline_integration import (
+    DEFAULT_MAX_ARTICLES as LITERATURE_DEFAULT_MAX_ARTICLES,
+)
+from .research.literature_pipeline_integration import (
+    DEFAULT_MAX_FULLTEXT_FETCHES as LITERATURE_DEFAULT_MAX_FULLTEXT_FETCHES,
+)
+from .research.literature_pipeline_integration import (
+    LiteraturePipelineRequest,
+    LiteraturePipelineRequestError,
+    bundle_diagnostics,
+    run_literature_pipeline_acquisition,
+    validate_literature_pipeline_request,
+)
 from .research.provider import (
     CompositeResearchProvider,
     NullResearchProvider,
@@ -155,6 +168,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", type=Path, help="override the SQLite path")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--document-first-literature",
+        action="store_true",
+        help=(
+            "Phase 4.2A, default OFF: acquire ONE explicit literature reference "
+            "(--literature-pmid XOR --literature-nct-id) via the Document-First Literature path "
+            "(AcquisitionExecutor -> PubMedLiteratureAdapter -> DocumentStore -> Evidence/Chunk "
+            "Projection) and feed the result into this run alongside the existing structured "
+            "collectors, before adversarial discovery. Requires --live and exactly one of "
+            "--literature-pmid/--literature-nct-id; never combinable with --fixtures/--corpus; "
+            "requires IRA_NCBI_TOOL/IRA_NCBI_EMAIL to be configured in the environment "
+            "(IRA_NCBI_API_KEY is optional). An explicit reference is never promoted to 'the "
+            "current program' for the ticker -- see research/literature_pipeline_integration.py."
+        ),
+    )
+    parser.add_argument(
+        "--literature-pmid", metavar="PMID", help="explicit PMID for --document-first-literature"
+    )
+    parser.add_argument(
+        "--literature-nct-id",
+        metavar="NCT_ID",
+        help="explicit NCT ID for --document-first-literature",
+    )
+    parser.add_argument(
+        "--literature-max-articles",
+        type=int,
+        default=LITERATURE_DEFAULT_MAX_ARTICLES,
+        help=(
+            f"--document-first-literature NCT discovery mode only: max PMIDs to process "
+            f"(default {LITERATURE_DEFAULT_MAX_ARTICLES})"
+        ),
+    )
+    parser.add_argument(
+        "--literature-max-fulltext-fetches",
+        type=int,
+        default=LITERATURE_DEFAULT_MAX_FULLTEXT_FETCHES,
+        help=(
+            "--document-first-literature: max Europe PMC full-text fetches (default "
+            f"{LITERATURE_DEFAULT_MAX_FULLTEXT_FETCHES}; a single explicit PMID is additionally "
+            "capped at 1 regardless of this value)"
+        ),
+    )
     return parser
 
 
@@ -206,6 +261,8 @@ def run_one(
     settings,
     repo: Repository,
     http: HttpClient,
+    *,
+    literature_request: LiteraturePipelineRequest | None = None,
 ) -> ResearchResult:
     fixtures = FixtureCollector(settings.fixture_dir)
     corpus = CorpusResearchProvider(settings.corpus_dir, ticker)
@@ -268,6 +325,24 @@ def run_one(
             use_fixtures=args.fixtures,
         )
 
+    # Phase 4.2A: default-OFF Literature Document-First acquisition, run
+    # AFTER the existing structured collectors (above) and BEFORE
+    # adversarial web search (below) -- new Literature Evidence/Chunk
+    # Projection facts must be present before FactCollector/Evidence
+    # Integrity/domain agents run inside Pipeline.run(), never added
+    # afterward as late evidence. `literature_request` is `None` for every
+    # run that did not pass --document-first-literature (validated once in
+    # `main()`), so this block is a complete no-op -- zero extra imports
+    # executed, zero extra objects constructed -- for every pre-existing
+    # invocation of this CLI.
+    literature_bundle = None
+    if literature_request is not None:
+        literature_bundle = run_literature_pipeline_acquisition(literature_request, ticker=ticker)
+        if literature_bundle.collection_result is not None:
+            results = [*results, literature_bundle.collection_result]
+        if literature_bundle.chunks:
+            chunks = [*chunks, *literature_bundle.chunks]
+
     if args.adversarial:
         # Requirement M2: search results are discovery evidence, never facts.
         # They are NOT merged into the document set that feeds extraction --
@@ -316,6 +391,9 @@ def run_one(
         adversarial=adversarial,
         chunks=chunks,
         capture_info=capture_info,
+        direct_acquisition_info=bundle_diagnostics(
+            literature_bundle, enabled=literature_request is not None
+        ),
     )
     return pipeline.run(
         ticker,
@@ -465,6 +543,7 @@ def result_to_json(result: ResearchResult) -> dict:
             for q in result.quarantined_sources
         ],
         "capture_info": result.capture_info,
+        "direct_acquisition_info": result.direct_acquisition_info,
         "max_kill_level": str(verdict.kill_gate.max_level) if verdict else None,
         "kill_gate": [a.to_row() for a in verdict.kill_gate.assessments] if verdict else [],
         "scores": card.scores if card else {},
@@ -479,6 +558,27 @@ def result_to_json(result: ResearchResult) -> dict:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # Phase 4.2A: validated BEFORE settings/logging/DB/HttpClient are even
+    # constructed, so a rejected --document-first-literature invocation
+    # makes zero HTTP attempts and touches no other resource either. A
+    # flag-off invocation with no literature identifiers (the pre-existing
+    # default) returns None here and this block is otherwise inert.
+    try:
+        literature_request = validate_literature_pipeline_request(
+            enabled=args.document_first_literature,
+            pmid=args.literature_pmid,
+            nct_id=args.literature_nct_id,
+            live=args.live,
+            use_fixtures=args.fixtures,
+            use_corpus=args.corpus,
+            max_articles=args.literature_max_articles,
+            max_fulltext_fetches=args.literature_max_fulltext_fetches,
+        )
+    except LiteraturePipelineRequestError as exc:
+        print(f"--document-first-literature: {exc}", file=sys.stderr)
+        return 2
+
     settings = get_settings()
     if args.db:
         settings.db_path = args.db
@@ -511,6 +611,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_parser().print_help()
         return 2
 
+    if literature_request is not None and len(targets) != 1:
+        print(
+            "--document-first-literature supports exactly one ticker per invocation in this "
+            "phase (an explicit PMID/NCT ID reference is not automatically shared across "
+            "--compare/--screen targets).",
+            file=sys.stderr,
+        )
+        return 2
+
     http = HttpClient(
         user_agent=settings.sec_user_agent,
         timeout=settings.http_timeout,
@@ -526,7 +635,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     exit_code = 0
     try:
         for ticker in targets:
-            result = run_one(ticker, args, settings, repo, http)
+            result = run_one(
+                ticker, args, settings, repo, http, literature_request=literature_request
+            )
             results.append(result)
             if result.context.status != RunStatus.COMPLETE:
                 exit_code = 1

@@ -1,9 +1,21 @@
 """AcquisitionExecutor: executes a Source Routing Graph's steps for real.
 
-Phase 3A scope only. This module is NOT called from the production pipeline
-(``Pipeline.run()``) -- see CLAUDE.md's Phase 3A forbidden-changes list.
-Every test in this repository drives it with injected fake adapters/HTTP
-transport; no real network call is ever made from here.
+Phase 3A scope originally kept this module fully disconnected from the
+production pipeline. Phase 4.2A narrowly, explicitly authorized ONE
+reachable path: ``cli.py::run_one()`` constructs an instance of this class
+(via ``research/literature_pipeline_integration.py``) and calls ``.run()``
+against a single-target Literature graph
+(``literature_acquisition_adapter.build_single_target_literature_graph``)
+-- but ONLY when the caller passes a default-OFF CLI flag
+(``--document-first-literature``) together with exactly one explicit PMID/
+NCT-ID reference and ``--live``. Every other run path -- the master
+31-group SourceRoutingGraph, SEC/ClinicalTrials/Form4's own new
+Acquisition Adapters, and every invocation of this CLI that does not pass
+that flag -- remains exactly as disconnected from ``Pipeline.run()`` as
+Phase 3A originally left it; this module itself still knows nothing about
+``cli.py`` and imports none of it. Every test in this repository (Phase
+4.2A's own included) drives this class with injected fake adapters/HTTP
+transport; no real network call is ever made from a test.
 
 Adapters are supplied by the caller through dependency injection
 (``AdapterProtocol.execute(step, context) -> StepExecutionResult``), keyed by

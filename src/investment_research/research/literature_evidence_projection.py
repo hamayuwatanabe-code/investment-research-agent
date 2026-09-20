@@ -1,9 +1,20 @@
 """Literature Evidence Projection Bridge (Phase 4.1A).
 
-Offline-only, pure, and never called from ``Pipeline.run()``/``cli.py`` --
-see the repository's Phase 4.0 audit and CLAUDE.md's standing prohibition
-on connecting the new Acquisition layer to production without a separate,
-explicit approval (Phase 4.2+ territory, not this module's).
+Offline-only and pure -- this module itself still calls no network code
+and imports nothing from ``cli.py``/``pipeline.py``. Production
+reachability: Phase 4.2A explicitly authorized
+``research/literature_pipeline_integration.py`` to call
+``project_literature_target_reports`` as one step of a larger, flag-gated
+production path (``cli.py::run_one()`` -> literature_pipeline_integration
+-> this module -> ``literature_chunk_projection.py`` ->
+``Pipeline.run()``'s existing ``collection_results``/``chunks``
+parameters) -- reachable ONLY when a default-OFF CLI flag
+(``--document-first-literature``) is passed together with exactly one
+explicit PMID/NCT-ID reference and ``--live``. Every other invocation of
+this CLI never reaches this module. This module is never called directly
+by ``cli.py``/``pipeline.py`` themselves, and never will be -- see
+CLAUDE.md's standing prohibition on widening the Acquisition layer's
+production connection beyond what a phase explicitly authorizes.
 
 What this module does: projects the output of one ``AcquisitionExecutor``
 run against ``PubMedLiteratureAdapter`` -- a run's

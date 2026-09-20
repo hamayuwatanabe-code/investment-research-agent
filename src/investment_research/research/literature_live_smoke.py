@@ -126,7 +126,6 @@ Capture Manifest write/replay cycle directly, without going through
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections.abc import Callable
@@ -144,11 +143,10 @@ from ..collectors.literature import (
     parse_europepmc_search_response,
     parse_pubmed_articleset,
 )
-from ..schemas.enums import FetchOutcome, ResearchDomain
+from ..schemas.enums import FetchOutcome
+from . import ncbi_credentials as _ncbi_credentials
 from .acquisition_executor import AcquisitionExecutor, ExecutionDiagnostics
-from .acquisition_planning import AcquisitionMethod
 from .capture_manifest import ManifestReadStatus, read_manifest
-from .checks import SubjectScope
 from .clinicaltrials_acquisition_adapter import NCT_ID_RE
 from .clinicaltrials_live_smoke import normalize_nct_id
 from .document_store import DocumentStore
@@ -159,19 +157,10 @@ from .literature_acquisition_adapter import (
     LiteratureReference,
     PubMedLiteratureAdapter,
     RequestBudgetLimits,
+    build_single_target_literature_graph,
 )
 from .sec_live_smoke import AllowlistedHttpClient, _safe
-from .source_routing import (
-    AcquisitionStep,
-    AcquisitionTarget,
-    EvidenceRequirement,
-    FailurePolicy,
-    ImplementationStatus,
-    SourceRoutingGraph,
-    StepKind,
-    StepStatus,
-    TargetKind,
-)
+from .source_routing import SourceRoutingGraph, StepStatus
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
 #: Deliberately far below NCBI's own documented 3 req/s no-API-key cap, and
@@ -199,62 +188,22 @@ TARGETED_MAX_FULLTEXT_FETCHES_CAP = 1
 #: separately gates via IRA_NCBI_TOOL/IRA_NCBI_EMAIL/IRA_NCBI_API_KEY.
 LITERATURE_LIVE_SMOKE_USER_AGENT = "investment-research-agent-literature-live-smoke/1.0"
 
-NCBI_TOOL_ENV_VAR = "IRA_NCBI_TOOL"
-NCBI_EMAIL_ENV_VAR = "IRA_NCBI_EMAIL"
-NCBI_API_KEY_ENV_VAR = "IRA_NCBI_API_KEY"
-
 #: NCBI PMIDs are plain decimal integers; generous upper bound on digit
 #: count, never a guess at a real PMID's current maximum length.
 PMID_RE = re.compile(r"^\d{1,9}$")
 
-
-@dataclass(frozen=True)
-class NcbiCredentials:
-    """Duck-typed to match ``literature_acquisition_adapter.py``'s own
-    ``_eutils_params``/``_secret_values`` expectations (``ncbi_tool``/
-    ``ncbi_email``/``ncbi_api_key`` attributes). Never logged, printed, or
-    placed in a plan/report/Document/Capture Manifest anywhere in THIS
-    module; the adapter it is handed to uses these values for exactly one
-    thing -- building a wire URL -- per that module's own wire_url/
-    public_url discipline."""
-
-    ncbi_tool: str
-    ncbi_email: str
-    ncbi_api_key: str
-
-
-@dataclass(frozen=True)
-class CredentialStatus:
-    """Configured/not-configured booleans ONLY -- never the values
-    themselves (Phase 3F.1 requirement 3)."""
-
-    tool_configured: bool
-    email_configured: bool
-    #: Optional; never contributes to a refusal on its own.
-    api_key_configured: bool
-
-
-def resolve_ncbi_credentials(env: dict[str, str] | None = None) -> tuple[NcbiCredentials, CredentialStatus, list[str]]:
-    """Reads the three NCBI courtesy-identification env vars directly from
-    the environment -- deliberately NOT through ``config.Settings``, whose
-    ``ncbi_tool`` carries a silent non-empty default this tool must NOT
-    inherit (this tool refuses on an unset/blank ``IRA_NCBI_TOOL``, exactly
-    like ``sec_live_smoke.py``'s own ``IRA_SEC_USER_AGENT`` refusal, rather
-    than quietly using a placeholder). Returns
-    ``(credentials, status, missing_required_env_var_names)`` --
-    ``IRA_NCBI_API_KEY`` is always optional and never appears in the
-    missing list.
-    """
-    source = env if env is not None else os.environ
-    tool = (source.get(NCBI_TOOL_ENV_VAR) or "").strip()
-    email = (source.get(NCBI_EMAIL_ENV_VAR) or "").strip()
-    api_key = (source.get(NCBI_API_KEY_ENV_VAR) or "").strip()
-    missing = [name for name, value in ((NCBI_TOOL_ENV_VAR, tool), (NCBI_EMAIL_ENV_VAR, email)) if not value]
-    credentials = NcbiCredentials(ncbi_tool=tool, ncbi_email=email, ncbi_api_key=api_key)
-    status = CredentialStatus(
-        tool_configured=bool(tool), email_configured=bool(email), api_key_configured=bool(api_key),
-    )
-    return credentials, status, missing
+#: Phase 4.2A extraction: credential resolution moved to
+#: ``ncbi_credentials.py`` (shared with the production Literature Pipeline
+#: Integration) -- re-exported here under their original names so every
+#: existing caller/test of THIS module (``live.resolve_ncbi_credentials``,
+#: ``live.NcbiCredentials``, etc.) keeps working unchanged. Behavior is
+#: byte-identical to before the extraction; only the implementation moved.
+NCBI_TOOL_ENV_VAR = _ncbi_credentials.NCBI_TOOL_ENV_VAR
+NCBI_EMAIL_ENV_VAR = _ncbi_credentials.NCBI_EMAIL_ENV_VAR
+NCBI_API_KEY_ENV_VAR = _ncbi_credentials.NCBI_API_KEY_ENV_VAR
+NcbiCredentials = _ncbi_credentials.NcbiCredentials
+CredentialStatus = _ncbi_credentials.CredentialStatus
+resolve_ncbi_credentials = _ncbi_credentials.resolve_ncbi_credentials
 
 
 def _discovery_budget(max_articles: int, max_fulltext_fetches: int) -> tuple[RequestBudgetLimits, int, str]:
@@ -506,33 +455,15 @@ def build_plan(
 
 
 def _build_graph(target_id: str = "target_lit_smoke") -> SourceRoutingGraph:
-    l1 = AcquisitionStep(
-        step_id="l1", target_id=target_id, step_kind=StepKind.LOCATE,
-        acquisition_method=AcquisitionMethod.NEW_DIRECT_ADAPTER, adapter_id=LITERATURE_ADAPTER_ID,
-        completion_condition=StepStatus.URL_RESOLVED, failure_policy=FailurePolicy.REQUIRED,
-        implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+    """Delegates to the ONE shared single-target LOCATE->FETCH->PARSE graph
+    definition (Phase 4.2A extraction) -- see
+    ``literature_acquisition_adapter.build_single_target_literature_graph``'s
+    own docstring. ``requirement_id``/``legacy_need_id`` are pinned to this
+    function's own pre-existing values so this remains a byte-identical
+    graph to the one this module built before the extraction."""
+    return build_single_target_literature_graph(
+        target_id, requirement_id="req_lit_smoke", legacy_need_id="live_smoke_literature"
     )
-    f = AcquisitionStep(
-        step_id="f", target_id=target_id, step_kind=StepKind.FETCH,
-        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=LITERATURE_ADAPTER_ID,
-        depends_on_step_ids=("l1",), completion_condition=StepStatus.BODY_FETCHED,
-        implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-    )
-    p = AcquisitionStep(
-        step_id="p", target_id=target_id, step_kind=StepKind.PARSE,
-        acquisition_method=AcquisitionMethod.KNOWN_URL_HTTP, adapter_id=LITERATURE_ADAPTER_ID,
-        depends_on_step_ids=("f",), completion_condition=StepStatus.PARSED,
-        implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-    )
-    requirement = EvidenceRequirement(
-        requirement_id="req_lit_smoke", serves_legacy_need_ids=("live_smoke_literature",),
-        subject_scope=SubjectScope.COMPANY, domain=ResearchDomain.SCIENCE_TECHNOLOGY,
-    )
-    target = AcquisitionTarget(
-        target_id=target_id, target_kind=TargetKind.LITERATURE_ARTICLE,
-        required_step_ids=("l1", "f", "p"), serves_requirement_ids=("req_lit_smoke",),
-    )
-    return SourceRoutingGraph(requirements=(requirement,), targets=(target,), steps=(l1, f, p))
 
 
 def _strip_ncbi_tool_param(url: str) -> str:

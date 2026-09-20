@@ -78,6 +78,32 @@ from .resume import build_plan as build_resume_plan
 
 log = logging.getLogger(__name__)
 
+#: Must equal ``research.literature_evidence_projection.BRIDGE_COLLECTOR_
+#: LABEL`` exactly. Duplicated here (not imported) deliberately, mirroring
+#: ``acquisition_executor.MAX_WEB_SEARCH_USES``'s own precedent: this
+#: module must never gain an import edge onto the Literature Acquisition
+#: path (Phase 4.1A/4.1B's own tests assert ``literature_evidence_
+#: projection``/``literature_chunk_projection``/``project_literature_*``
+#: never appear in ``pipeline_module.__dict__``) merely to borrow one
+#: string constant used for classification only -- this module never calls
+#: any acquisition code itself, whatever a run's ``collection_results``
+#: happen to contain. A dedicated test asserts the two stay equal.
+_LITERATURE_BRIDGE_COLLECTOR_LABEL = "literature_evidence_projection"
+
+
+def _literature_incomplete_blocking_reasons(
+    collection_results: Sequence[CollectionResult],
+) -> list[str]:
+    """Phase 4.2A: see the call site's own comment. Pure and read-only --
+    inspects only ``CollectionResult.collector``/``.degraded``/``.describe()``,
+    which already exist for every collector in this repository; nothing
+    Literature-specific is added to ``CollectionResult`` itself."""
+    return [
+        f"Literature Document-First acquisition did not complete: {result.describe()}"
+        for result in collection_results
+        if result.collector == _LITERATURE_BRIDGE_COLLECTOR_LABEL and result.degraded
+    ]
+
 
 def new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -116,6 +142,16 @@ class ResearchResult:
     #: Decision-Grade Evidence Gate: whether what was found is actually
     #: verified, as opposed to merely searched-for (requirement DG5).
     evidence_sufficiency: EvidenceSufficiencyMatrix | None = None
+    #: Phase 4.2A: safe (body/secret-free) diagnostics from an explicit-
+    #: reference acquisition path the caller ran before ``Pipeline.run()``
+    #: (today, only ``research/literature_pipeline_integration.py``'s
+    #: Literature Document-First bridge) -- counts and booleans only, never
+    #: a URL, a document/chunk body, or a raw ``ExecutionReport``. Mirrors
+    #: ``capture_info``'s own shape/threading exactly (constructor ->
+    #: ``self.direct_acquisition_info`` -> ``result.direct_acquisition_info``).
+    #: Empty for every run that did not use such a path -- existing callers
+    #: are entirely unaffected.
+    direct_acquisition_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -144,6 +180,7 @@ class Pipeline:
         chunks: Sequence[Chunk] = (),
         capture_info: dict[str, Any] | None = None,
         agent_effort_policy: dict[str, str] | None = None,
+        direct_acquisition_info: dict[str, Any] | None = None,
     ) -> None:
         self.repo = repository
         self.search = search
@@ -155,6 +192,7 @@ class Pipeline:
         self.adversarial = adversarial
         self.chunks = list(chunks)
         self.capture_info = capture_info or {}
+        self.direct_acquisition_info = direct_acquisition_info or {}
         # Requirement G: configurable per-agent effort policy (never
         # hard-coded into agent logic). None means "use
         # llm.effort_policy.DEFAULT_AGENT_EFFORT_POLICY" -- resolve_effort()
@@ -446,6 +484,7 @@ class Pipeline:
 
         self._identity = (ctx.ticker, company_name, tuple(aliases))
         result.capture_info = dict(self.capture_info)
+        result.direct_acquisition_info = dict(self.direct_acquisition_info)
         result.adversarial = self.adversarial
         result.chunks = list(self.chunks)
         if self.llm is not None:
@@ -986,6 +1025,19 @@ class Pipeline:
             blocking_reasons.append(completeness.reason())
         if not sufficiency.sufficient:
             blocking_reasons.extend(sufficiency.blocking_reasons())
+        # Phase 4.2A: strengthens (never weakens) the gate above. An
+        # explicitly-requested Literature Document-First acquisition (see
+        # research/literature_pipeline_integration.py) that genuinely did
+        # not complete -- a provider failure, BLOCKED, RATE_LIMITED, a real
+        # budget exclusion -- must never be silently absorbed into a run
+        # that still emits an Action; the caller opted into this evidence
+        # source explicitly, so its own incompleteness is exactly the same
+        # kind of gap completeness.blocked/sufficiency already withhold an
+        # Action for. Never fires for a clean, complete fetch
+        # (CollectionResult.degraded is False) and never fires at all when
+        # the flag was never used, since no CollectionResult then carries
+        # this collector label.
+        blocking_reasons.extend(_literature_incomplete_blocking_reasons(collection_results))
 
         if verdict is not None:
             if blocking_reasons:

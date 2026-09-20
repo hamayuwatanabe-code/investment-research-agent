@@ -1,8 +1,13 @@
 """Literature Chunk Projection Bridge (Phase 4.1B).
 
-Offline-only, pure, and never called from ``Pipeline.run()``/``cli.py`` --
-same standing prohibition as ``literature_evidence_projection.py`` (Phase
-4.1A), which this module is a companion to, not a replacement for.
+Offline-only and pure -- this module itself still calls no network code
+and imports nothing from ``cli.py``/``pipeline.py``. Production
+reachability: Phase 4.2A explicitly authorized
+``research/literature_pipeline_integration.py`` to call
+``project_literature_chunks`` as one step of a larger, flag-gated
+production path -- see ``literature_evidence_projection.py``'s own module
+docstring for the exact same note, which applies here identically. This
+module is never called directly by ``cli.py``/``pipeline.py`` themselves.
 
 What this module does: takes the ``document_ids`` a Phase 4.1A
 ``LiteratureEvidenceProjection`` call already resolved a ``Source``/
