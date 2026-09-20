@@ -128,6 +128,7 @@ from urllib.parse import quote, urlencode, urlparse
 from ..collectors.documents import Document
 from ..collectors.literature import (
     EuropePmcSearchResult,
+    ParsedEuropePmcFullText,
     ParsedPubmedArticle,
     check_pubmed_xml_shape,
     parse_europepmc_fulltext_xml,
@@ -557,16 +558,23 @@ class EuropePmcFullTextAdapter:
 
     def fetch_fulltext(
         self, pmcid: str, context: ExecutionContext
-    ) -> tuple[Document | None, int, str | None, str | None]:
+    ) -> tuple[Document | None, int, str | None, str | None, ParsedEuropePmcFullText | None]:
         """Only ever called by the caller after confirming OA/inEPMC --
         this method itself does not re-check that (single responsibility;
         the caller in ``PubMedLiteratureAdapter._fetch`` is the one place
         that decision is made, so it cannot be bypassed by a second code
         path). Returns ``(document, http_requests_made, failure_reason,
-        failure_kind)`` -- see ``search``'s own docstring for the general
-        shape; this method additionally uses ``FAILURE_KIND_BODY_TOO_SHORT``
-        and ``FAILURE_KIND_PARSE_ERROR`` (Phase 3F.2 correction
-        requirement 3)."""
+        failure_kind, parsed_fulltext)`` -- see ``search``'s own docstring
+        for the general shape; this method additionally uses
+        ``FAILURE_KIND_BODY_TOO_SHORT`` and ``FAILURE_KIND_PARSE_ERROR``
+        (Phase 3F.2 correction requirement 3). ``parsed_fulltext`` (Phase
+        4.1A addition) is the SAME structured ``ParsedEuropePmcFullText``
+        this method already computes internally to build ``document.text``
+        -- surfaced as a genuine additional return value, never
+        reconstructed or guessed by a caller, and ``None`` on every failure
+        path (mirrors ``document`` itself being ``None`` there). This
+        method still makes no RawFact/Fact decision and is still never
+        called from the production pipeline -- see the module docstring."""
         wire_url = EUROPEPMC_FULLTEXT_URL.format(pmcid=pmcid)
         _require_allowed_host(wire_url)
         public_url = _public_request_url(wire_url)
@@ -575,14 +583,14 @@ class EuropePmcFullTextAdapter:
         if cached is not None:
             if cached.status is not StepStatus.BODY_FETCHED:
                 kind = (cached.payload or {}).get("failure_kind")
-                return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed", kind
+                return None, 0, cached.failure_reason or "cached Europe PMC full-text fetch failed", kind, None
             text = cached.payload.get("text", "")
         else:
             usage = _budget_usage_for(context)
             if not usage.reserve_fulltext(self.limits):
                 return None, 0, (
                     f"{BUDGET_EXCEEDED_PREFIX}Europe PMC full-text fetch budget exhausted for PMCID {pmcid}"
-                ), FAILURE_KIND_BUDGET_EXCEEDED
+                ), FAILURE_KIND_BUDGET_EXCEEDED, None
             fetch, transport_error = _safe_get(self.http, wire_url, public_url, self.settings)
             if transport_error is not None:
                 context.request_cache[cache_key] = StepExecutionResult(
@@ -590,7 +598,7 @@ class EuropePmcFullTextAdapter:
                     http_requests_made=1, failure_reason=transport_error,
                     payload={"failure_kind": FAILURE_KIND_TRANSPORT_ERROR},
                 )
-                return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR
+                return None, 1, transport_error, FAILURE_KIND_TRANSPORT_ERROR, None
             if not fetch.ok:
                 failure = _sanitize_text(
                     f"Europe PMC full-text fetch failed for {pmcid}: {fetch.outcome} {fetch.error}",
@@ -601,7 +609,7 @@ class EuropePmcFullTextAdapter:
                     step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.FAILED,
                     http_requests_made=1, failure_reason=failure, payload={"failure_kind": kind},
                 )
-                return None, 1, failure, kind
+                return None, 1, failure, kind, None
             text = fetch.text
             if len(text.strip()) < MIN_BODY_CHARS:
                 failure = "Europe PMC full-text response body too short to be real full text"
@@ -610,7 +618,7 @@ class EuropePmcFullTextAdapter:
                     http_requests_made=1, failure_reason=failure,
                     payload={"failure_kind": FAILURE_KIND_BODY_TOO_SHORT},
                 )
-                return None, 1, failure, FAILURE_KIND_BODY_TOO_SHORT
+                return None, 1, failure, FAILURE_KIND_BODY_TOO_SHORT, None
             context.request_cache[cache_key] = StepExecutionResult(
                 step_id=f"_cache_epmc_fulltext_{pmcid}", status=StepStatus.BODY_FETCHED,
                 payload={"text": text}, http_requests_made=1,
@@ -620,7 +628,7 @@ class EuropePmcFullTextAdapter:
         if parsed is None or not parsed.sections:
             return None, (0 if cached is not None else 1), (
                 "Europe PMC full-text body did not match the expected JATS-like <article> shape"
-            ), FAILURE_KIND_PARSE_ERROR
+            ), FAILURE_KIND_PARSE_ERROR, None
         # public_url only -- this is a genuine Europe PMC URL, never a wire
         # URL carrying NCBI courtesy params (Europe PMC calls never do), but
         # routed through the same public_url variable for consistency and
@@ -633,7 +641,7 @@ class EuropePmcFullTextAdapter:
             content_kind=ContentKind.FULL_DOCUMENT, provenance=Provenance.LIVE,
             retrieved_at=utc_now_iso(), authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
         )
-        return document, (0 if cached is not None else 1), None, None
+        return document, (0 if cached is not None else 1), None, None, parsed
 
 
 class PubMedLiteratureAdapter:
@@ -986,8 +994,9 @@ class PubMedLiteratureAdapter:
                     }
                 continue
             fulltext_document = None
+            parsed_fulltext = None
             if article.pmcid != UNKNOWN and search_result.is_open_access and search_result.in_epmc:
-                fulltext_document, fetch_reqs, fetch_failure, fetch_kind = self.europepmc.fetch_fulltext(
+                fulltext_document, fetch_reqs, fetch_failure, fetch_kind, parsed_fulltext = self.europepmc.fetch_fulltext(
                     article.pmcid, context
                 )
                 total_epmc_reqs += fetch_reqs
@@ -1010,6 +1019,17 @@ class PubMedLiteratureAdapter:
                 # parsed values EVEN WHEN both are False.
                 "search_succeeded": True,
                 "search_result": search_result, "fulltext_document": fulltext_document,
+                # Phase 4.1A addition (additive only -- every existing key
+                # above is untouched): the SAME structured
+                # ParsedEuropePmcFullText fetch_fulltext already computed,
+                # carried alongside search_result so a downstream, purely
+                # offline Evidence Projection Bridge can call
+                # collectors.literature.raw_facts_from_europepmc_fulltext()
+                # without re-deriving or guessing either value -- never
+                # consumed by literature_live_smoke.py, which reads neither
+                # this dict's "search_result"/"fulltext_document" keys nor
+                # this new one.
+                "parsed_fulltext": parsed_fulltext,
             }
 
         # Store the PubMed Document(s) now (PARSE only re-reads text already
@@ -1082,6 +1102,26 @@ class PubMedLiteratureAdapter:
                         "in_epmc": v["search_result"].in_epmc,
                         "license": v["search_result"].license,
                         "fulltext_document_id": v.get("fulltext_document_id"),
+                        # Phase 4.1A addition (additive only): the remaining
+                        # EuropePmcSearchResult scalar fields a purely
+                        # offline Evidence Projection Bridge needs to
+                        # rebuild a faithful EuropePmcSearchResult for
+                        # collectors.literature.raw_facts_from_europepmc_
+                        # fulltext() -- notably "source", the ONLY signal
+                        # EuropePmcSearchResult.peer_review_status/
+                        # publication_stage read (see collectors/
+                        # literature.py). None of these were previously
+                        # exposed here; every key above is unchanged.
+                        "pmcid": v["search_result"].pmcid,
+                        "doi": v["search_result"].doi,
+                        "title": v["search_result"].title,
+                        "journal_title": v["search_result"].journal_title,
+                        "pub_year": v["search_result"].pub_year,
+                        "source": v["search_result"].source,
+                        # The genuine structured full-text parse (never a
+                        # section count or other lossy summary) -- None
+                        # whenever no full text was acquired for this pmid.
+                        "parsed_fulltext": v.get("parsed_fulltext"),
                     }
                     for pmid, v in europepmc_by_pmid.items()
                 },
