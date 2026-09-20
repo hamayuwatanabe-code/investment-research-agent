@@ -465,15 +465,33 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     LOCATE->FETCH->PARSE shape -- never like ClinicalTrials' single
     known-NCT-ID structured fetch, which has no comparable discovery step.
     ``research/literature_acquisition_adapter.py``'s ``PubMedLiteratureAdapter``
-    now exists as code and is proven, in this repository's own test suite,
+    exists as code and is proven, in this repository's own test suite,
     against an injected fake HTTP double and the real-format fixtures in
-    ``tests/fixtures/literature_real_format/`` -- genuinely OFFLINE_VERIFIED,
-    never LIVE_VERIFIED (no real network call was ever made; the web-search
-    LOCATE alternative stays DISABLED, unchanged, exactly as every other
-    archetype's does). Europe PMC's OPEN-ACCESS-full-text-only FETCH is
-    covered by the same adapter/steps; a non-OA article's LOCATE/FETCH still
-    completes (an abstract was genuinely acquired), it merely never reaches
-    ContentKind.FULL_DOCUMENT -- see the adapter's own module docstring.
+    ``tests/fixtures/literature_real_format/`` -- OFFLINE_VERIFIED (the
+    web-search LOCATE alternative stays DISABLED, unchanged, exactly as
+    every other archetype's does). Europe PMC's OPEN-ACCESS-full-text-only
+    FETCH is covered by the same adapter/steps; a non-OA article's
+    LOCATE/FETCH still completes (an abstract was genuinely acquired), it
+    merely never reaches ContentKind.FULL_DOCUMENT -- see the adapter's own
+    module docstring.
+
+    Phase 3F.2 correction 3's limited LIVE_VERIFIED promotion: FETCH and
+    PARSE only (``fetch_implementation_status``/``parse_implementation_status``
+    below), promoted by one real, direct-mode Live Smoke run against a real
+    PMID (20668659, a genuinely OA, in-EPMC article) whose Capture Manifest
+    replay showed all 3 real requests (PubMed EFetch, Europe PMC search,
+    Europe PMC fullTextXML) HTTP 200, all 3 Capture Manifests VERIFIED, zero
+    Evidence Integrity failures, coverage_complete=true, and zero secret
+    leakage -- never connected to the production Pipeline, never through
+    ``--force-rerun``. LOCATE (this function's ``direct_implementation_status``
+    below) stays OFFLINE_VERIFIED: that run used a KNOWN PMID in targeted
+    mode and never exercised NCBI ESearch, so there is no real-request
+    evidence for LOCATE to earn a promotion from. This promotion says only
+    that these two acquisition/parse steps were confirmed against real
+    responses -- it is not a claim about literature domain completeness,
+    peer review status, Decision-Grade evidence, independent confirmation,
+    efficacy, or any investment conclusion; see ``PeerReviewStatus``/
+    ``DECISION_GRADE_CLASSES``, untouched by this promotion, for those.
     """
     tag = f"{index:03d}a"
     req_id, target_id = f"req_{tag}", f"target_{tag}"
@@ -482,8 +500,8 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
         direct_adapter=_LITERATURE_ADAPTER_ID, direct_authority=DocumentAuthority.BIOMEDICAL_LITERATURE,
         direct_locate_completion=StepStatus.URL_RESOLVED,
         direct_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-        fetch_adapter_id=_LITERATURE_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
-        parse_adapter_id=_LITERATURE_ADAPTER_ID, parse_implementation_status=ImplementationStatus.OFFLINE_VERIFIED,
+        fetch_adapter_id=_LITERATURE_ADAPTER_ID, fetch_implementation_status=ImplementationStatus.LIVE_VERIFIED,
+        parse_adapter_id=_LITERATURE_ADAPTER_ID, parse_implementation_status=ImplementationStatus.LIVE_VERIFIED,
     )
     requirement = EvidenceRequirement(
         requirement_id=req_id, serves_legacy_need_ids=need_ids, subject_scope=subject_scope, domain=domain,

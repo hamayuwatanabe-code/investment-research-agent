@@ -229,10 +229,12 @@ def test_pubmed_adapter_is_now_offline_verified():
     ``EuropePmcFullTextAdapter`` and proved them against a fake HTTP
     double and the real-format fixtures in
     ``tests/fixtures/literature_real_format/``, earning OFFLINE_VERIFIED
-    for its own direct LOCATE/FETCH/PARSE steps -- never LIVE_VERIFIED (no
-    real network call was ever made this phase). Mirrors Form 4's own
-    DECLARED -> OFFLINE_VERIFIED promotion in Phase 3E; see
-    ``test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_verified``."""
+    for its own direct LOCATE/FETCH/PARSE steps. Phase 3F.2 correction 3
+    later promoted its FETCH/PARSE steps specifically to LIVE_VERIFIED
+    (see ``test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_verified``
+    for the exact split) -- this test itself only confirms the adapter id
+    is no longer DECLARED at all, which remains true either way. Mirrors
+    Form 4's own DECLARED -> OFFLINE_VERIFIED promotion in Phase 3E."""
     graph = build_source_routing_graph()
     declared_adapters = {
         s.adapter_id
@@ -246,9 +248,9 @@ def test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_veri
     """Phase 3A requirement 1/5/6, extended by Phase 3D and Phase 3F:
     AcquisitionExecutor plus the SEC primary/exhibit adapters,
     ClinicalTrialsStudyAdapter's structured (known-NCT-ID) path, and (Phase
-    3F) PubMedLiteratureAdapter's direct LOCATE/FETCH/PARSE path are built
-    and proven against a fake HTTP double, so (and only so) their steps
-    earn OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
+    3F) PubMedLiteratureAdapter's direct LOCATE step are built and proven
+    against a fake HTTP double, so (and only so) their steps earn
+    OFFLINE_VERIFIED. ``"local_parser"`` also appears here now: the
     structured-or-web archetype's PARSE step for ANY direct source (SEC
     uses its own dedicated adapter id for PARSE too, but ClinicalTrials'
     structured chain reuses the generic "local_parser" id for its PARSE
@@ -258,11 +260,21 @@ def test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_veri
     3E.4, higher) rung that happen to share the same generic id.
     ``form4_xml_parser`` is EXCLUDED from this set as of Phase 3E.4 -- its
     3 direct steps are now LIVE_VERIFIED, not OFFLINE_VERIFIED (see
-    ``test_form4_direct_adapter_is_live_verified``). Web search stays
-    below is_executor_ready -- EXECUTOR_WIRED/PIPELINE_WIRED must never
-    appear anywhere in this catalog at all, and LIVE_VERIFIED must appear
-    ONLY on Form4's 3 steps (never on literature's, per Phase 3F's explicit
-    no-Live-communication scope)."""
+    ``test_form4_direct_adapter_is_live_verified``). ``pubmed_europepmc``
+    stays IN this set too (its direct LOCATE step is still OFFLINE_VERIFIED)
+    even though, as of Phase 3F.2 correction 3, it ALSO has LIVE_VERIFIED
+    steps -- its FETCH and PARSE steps only, promoted by a real, direct-mode
+    (known-PMID) Live Smoke run against PMID 20668659 whose Capture
+    Manifest replay showed all 3 real requests VERIFIED with zero Evidence
+    Integrity failures (see ``_literature_web``'s own docstring in
+    ``source_routing_catalog.py`` for the full provenance). LOCATE was
+    never part of that run (it used a known PMID, never NCBI ESearch) and
+    stays OFFLINE_VERIFIED. Web search stays below is_executor_ready --
+    EXECUTOR_WIRED/PIPELINE_WIRED must never appear anywhere in this
+    catalog at all, and LIVE_VERIFIED must appear ONLY on Form4's 3 steps
+    and literature's 6 FETCH/PARSE steps (2 per literature target x 3
+    targets) -- never anywhere else, and never on any literature LOCATE or
+    web-search step."""
     graph = build_source_routing_graph()
     offline_verified_adapters = {
         s.adapter_id for s in graph.steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
@@ -272,8 +284,16 @@ def test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_veri
         "pubmed_europepmc",
     }
     live_verified_steps = [s for s in graph.steps if s.implementation_status is ImplementationStatus.LIVE_VERIFIED]
-    assert {s.adapter_id for s in live_verified_steps} == {"form4_xml_parser"}
-    assert len(live_verified_steps) == 3
+    assert {s.adapter_id for s in live_verified_steps} == {"form4_xml_parser", "pubmed_europepmc"}
+    assert len(live_verified_steps) == 9  # Form4's 3 + literature's 6 (2 per target x 3 targets)
+    # Exactly Form4's 3 direct steps (LOCATE+FETCH+PARSE) plus literature's
+    # 6 FETCH/PARSE steps only -- never a literature LOCATE step.
+    literature_live_verified = [s for s in live_verified_steps if s.adapter_id == "pubmed_europepmc"]
+    assert len(literature_live_verified) == 6
+    assert {s.step_kind for s in literature_live_verified} == {StepKind.FETCH, StepKind.PARSE}
+    assert {s.step_id for s in literature_live_verified} == {
+        "step_016a_F", "step_016a_P", "step_017a_F", "step_017a_P", "step_021a_F", "step_021a_P",
+    }
     executor_ready_ids = {s.adapter_id for s in graph.steps if s.implementation_status.is_executor_ready}
     assert executor_ready_ids == offline_verified_adapters | {"form4_xml_parser"}
     assert not any(s.implementation_status is ImplementationStatus.EXECUTOR_WIRED for s in graph.steps)
@@ -306,6 +326,86 @@ def test_form4_direct_adapter_is_live_verified():
         ]
         assert other_steps  # the web-search LOCATE alternative genuinely exists
         assert all(s.implementation_status is not ImplementationStatus.LIVE_VERIFIED for s in other_steps)
+
+
+def test_literature_fetch_and_parse_are_live_verified_locate_and_web_search_are_not():
+    """Phase 3F.2 correction 3's limited literature promotion, pinned to
+    the exact 6 step ids it touches -- never a broad condition, never a
+    blanket promotion of the whole archetype. Earned by one real,
+    direct-mode (known-PMID) Live Smoke run against PMID 20668659 whose
+    Capture Manifest replay showed all 3 real requests (PubMed EFetch,
+    Europe PMC search, Europe PMC fullTextXML) HTTP 200 and VERIFIED with
+    zero Evidence Integrity failures -- never a claim about LOCATE, which
+    that run never exercised (it used a known PMID, never NCBI ESearch),
+    and never a claim about literature domain completeness, peer review,
+    Decision-Grade evidence, independent confirmation, efficacy, or any
+    investment conclusion."""
+    graph = build_source_routing_graph()
+    literature_targets = [t for t in graph.targets if t.target_kind is TargetKind.LITERATURE_ARTICLE]
+    assert len(literature_targets) == 3
+    assert {t.target_id for t in literature_targets} == {"target_016a", "target_017a", "target_021a"}
+
+    expected_live_verified_step_ids = {
+        "step_016a_F", "step_016a_P", "step_017a_F", "step_017a_P", "step_021a_F", "step_021a_P",
+    }
+    actual_live_verified_step_ids: set[str] = set()
+
+    for target in literature_targets:
+        direct_steps = [
+            s for s in graph.steps_for_target(target.target_id) if s.adapter_id == "pubmed_europepmc"
+        ]
+        assert {s.step_kind for s in direct_steps} == {StepKind.LOCATE, StepKind.FETCH, StepKind.PARSE}
+        assert len(direct_steps) == 3
+
+        locate = next(s for s in direct_steps if s.step_kind is StepKind.LOCATE)
+        fetch = next(s for s in direct_steps if s.step_kind is StepKind.FETCH)
+        parse = next(s for s in direct_steps if s.step_kind is StepKind.PARSE)
+
+        # LOCATE stays exactly where it was -- OFFLINE_VERIFIED, never
+        # LIVE_VERIFIED -- this promotion never touches it.
+        assert locate.implementation_status is ImplementationStatus.OFFLINE_VERIFIED
+        # FETCH and PARSE are the only two steps promoted, per target.
+        assert fetch.implementation_status is ImplementationStatus.LIVE_VERIFIED
+        assert parse.implementation_status is ImplementationStatus.LIVE_VERIFIED
+        actual_live_verified_step_ids.add(fetch.step_id)
+        actual_live_verified_step_ids.add(parse.step_id)
+
+        # The DISABLED web-search LOCATE alternative is completely
+        # untouched by this promotion.
+        web_search_steps = [
+            s for s in graph.steps_for_target(target.target_id)
+            if s.acquisition_method is AcquisitionMethod.WEB_SEARCH_DISCOVERY
+        ]
+        assert web_search_steps
+        assert all(s.implementation_status is ImplementationStatus.DISABLED for s in web_search_steps)
+
+    assert actual_live_verified_step_ids == expected_live_verified_step_ids
+
+
+def test_literature_promotion_touches_no_other_route_in_the_catalog():
+    """Every step outside the 6 literature FETCH/PARSE ids above keeps
+    EXACTLY the implementation_status it had before Phase 3F.2 correction
+    3 -- confirmed here against a hand-maintained expected map for every
+    non-literature target kind, so a future broad-condition regression
+    (a stray ``if`` that accidentally widens the promotion) would fail
+    this test even if it never touched the 6 literature ids themselves."""
+    graph = build_source_routing_graph()
+    literature_step_ids = {
+        "step_016a_F", "step_016a_P", "step_017a_F", "step_017a_P", "step_021a_F", "step_021a_P",
+    }
+    for step in graph.steps:
+        if step.step_id in literature_step_ids:
+            continue
+        if step.target_id in {t.target_id for t in graph.targets if t.target_kind is TargetKind.FORM4_FILING}:
+            # Form4's own, pre-existing (Phase 3E.4) LIVE_VERIFIED promotion
+            # -- untouched, but genuinely LIVE_VERIFIED, so it is excluded
+            # from the blanket "nothing else is LIVE_VERIFIED" check below
+            # rather than asserted OFFLINE_VERIFIED/lower against it.
+            continue
+        assert step.implementation_status is not ImplementationStatus.LIVE_VERIFIED, (
+            f"{step.step_id} ({step.adapter_id}, target {step.target_id}) unexpectedly LIVE_VERIFIED -- "
+            "Phase 3F.2 correction 3 must promote only the 6 named literature FETCH/PARSE steps"
+        )
 
 
 def test_real_catalog_plan_status_is_executable_bounded_incomplete():
@@ -426,15 +526,37 @@ def test_routing_coverage_counts_reports_implementation_ladder_split():
     assert counts.executor_wired_steps == 0  # no step is wired-but-unverified
     assert counts.pipeline_wired_steps == 0  # Pipeline.run() connection forbidden this phase
     assert counts.offline_verified_steps > 0  # the SEC + ClinicalTrials direct chains, proven this phase
-    # Phase 3E.4: exactly Form4's own LOCATE/FETCH/PARSE, earned by a real
+    # Phase 3E.4: Form4's own LOCATE/FETCH/PARSE (3 steps), earned by a real
     # Mac Live Smoke run -- see test_form4_direct_adapter_is_live_verified.
-    assert counts.live_verified_steps == 3
+    # Phase 3F.2 correction 3: literature's FETCH/PARSE only, 2 steps per
+    # target x 3 literature targets = 6 steps, earned by a real Live Smoke
+    # run against PMID 20668659 -- see
+    # test_only_sec_clinicaltrials_and_literature_direct_adapters_are_offline_verified.
+    # 3 + 6 = 9.
+    assert counts.live_verified_steps == 9
     ladder_total = (
         counts.declared_steps + counts.primitive_available_steps + counts.adapter_implemented_steps
         + counts.executor_wired_steps + counts.pipeline_wired_steps + counts.offline_verified_steps
         + counts.live_verified_steps + counts.disabled_steps
     )
     assert ladder_total == counts.locate_steps + counts.fetch_steps + counts.parse_steps
+
+
+def test_catalog_totals_after_the_phase_3f2_correction_3_literature_promotion():
+    """Pins the exact whole-catalog before/after this phase's promotion:
+    OFFLINE_VERIFIED 80 -> 74 and LIVE_VERIFIED 3 -> 9 (the 6 literature
+    FETCH/PARSE steps moved from one bucket to the other, so the two
+    deltas are exact mirror images), with every other invariant this
+    catalog carries -- legacy needs, equivalence groups, disabled steps --
+    completely unchanged. A regression here means either the promotion's
+    scope drifted from the 6 named step ids, or something unrelated moved
+    too."""
+    counts = routing_coverage_counts()
+    assert counts.offline_verified_steps == 74
+    assert counts.live_verified_steps == 9
+    assert counts.disabled_steps == 32  # untouched: no web-search step was ever promoted
+    assert counts.legacy_needs == 49
+    assert counts.equivalence_groups == 31
 
 
 def test_routing_coverage_counts_reports_criticality_split():
@@ -471,15 +593,18 @@ def test_literature_target_step_topology_exactly_locate_fetch_parse():
         assert len(parse_steps) == 1
 
         # The direct LOCATE/FETCH/PARSE trio is the SAME adapter_id
-        # throughout, and OFFLINE_VERIFIED -- a genuine 3-step chain, never
-        # merely a locate-then-hope.
+        # throughout -- a genuine 3-step chain, never merely a
+        # locate-then-hope. LOCATE itself stays OFFLINE_VERIFIED (Phase
+        # 3F.2 correction 3's real Live Smoke run used a known PMID and
+        # never exercised NCBI ESearch); FETCH and PARSE are LIVE_VERIFIED,
+        # promoted by that same run's real, VERIFIED requests.
         direct_locate = [s for s in locate_steps if s.implementation_status is ImplementationStatus.OFFLINE_VERIFIED]
         assert len(direct_locate) == 1
         direct_adapter_id = direct_locate[0].adapter_id
         assert fetch_steps[0].adapter_id == direct_adapter_id
         assert parse_steps[0].adapter_id == direct_adapter_id
-        assert fetch_steps[0].implementation_status is ImplementationStatus.OFFLINE_VERIFIED
-        assert parse_steps[0].implementation_status is ImplementationStatus.OFFLINE_VERIFIED
+        assert fetch_steps[0].implementation_status is ImplementationStatus.LIVE_VERIFIED
+        assert parse_steps[0].implementation_status is ImplementationStatus.LIVE_VERIFIED
 
         # The web-search LOCATE alternative was never removed or silently
         # enabled -- it is still exactly one step, still DISABLED.
