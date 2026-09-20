@@ -143,9 +143,18 @@ def build_index(
         index.source_urls[fact.source_id] = fact.source_url
 
     # A chunk reference resolves to any fact extracted from the same document.
+    # ``fact.document_id`` (the DocumentStore identity, when known) is the
+    # correct join key against ``Chunk.doc_id`` -- it need not equal
+    # ``fact.source_id`` (e.g. a Literature Source's ``source_id`` is a
+    # ``make_source_id()`` hash of url+title, decoupled from the Document's
+    # own ``doc_id``; see ``research/literature_evidence_projection.py``).
+    # A legacy fact with no ``document_id`` falls back to ``source_id``,
+    # preserving the pre-existing behavior for every path where the two
+    # already coincide (e.g. ``collectors/extraction.py``'s
+    # ``_source_for`` sets ``source_id=document.doc_id`` directly).
     doc_to_fact: dict[str, str] = {}
     for fact in facts:
-        doc_to_fact.setdefault(fact.source_id, fact.fact_id)
+        doc_to_fact.setdefault(fact.document_id or fact.source_id, fact.fact_id)
     for chunk in chunks:
         fact_id = doc_to_fact.get(chunk.doc_id)
         if fact_id:
