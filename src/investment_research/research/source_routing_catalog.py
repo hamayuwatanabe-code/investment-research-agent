@@ -482,8 +482,12 @@ def _literature_web(index, need_ids, domain, subject_scope, key) -> SourceRoutin
     replay showed all 3 real requests (PubMed EFetch, Europe PMC search,
     Europe PMC fullTextXML) HTTP 200, all 3 Capture Manifests VERIFIED, zero
     Evidence Integrity failures, coverage_complete=true, and zero secret
-    leakage -- never connected to the production Pipeline, never through
-    ``--force-rerun``. LOCATE (this function's ``direct_implementation_status``
+    leakage -- never connected to the production Pipeline. An existing
+    LAST_RUN marker from a prior attempt was already present for this
+    target before this run; the user explicitly authorized re-running
+    against it, and the run was made with ``--force-rerun`` under that
+    explicit authorization -- never an unauthorized or silent override of
+    the marker. LOCATE (this function's ``direct_implementation_status``
     below) stays OFFLINE_VERIFIED: that run used a KNOWN PMID in targeted
     mode and never exercised NCBI ESearch, so there is no real-request
     evidence for LOCATE to earn a promotion from. This promotion says only
