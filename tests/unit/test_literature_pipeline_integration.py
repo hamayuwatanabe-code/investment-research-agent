@@ -487,11 +487,13 @@ def test_credential_missing_refused_before_any_request():
 # 5. Diagnostics never carry a body/URL/secret (task sections 4/10)
 # =============================================================================
 def test_bundle_diagnostics_never_none_disabled_shape():
+    """Phase 4.2A correction 1: an empty dict, not a dict carrying
+    feature_enabled=False -- so cli.py::result_to_json can omit the
+    direct_acquisition_info key entirely by plain truthiness for a run
+    that never used --document-first-literature, keeping the default-OFF
+    --json output contract identical to before Phase 4.2A."""
     diag = bundle_diagnostics(None, enabled=False)
-    assert diag == {
-        "feature_enabled": False, "anthropic_api_calls": 0, "web_search_calls": 0,
-        "external_llm_tokens": 0,
-    }
+    assert diag == {}
 
 
 def test_bundle_diagnostics_are_json_serializable_and_body_free():
@@ -648,7 +650,10 @@ def test_incomplete_literature_evidence_forces_action_none(repo, fixture_dir, ou
     bundle = run_literature_pipeline_acquisition(_nct_request(), ticker="DEMOBIO", http_client=http, env=_ENV)
     assert bundle.collection_result.degraded
 
-    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks))
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
     result = pipeline.run(
         "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
         price=metadata["price"], aliases=metadata.get("aliases", ()),
@@ -677,8 +682,12 @@ def test_clean_literature_evidence_never_blocks_action_on_its_own(repo, fixture_
         _pmid_request(pmid="90000015"), ticker="DEMOBIO", http_client=http, env=_ENV
     )
     assert not bundle.collection_result.degraded
+    assert bundle.coverage_complete
 
-    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks))
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
     result = pipeline.run(
         "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
         price=metadata["price"], aliases=metadata.get("aliases", ()),
@@ -688,6 +697,233 @@ def test_clean_literature_evidence_never_blocks_action_on_its_own(repo, fixture_
         if "Literature Document-First" in r
     ]
     assert literature_reasons == []
+
+
+# =============================================================================
+# 6b. Correction 1: Action=NONE propagation for the two failure shapes a
+#    CollectionResult.degraded-only check misses (task section 1)
+# =============================================================================
+def test_chunk_projection_failure_alone_forces_action_none(repo, fixture_dir):
+    """Scenario A: Evidence Projection succeeded
+    (CollectionResult.degraded=False) but Chunk Projection itself failed --
+    coverage_complete=False is the ONLY signal; the CollectionResult-loop
+    branch finds nothing degraded. Must still force Action=None."""
+    import dataclasses
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={
+        _efetch_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
+        fx.europepmc_search_url("90000015"): fx.ok(_EPMC_EMPTY),
+    })
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(pmid="90000015"), ticker="DEMOBIO", http_client=http, env=_ENV
+    )
+    assert not bundle.collection_result.degraded
+    assert bundle.coverage_complete  # genuinely clean before simulating the Chunk Projection failure
+
+    # Simulates exactly what run_literature_pipeline_acquisition itself
+    # would produce if project_literature_chunks alone returned
+    # coverage_complete=False (e.g. a corrupted version chain discovered
+    # after Evidence Projection already succeeded) -- Evidence
+    # Projection's own, already-clean CollectionResult is untouched.
+    incomplete_bundle = dataclasses.replace(
+        bundle, coverage_complete=False,
+        unresolved_reasons=("document doc_x: version chain corrupted: simulated for this test",),
+    )
+    assert not incomplete_bundle.collection_result.degraded  # unchanged by the simulation
+
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(incomplete_bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(incomplete_bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, incomplete_bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    assert result.verdict is not None
+    assert result.verdict.action is None
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert any("Literature Document-First" in r for r in result.verdict.blocking_verification_required)
+    assert any("coverage" in r.lower() for r in result.verdict.blocking_verification_required)
+
+
+def test_refused_bundle_forces_action_none_with_zero_http_attempts(repo, fixture_dir):
+    """Scenario B: the defensive credential re-check inside
+    run_literature_pipeline_acquisition refused before any request --
+    collection_result is None (nothing is ever appended to
+    collection_results for this case, mirroring cli.py's own
+    `if literature_bundle.collection_result is not None` guard), so only
+    direct_acquisition_info's refused=True signal exists."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={})
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(), ticker="DEMOBIO", http_client=http, env={}
+    )
+    assert bundle.refused
+    assert bundle.collection_result is None
+    assert http.requested_urls == []
+    assert bundle.physical_attempt_count == 0
+    assert bundle.logical_request_count == 0
+
+    collection_results = [base_result]
+    if bundle.collection_result is not None:  # never true here; mirrors cli.py's own guard exactly
+        collection_results.append(bundle.collection_result)
+
+    diagnostics = bundle_diagnostics(bundle, enabled=True)
+    assert diagnostics["refused"] is True
+    assert "IRA_NCBI_TOOL" in diagnostics["refused_reason"]
+
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks),
+        direct_acquisition_info=diagnostics,
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], collection_results,
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    assert result.verdict is not None
+    assert result.verdict.action is None
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    reasons = result.verdict.blocking_verification_required
+    assert any("Literature Document-First" in r for r in reasons)
+    assert any("refused" in r.lower() for r in reasons)
+    assert any("IRA_NCBI_TOOL" in r for r in reasons)
+
+
+def test_degraded_and_incomplete_coverage_do_not_duplicate_the_blocking_reason(repo, fixture_dir):
+    """Both signals present simultaneously (a fully-failed acquisition:
+    Evidence Projection degraded AND Chunk Projection incomplete) must
+    still contribute exactly ONE Literature blocking reason, never two."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(
+        responses={_esearch_url("NCT09990001[si]", 20): fx.failed(FetchOutcome.ERROR, "x")}
+    )
+    bundle = run_literature_pipeline_acquisition(_nct_request(), ticker="DEMOBIO", http_client=http, env=_ENV)
+    assert bundle.collection_result.degraded
+    assert bundle.coverage_complete is False  # both signals present at once
+
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    literature_reasons = [
+        r for r in result.verdict.blocking_verification_required if "Literature Document-First" in r
+    ]
+    assert len(literature_reasons) == 1  # never duplicated
+
+
+def test_literature_blocking_helper_never_fires_when_flag_unused():
+    from investment_research.orchestrator.pipeline import _literature_incomplete_blocking_reasons
+
+    assert _literature_incomplete_blocking_reasons([], None) == []
+    assert _literature_incomplete_blocking_reasons([], {}) == []
+    assert _literature_incomplete_blocking_reasons(
+        [], {"feature_enabled": False, "coverage_complete": False, "refused": True}
+    ) == []
+
+
+def test_literature_blocking_helper_clean_bundle_produces_nothing():
+    from investment_research.orchestrator.pipeline import _literature_incomplete_blocking_reasons
+
+    info = {
+        "feature_enabled": True, "refused": False, "coverage_complete": True,
+        "unresolved_reasons": [],
+    }
+    assert _literature_incomplete_blocking_reasons([], info) == []
+
+
+def test_literature_blocking_helper_scenario_a_coverage_incomplete_unit():
+    from investment_research.orchestrator.pipeline import _literature_incomplete_blocking_reasons
+
+    info = {
+        "feature_enabled": True, "refused": False, "coverage_complete": False,
+        "unresolved_reasons": ["document doc_x: version chain corrupted"],
+    }
+    reasons = _literature_incomplete_blocking_reasons([], info)
+    assert len(reasons) == 1
+    assert "coverage" in reasons[0].lower()
+
+
+def test_literature_blocking_helper_scenario_b_refused_unit():
+    from investment_research.orchestrator.pipeline import _literature_incomplete_blocking_reasons
+
+    info = {
+        "feature_enabled": True, "refused": True,
+        "refused_reason": "missing required environment variable(s): IRA_NCBI_TOOL",
+    }
+    reasons = _literature_incomplete_blocking_reasons([], info)
+    assert len(reasons) == 1
+    assert "IRA_NCBI_TOOL" in reasons[0]
+
+
+def test_literature_blocking_helper_dedup_unit():
+    from investment_research.collectors.base import CollectionResult
+    from investment_research.orchestrator.pipeline import _literature_incomplete_blocking_reasons
+
+    degraded_result = CollectionResult(collector="literature_evidence_projection", outcome=FetchOutcome.ERROR)
+    info = {
+        "feature_enabled": True, "refused": False, "coverage_complete": False,
+        "unresolved_reasons": ["x"],
+    }
+    reasons = _literature_incomplete_blocking_reasons([degraded_result], info)
+    assert len(reasons) == 1
+
+
+# =============================================================================
+# 6c. Correction 1: default-OFF --json output contract (task section 3)
+# =============================================================================
+def test_result_to_json_omits_direct_acquisition_info_key_when_flag_off(repo, fixture_dir):
+    import investment_research.cli as cli_module
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result], price=metadata["price"],
+        aliases=metadata.get("aliases", ()),
+    )
+    payload = cli_module.result_to_json(result)
+    assert "direct_acquisition_info" not in payload
+
+
+def test_result_to_json_includes_direct_acquisition_info_key_when_flag_on(repo, fixture_dir):
+    import investment_research.cli as cli_module
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+    http = fx.FakeHttpClient(responses={
+        _efetch_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
+        fx.europepmc_search_url("90000015"): fx.ok(_EPMC_EMPTY),
+    })
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(pmid="90000015"), ticker="DEMOBIO", http_client=http, env=_ENV
+    )
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    payload = cli_module.result_to_json(result)
+    assert "direct_acquisition_info" in payload
+    assert payload["direct_acquisition_info"]["feature_enabled"] is True
 
 
 def test_pipeline_never_calls_literature_acquisition_code_directly():
@@ -736,8 +972,7 @@ def test_flag_off_run_one_makes_zero_literature_calls(monkeypatch, repo, fixture
     )
     result = cli_module.run_one("DEMOBIO", args, settings, repo, http=None, literature_request=None)
     assert calls == []
-    assert result.direct_acquisition_info == {"feature_enabled": False, "anthropic_api_calls": 0,
-                                                "web_search_calls": 0, "external_llm_tokens": 0}
+    assert result.direct_acquisition_info == {}
 
 
 def _fake_settings(fixture_dir, tmp_path):

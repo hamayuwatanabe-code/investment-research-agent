@@ -332,9 +332,17 @@ def run_one(
     # Integrity/domain agents run inside Pipeline.run(), never added
     # afterward as late evidence. `literature_request` is `None` for every
     # run that did not pass --document-first-literature (validated once in
-    # `main()`), so this block is a complete no-op -- zero extra imports
-    # executed, zero extra objects constructed -- for every pre-existing
-    # invocation of this CLI.
+    # `main()`), so this block never CALLS `run_literature_pipeline_
+    # acquisition` and never constructs a DocumentStore/AcquisitionExecutor/
+    # HTTP client for every pre-existing invocation of this CLI -- this is
+    # NOT the same claim as "zero extra imports": the
+    # `literature_pipeline_integration` module (and everything it imports)
+    # is loaded unconditionally at CLI import time, by this file's own
+    # top-level `from .research.literature_pipeline_integration import
+    # ...` -- see that module's own docstring for the exact, narrow ways a
+    # flag-OFF run's Python-level footprint differs from before this phase
+    # while its observable output (facts/chunks/verdict/report/--json)
+    # does not.
     literature_bundle = None
     if literature_request is not None:
         literature_bundle = run_literature_pipeline_acquisition(literature_request, ticker=ticker)
@@ -490,7 +498,7 @@ def _token_diagnostics(result: ResearchResult) -> dict:
 def result_to_json(result: ResearchResult) -> dict:
     verdict = result.verdict
     card = result.scorecard
-    return {
+    payload = {
         "run_id": result.context.run_id,
         "ticker": result.context.ticker,
         "status": str(result.context.status),
@@ -543,7 +551,6 @@ def result_to_json(result: ResearchResult) -> dict:
             for q in result.quarantined_sources
         ],
         "capture_info": result.capture_info,
-        "direct_acquisition_info": result.direct_acquisition_info,
         "max_kill_level": str(verdict.kill_gate.max_level) if verdict else None,
         "kill_gate": [a.to_row() for a in verdict.kill_gate.assessments] if verdict else [],
         "scores": card.scores if card else {},
@@ -554,6 +561,14 @@ def result_to_json(result: ResearchResult) -> dict:
         "thesis_version": result.thesis_version,
         "portfolio_guidance": result.portfolio_guidance or None,
     }
+    # Phase 4.2A correction 1: omit the key entirely when empty (the
+    # default-OFF case -- see ResearchResult.direct_acquisition_info's own
+    # docstring and bundle_diagnostics(None, enabled=False)) so a run that
+    # never used --document-first-literature gets the exact same --json
+    # keys this repository produced before Phase 4.2A existed.
+    if result.direct_acquisition_info:
+        payload["direct_acquisition_info"] = result.direct_acquisition_info
+    return payload
 
 
 def main(argv: Sequence[str] | None = None) -> int:

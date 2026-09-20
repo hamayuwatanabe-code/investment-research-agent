@@ -30,13 +30,33 @@ User-authorized scope for this phase, and nothing beyond it:
 * Reachable ONLY when BOTH a default-OFF CLI flag
   (``--document-first-literature``) AND EXACTLY ONE explicit reference
   (``--literature-pmid`` XOR ``--literature-nct-id``) are given, AND
-  ``--live`` is also given. Every other invocation of ``main.py``/
-  ``cli.py`` is byte-identical to before this phase: this module is
-  imported by ``cli.py`` unconditionally (so ``validate_literature_
-  pipeline_request`` can run), but ``run_literature_pipeline_acquisition``
-  -- the one function that can ever touch a network -- is called only when
+  ``--live`` is also given. Network reachability is genuinely gated on
+  this: ``run_literature_pipeline_acquisition`` -- the one function that
+  can ever touch a network -- is called only when
   ``validate_literature_pipeline_request`` returned a non-``None``
-  request, which itself requires the flag.
+  request, which itself requires the flag. This is NOT the same claim as
+  "every other invocation is byte-identical to before this phase" --
+  it is not, in two narrow, documented ways, and neither is a behavior
+  change beyond a diagnostics-surface addition:
+
+  1. ``cli.py`` imports this module unconditionally (so
+     ``validate_literature_pipeline_request`` can run before any
+     collector/DB/HTTP object is constructed) -- this is a real, new
+     import that did not exist before Phase 4.2A, even on a flag-OFF run.
+  2. ``ResearchResult.direct_acquisition_info``/``Pipeline.__init__``'s
+     ``direct_acquisition_info`` parameter are new fields that exist on
+     every run's result object, flag-OFF included (see
+     ``bundle_diagnostics(None, enabled=False)`` returning ``{}`` and
+     ``cli.py::result_to_json`` omitting the ``direct_acquisition_info``
+     key when it is empty -- Phase 4.2A correction 1 -- so the flag-OFF
+     ``--json``/console output ITSELF is unchanged, even though the
+     Python object underneath it now carries one additional, empty
+     field).
+
+  Everything a flag-OFF run actually DOES -- which collectors run, what
+  facts/chunks/verdict/report/JSON keys it produces -- is unchanged; only
+  the import graph and this one always-present-but-usually-empty
+  diagnostics field are new.
 * No real NCBI/Europe PMC communication happens anywhere in this
   repository's own test suite or CI -- every test here drives this module
   against a fake HTTP double or a local loopback server, exactly like
@@ -263,10 +283,15 @@ def validate_literature_pipeline_request(
     """Validate one CLI invocation's Literature Document-First inputs,
     BEFORE any collector, ``DocumentStore``, or network-capable object is
     constructed. Returns ``None`` only for the fully-default case (the
-    flag was never passed and no identifier was given either) -- that is
-    the pre-existing behavior this phase must leave byte-identical.
-    EVERY other combination either returns a fully-validated
-    ``LiteraturePipelineRequest`` or raises
+    flag was never passed and no identifier was given either) -- in that
+    case, ``run_literature_pipeline_acquisition`` is never called and no
+    acquisition-related code runs at all for this invocation (see the
+    module docstring's own note on the narrow, documented ways a flag-OFF
+    run is NOT literally byte-identical to before this phase -- an
+    unconditional import and an always-present-but-empty diagnostics
+    field -- neither of which this function's own return value is
+    responsible for). EVERY other combination either returns a
+    fully-validated ``LiteraturePipelineRequest`` or raises
     ``LiteraturePipelineRequestError`` -- there is no silent partial
     acceptance.
 
@@ -563,14 +588,22 @@ def bundle_diagnostics(bundle: LiteraturePipelineBundle | None, *, enabled: bool
     """A safe (body/secret/URL-free), JSON-serializable diagnostics dict --
     the ``direct_acquisition_info`` payload ``cli.py`` passes to
     ``Pipeline(...)``. ``bundle is None`` covers both "the feature was
-    never enabled" and "no ticker used it this run"."""
+    never enabled" and "no ticker used it this run" -- Phase 4.2A
+    correction 1: returns an EMPTY dict in that case (never a dict with
+    ``feature_enabled``/token-count keys), so ``cli.py``'s
+    ``result_to_json`` can tell "the feature was used" apart from "it
+    wasn't" by simple truthiness and omit the ``direct_acquisition_info``
+    key entirely for a run that never passed
+    ``--document-first-literature`` -- the default-OFF ``--json`` output
+    contract this repository had before Phase 4.2A existed. ``enabled`` is
+    accepted (and still required, for the non-``None`` shape below) but
+    intentionally unused when ``bundle`` is ``None``: in ``cli.py``'s own
+    call site, ``bundle is None`` implies ``enabled is False`` always
+    (``run_literature_pipeline_acquisition`` never returns ``None``), so
+    there is no meaningful ``feature_enabled=True``-with-no-bundle state
+    to record."""
     if bundle is None:
-        return {
-            "feature_enabled": enabled,
-            "anthropic_api_calls": 0,
-            "web_search_calls": 0,
-            "external_llm_tokens": 0,
-        }
+        return {}
     return {
         "feature_enabled": enabled,
         "reference_mode": bundle.reference_mode,

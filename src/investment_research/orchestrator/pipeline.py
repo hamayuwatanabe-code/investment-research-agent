@@ -93,16 +93,63 @@ _LITERATURE_BRIDGE_COLLECTOR_LABEL = "literature_evidence_projection"
 
 def _literature_incomplete_blocking_reasons(
     collection_results: Sequence[CollectionResult],
+    direct_acquisition_info: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Phase 4.2A: see the call site's own comment. Pure and read-only --
-    inspects only ``CollectionResult.collector``/``.degraded``/``.describe()``,
-    which already exist for every collector in this repository; nothing
-    Literature-specific is added to ``CollectionResult`` itself."""
-    return [
-        f"Literature Document-First acquisition did not complete: {result.describe()}"
-        for result in collection_results
-        if result.collector == _LITERATURE_BRIDGE_COLLECTOR_LABEL and result.degraded
-    ]
+    """Phase 4.2A correction 1: see the call site's own comment. Pure and
+    read-only -- never imports or calls anything from the Literature
+    Acquisition path; reads only ``CollectionResult.collector``/
+    ``.degraded``/``.describe()`` (already generic, existing fields) and
+    ``direct_acquisition_info`` (an already-sanitized plain ``dict`` the
+    caller built via ``literature_pipeline_integration.bundle_diagnostics``
+    -- this function invents no new string, no new sanitization, and reads
+    no field ``bundle_diagnostics`` does not already expose).
+
+    Two failure shapes the original Phase 4.2A check missed, both meaning
+    "an explicitly-requested Literature acquisition did not complete",
+    exactly like a degraded ``CollectionResult`` does:
+
+    A. Evidence Projection succeeded (``CollectionResult.degraded`` is
+       ``False``, so the loop below finds nothing) but Chunk Projection
+       failed -- ``direct_acquisition_info["coverage_complete"]`` is
+       ``False``.
+    B. The defensive credential re-check inside
+       ``run_literature_pipeline_acquisition`` refused before any request
+       -- ``direct_acquisition_info["refused"]`` is ``True`` and no
+       ``CollectionResult`` was ever appended to ``collection_results`` at
+       all (there is nothing for the loop below to see).
+
+    Dedup (never double-report the SAME incompleteness twice): the
+    ``direct_acquisition_info`` branch is skipped entirely once the
+    collector loop already found a degraded literature ``CollectionResult``
+    -- a degraded evidence fetch and an incomplete chunk projection for the
+    SAME run are one failure, not two.
+
+    Fires only when ``direct_acquisition_info.get("feature_enabled")`` is
+    true -- i.e. never for a run that did not pass
+    ``--document-first-literature`` at all (``direct_acquisition_info`` is
+    then either absent or ``{"feature_enabled": False, ...}``), and never
+    for a clean, complete fetch (``refused`` False, ``coverage_complete``
+    True).
+    """
+    reasons: list[str] = []
+    degraded_seen = False
+    for result in collection_results:
+        if result.collector == _LITERATURE_BRIDGE_COLLECTOR_LABEL and result.degraded:
+            degraded_seen = True
+            reasons.append(f"Literature Document-First acquisition did not complete: {result.describe()}")
+
+    info = direct_acquisition_info or {}
+    if not info.get("feature_enabled"):
+        return reasons
+    if info.get("refused"):
+        reason = info.get("refused_reason") or "refused before any request (no reason recorded)"
+        reasons.append(f"Literature Document-First acquisition was refused: {reason}")
+    elif info.get("coverage_complete") is False and not degraded_seen:
+        unresolved = "; ".join(info.get("unresolved_reasons") or ()) or "no reason recorded"
+        reasons.append(
+            f"Literature Document-First acquisition did not reach full coverage: {unresolved}"
+        )
+    return reasons
 
 
 def new_run_id() -> str:
@@ -1025,19 +1072,26 @@ class Pipeline:
             blocking_reasons.append(completeness.reason())
         if not sufficiency.sufficient:
             blocking_reasons.extend(sufficiency.blocking_reasons())
-        # Phase 4.2A: strengthens (never weakens) the gate above. An
-        # explicitly-requested Literature Document-First acquisition (see
-        # research/literature_pipeline_integration.py) that genuinely did
-        # not complete -- a provider failure, BLOCKED, RATE_LIMITED, a real
-        # budget exclusion -- must never be silently absorbed into a run
-        # that still emits an Action; the caller opted into this evidence
-        # source explicitly, so its own incompleteness is exactly the same
-        # kind of gap completeness.blocked/sufficiency already withhold an
-        # Action for. Never fires for a clean, complete fetch
-        # (CollectionResult.degraded is False) and never fires at all when
-        # the flag was never used, since no CollectionResult then carries
-        # this collector label.
-        blocking_reasons.extend(_literature_incomplete_blocking_reasons(collection_results))
+        # Phase 4.2A (correction 1): strengthens (never weakens) the gate
+        # above. An explicitly-requested Literature Document-First
+        # acquisition (see research/literature_pipeline_integration.py)
+        # that genuinely did not complete -- a provider failure, BLOCKED,
+        # RATE_LIMITED, a real budget exclusion, a Chunk Projection
+        # failure, or a pre-send credential refusal -- must never be
+        # silently absorbed into a run that still emits an Action; the
+        # caller opted into this evidence source explicitly, so its own
+        # incompleteness is exactly the same kind of gap completeness.
+        # blocked/sufficiency already withhold an Action for. Reads
+        # ``self.direct_acquisition_info`` in addition to
+        # ``collection_results`` (see ``_literature_incomplete_blocking_
+        # reasons``'s own docstring for the two failure shapes a
+        # CollectionResult-only check misses); never fires for a clean,
+        # complete fetch, and never fires at all when the flag was never
+        # used (``direct_acquisition_info`` then reads
+        # ``feature_enabled=False``).
+        blocking_reasons.extend(
+            _literature_incomplete_blocking_reasons(collection_results, self.direct_acquisition_info)
+        )
 
         if verdict is not None:
             if blocking_reasons:
