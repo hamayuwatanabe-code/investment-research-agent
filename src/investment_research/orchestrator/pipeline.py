@@ -30,7 +30,6 @@ from ..agents.capital_structure import CapitalStructureAgent
 from ..agents.catalyst import CatalystAgent
 from ..agents.competitive import CompetitiveAgent
 from ..agents.contradiction import ContradictionAgent
-from ..agents.evidence_integrity import EvidenceIntegrityAgent
 from ..agents.fact_collector import FactCollectorAgent
 from ..agents.kill_agent import KillAgent
 from ..agents.microstructure import MicrostructureAgent
@@ -66,6 +65,7 @@ from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
 from ..storage.repository import Repository
 from ..thesis.versioning import diff_against_previous, snapshot_for
+from .evidence_integrity_pass import FullIntegrityPassInput, run_full_evidence_integrity_pass
 from .isolation import (
     Channel,
     EvidenceBus,
@@ -586,110 +586,41 @@ class Pipeline:
             )
         raw_facts = list(collector_output.facts) if collector_output else []
 
-        # ---- Stage 2: verify --------------------------------------------
-        if collector_output is not None:
-            integrity = self._run_agent(
-                EvidenceIntegrityAgent(today=self.today, stale_after_days=self.stale_after_days),
-                guard,
-                result,
-                params=params,
-                user_preferences=user_preferences,
-                facts=raw_facts,
-            )
-            verified_facts = list(integrity.facts) or raw_facts
-        # The verified set replaces the raw set on the bus.
+        # ---- Stage 2: verify (Phase 4.3C) --------------------------------
+        # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
+        # execution, verified_facts determination, Source persistence/
+        # quarantine, quarantine-cascade fact exclusion, and the Phase
+        # 4.2B-correction-1 Literature completeness-consistency check --
+        # extracted to orchestrator.evidence_integrity_pass as one unit, so
+        # the identical sequence can also run safely as a SECOND pass in an
+        # offline test harness (never in production, never connected here
+        # to Adaptive Acquisition). Production still runs it exactly once.
+        # already_verified mirrors this method's own pre-existing --resume
+        # shortcut above: when the resume branch already restored verified
+        # facts, EvidenceIntegrityAgent must not be re-run over them.
+        pass_input = FullIntegrityPassInput(
+            ticker=ctx.ticker,
+            company_name=company_name,
+            run_id=ctx.run_id,
+            raw_facts=tuple(raw_facts),
+            sources=tuple(bus.sources),
+            collection_results=tuple(collection_results),
+            direct_acquisition_info=result.direct_acquisition_info,
+            today=self.today,
+            stale_after_days=self.stale_after_days,
+            already_verified=collector_output is None,
+        )
+        pass_output = run_full_evidence_integrity_pass(pass_input, self.repo)
+
+        verified_facts = list(pass_output.verified_facts)
         bus.facts = verified_facts
-
-        # A malformed source is rejected and quarantined, never silently
-        # persisted and never allowed to crash the run (requirement 14/24).
-        quarantined_sources = self.repo.save_sources(bus.sources)
-        if quarantined_sources:
-            result.quarantined_sources = quarantined_sources
+        result.quarantined_sources = list(pass_output.quarantined_sources)
+        result.failures.extend(pass_output.failures)
+        if pass_output.status_incomplete:
             ctx.status = RunStatus.INCOMPLETE_RESEARCH
-            for q in quarantined_sources:
-                result.failures.append(
-                    f"quarantined malformed source {q.source_id} ({q.url}): "
-                    f"{q.field}={q.value!r} -- {q.error}"
-                )
-            # Any fact resting only on a quarantined source is evidence this
-            # run cannot actually stand behind -- exclude it before it can
-            # reach scoring, completeness or the Evidence Sufficiency Matrix,
-            # so a domain that depended on it correctly reads as unresolved
-            # rather than silently sufficient.
-            quarantined_ids = {q.source_id for q in quarantined_sources}
-            before = len(verified_facts)
-            verified_facts = [f for f in verified_facts if f.source_id not in quarantined_ids]
-            bus.facts = verified_facts
-            dropped = before - len(verified_facts)
-            if dropped:
-                result.failures.append(
-                    f"{dropped} fact(s) resting only on a quarantined source were excluded "
-                    "from evidence"
-                )
-
-        # Phase 4.2B correction 1: downstream completeness consistency.
-        # LiteraturePipelineBundle.coverage_complete (research/literature_
-        # pipeline_integration.py) is computed upstream, from the Chunk/
-        # Evidence Projection's own outcome, BEFORE any of this run's
-        # facts ever reach Repository.save_sources (Source validation,
-        # above) or EvidenceIntegrityAgent's own exclusion logic -- a
-        # Literature Source that quarantines here, or a Literature Fact
-        # that Evidence Integrity itself drops, both happen AFTER that
-        # upstream computation, so result.direct_acquisition_info must
-        # never keep reporting coverage_complete=True once either has
-        # actually happened. Detected by comparing each literature
-        # CollectionResult's OWN submitted RawFact.fact_id() set (never
-        # re-derived, never re-fetched) against verified_facts' surviving
-        # Fact.fact_id set -- FactCollectorAgent._to_fact sets
-        # fact_id=raw.fact_id() verbatim, so this is the same identity,
-        # robust to whether the drop came from quarantine-cascade
-        # (immediately above) or a separate Evidence Integrity exclusion.
-        # A clean, complete Literature fetch is entirely unaffected: this
-        # block is a no-op unless direct_acquisition_info already reports
-        # feature_enabled=True and coverage_complete=True.
-        if result.direct_acquisition_info.get(
-            "feature_enabled"
-        ) and result.direct_acquisition_info.get("coverage_complete"):
-            literature_collection_results = [
-                c for c in collection_results if c.collector == _LITERATURE_BRIDGE_COLLECTOR_LABEL
-            ]
-            literature_raw_fact_ids = {
-                raw.fact_id() for c in literature_collection_results for raw in c.raw_facts
-            }
-            missing_literature_fact_ids = literature_raw_fact_ids - {f.fact_id for f in verified_facts}
-            if missing_literature_fact_ids:
-                literature_source_ids = {
-                    s.source_id for c in literature_collection_results for s in c.sources
-                }
-                quarantined_literature_source_ids = {
-                    q.source_id for q in quarantined_sources
-                } & literature_source_ids
-                if quarantined_literature_source_ids:
-                    reason = (
-                        f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) were "
-                        f"excluded after {len(quarantined_literature_source_ids)} Literature "
-                        "source(s) were quarantined by Source validation (source_id(s): "
-                        f"{', '.join(sorted(quarantined_literature_source_ids))})"
-                    )
-                else:
-                    reason = (
-                        f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) "
-                        "submitted by the acquisition bridge did not survive Evidence Integrity"
-                    )
-                updated_direct_acquisition_info = dict(result.direct_acquisition_info)
-                updated_direct_acquisition_info["coverage_complete"] = False
-                updated_direct_acquisition_info["unresolved_reasons"] = [
-                    *updated_direct_acquisition_info.get("unresolved_reasons", []),
-                    reason,
-                ]
-                result.direct_acquisition_info = updated_direct_acquisition_info
-
-        for fact in verified_facts:
-            try:
-                self.repo.save_fact(fact)
-            except Exception as exc:  # noqa: BLE001
-                result.failures.append(f"fact persistence failed for {fact.fact_id}: {exc}")
-                ctx.status = RunStatus.INCOMPLETE_RESEARCH
+        result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
+        if pass_output.agent_run_record is not None:
+            result.agent_records.append(pass_output.agent_run_record)
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
         checkpoint("verify", {"verified": len(verified_facts)})
