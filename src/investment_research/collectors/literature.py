@@ -154,10 +154,95 @@ def _text(el: ET.Element | None, path: str, default: str = UNKNOWN) -> str:
     return stripped or default
 
 
+#: NCBI's own PubDate/PubMedPubDate ``<Month>`` element uses a 3-letter
+#: English abbreviation (never full names, never locale-varying forms) --
+#: this is NCBI's fixed wire vocabulary, not a natural-language value, so a
+#: fixed allowlist is the correct match for it, never ``datetime.strptime``
+#: with ``%b``/``%B`` (locale-dependent: it would silently vary by the
+#: host process's own ``LC_TIME``, exactly what requirement 1G's "never
+#: guess" principle rules out for a value this system persists and later
+#: re-parses on a different machine).
+_PUBMED_MONTH_ABBREVIATIONS: dict[str, str] = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+    "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+
+_YEAR_RE = re.compile(r"^\d{4}$")
+
+
+def _normalize_pubmed_month(month: str) -> str | None:
+    """A zero-padded ``"01"``..``"12"`` for a numeric or 3-letter-English-
+    abbreviation month token (case-insensitive), or ``None`` when ``month``
+    cannot be read as either -- never a guess, and the caller falls back to
+    a coarser (year-only) precision rather than propagate an unreadable
+    token forward."""
+    token = (month or "").strip()
+    if not token or token == UNKNOWN:
+        return None
+    if token.isdigit():
+        value = int(token)
+        return f"{value:02d}" if 1 <= value <= 12 else None
+    return _PUBMED_MONTH_ABBREVIATIONS.get(token[:3].lower())
+
+
+def _normalize_pubmed_day(day: str) -> str | None:
+    """A zero-padded ``"01"``..``"31"`` for a numeric day token, or
+    ``None`` -- same never-guess contract as ``_normalize_pubmed_month``."""
+    token = (day or "").strip()
+    if not token or token == UNKNOWN or not token.isdigit():
+        return None
+    value = int(token)
+    return f"{value:02d}" if 1 <= value <= 31 else None
+
+
+def _normalize_pubmed_date_parts(year: str, month: str, day: str) -> str:
+    """The SINGLE normalization point for a PubMed/Europe-PMC-shaped
+    Year/Month/Day into exactly the precision levels this repository's
+    Date Integrity contract accepts (``schemas/fact.py::parse_date_bounds``/
+    ``schemas/validation.py::validate_date_field``): ``"YYYY-MM-DD"``
+    (day precision), ``"YYYY-MM"`` (month precision), or ``"YYYY"`` (year
+    precision) -- never any other shape, and never a value those functions
+    would reject. Every caller in this repository that needs a normalized
+    PubMed date calls THIS function (via ``_pub_date`` below) -- never a
+    second, independent implementation (e.g. in ``research/literature_
+    acquisition_adapter.py`` or ``research/literature_evidence_projection.py``,
+    which copy ``Document.published_date`` into ``Source.published_date``
+    verbatim and therefore depend on this function already having produced
+    a valid value).
+
+    Real NCBI EFetch XML is internally inconsistent: ``<ArticleDate>``'s
+    own ``<Month>`` is always zero-padded numeric, but ``<PubDate>``'s
+    ``<Month>`` (both ``JournalIssue/PubDate`` and
+    ``History/PubMedPubDate``) commonly uses a 3-letter English
+    abbreviation instead -- this function accepts both shapes uniformly.
+    A ``Month``/``Day`` present but unreadable as either shape is DROPPED,
+    never guessed: the result falls back to whatever coarser precision
+    (month, then year) IS cleanly interpretable.
+    """
+    normalized_year = (year or "").strip()
+    if not _YEAR_RE.match(normalized_year):
+        return UNKNOWN
+    numeric_month = _normalize_pubmed_month(month)
+    if numeric_month is None:
+        return normalized_year
+    numeric_day = _normalize_pubmed_day(day)
+    if numeric_day is None:
+        return f"{normalized_year}-{numeric_month}"
+    return f"{normalized_year}-{numeric_month}-{numeric_day}"
+
+
 def _pub_date(date_el: ET.Element | None) -> str:
     """A ``PubDate``/``ArticleDate``-shaped element's Year/Month/Day (or
     ``MedlineDate`` free-text fallback, NLM's own convention for an
-    imprecise date) -- never a guessed day when only year/month is known."""
+    imprecise date) -- never a guessed day when only year/month is known.
+
+    ``MedlineDate`` (a season, a range like ``"2021 Jan-Feb"``, or any
+    other free-text imprecise date NLM chose not to structure) is returned
+    verbatim, UNCHANGED from this function's pre-existing behavior --
+    never parsed or guessed into a specific date here. The structured
+    Year/Month/Day path below is what Phase 4.2B correction 1 fixes: see
+    ``_normalize_pubmed_date_parts``.
+    """
     if date_el is None:
         return UNKNOWN
     medline_date = _text(date_el, "MedlineDate")
@@ -168,12 +253,7 @@ def _pub_date(date_el: ET.Element | None) -> str:
         return UNKNOWN
     month = _text(date_el, "Month")
     day = _text(date_el, "Day")
-    parts = [year]
-    if month != UNKNOWN:
-        parts.append(month)
-        if day != UNKNOWN:
-            parts.append(day)
-    return "-".join(parts)
+    return _normalize_pubmed_date_parts(year, month, day)
 
 
 @dataclass(frozen=True)

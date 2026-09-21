@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000031</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Journal of Fictional Seasonal Reports</Title>
+<ISOAbbreviation>J Fict Seas Rep</ISOAbbreviation>
+<JournalIssue><Volume>3</Volume><Issue>1</Issue><PubDate><MedlineDate>2025 Jan-Feb</MedlineDate></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional report whose PubDate is an imprecise MedlineDate range, never a specific day</ArticleTitle>
+<Abstract>
+<AbstractText>This is an unstructured abstract describing a wholly fictional study. No real company, drug, or patient data is described anywhere in this fixture. This fixture exists to exercise NLM's own MedlineDate free-text fallback (a range spanning two months), which this repository's Date Integrity contract correctly refuses to guess into a specific day, month, or even a single year.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y">
+<LastName>Example</LastName><ForeName>Morgan</ForeName><Initials>M</Initials>
+<AffiliationInfo><Affiliation>Department of Fictional Epidemiology, Sample University</Affiliation></AffiliationInfo>
+</Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+</Article>
+<MedlineJournalInfo><Country>United States</Country></MedlineJournalInfo>
+</MedlineCitation>
+<PubmedData>
+<History><PubMedPubDate PubStatus="pubmed"><Year>2025</Year><Month>2</Month><Day>10</Day></PubMedPubDate></History>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000031</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

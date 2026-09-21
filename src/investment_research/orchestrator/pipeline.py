@@ -627,6 +627,63 @@ class Pipeline:
                     "from evidence"
                 )
 
+        # Phase 4.2B correction 1: downstream completeness consistency.
+        # LiteraturePipelineBundle.coverage_complete (research/literature_
+        # pipeline_integration.py) is computed upstream, from the Chunk/
+        # Evidence Projection's own outcome, BEFORE any of this run's
+        # facts ever reach Repository.save_sources (Source validation,
+        # above) or EvidenceIntegrityAgent's own exclusion logic -- a
+        # Literature Source that quarantines here, or a Literature Fact
+        # that Evidence Integrity itself drops, both happen AFTER that
+        # upstream computation, so result.direct_acquisition_info must
+        # never keep reporting coverage_complete=True once either has
+        # actually happened. Detected by comparing each literature
+        # CollectionResult's OWN submitted RawFact.fact_id() set (never
+        # re-derived, never re-fetched) against verified_facts' surviving
+        # Fact.fact_id set -- FactCollectorAgent._to_fact sets
+        # fact_id=raw.fact_id() verbatim, so this is the same identity,
+        # robust to whether the drop came from quarantine-cascade
+        # (immediately above) or a separate Evidence Integrity exclusion.
+        # A clean, complete Literature fetch is entirely unaffected: this
+        # block is a no-op unless direct_acquisition_info already reports
+        # feature_enabled=True and coverage_complete=True.
+        if result.direct_acquisition_info.get(
+            "feature_enabled"
+        ) and result.direct_acquisition_info.get("coverage_complete"):
+            literature_collection_results = [
+                c for c in collection_results if c.collector == _LITERATURE_BRIDGE_COLLECTOR_LABEL
+            ]
+            literature_raw_fact_ids = {
+                raw.fact_id() for c in literature_collection_results for raw in c.raw_facts
+            }
+            missing_literature_fact_ids = literature_raw_fact_ids - {f.fact_id for f in verified_facts}
+            if missing_literature_fact_ids:
+                literature_source_ids = {
+                    s.source_id for c in literature_collection_results for s in c.sources
+                }
+                quarantined_literature_source_ids = {
+                    q.source_id for q in quarantined_sources
+                } & literature_source_ids
+                if quarantined_literature_source_ids:
+                    reason = (
+                        f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) were "
+                        f"excluded after {len(quarantined_literature_source_ids)} Literature "
+                        "source(s) were quarantined by Source validation (source_id(s): "
+                        f"{', '.join(sorted(quarantined_literature_source_ids))})"
+                    )
+                else:
+                    reason = (
+                        f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) "
+                        "submitted by the acquisition bridge did not survive Evidence Integrity"
+                    )
+                updated_direct_acquisition_info = dict(result.direct_acquisition_info)
+                updated_direct_acquisition_info["coverage_complete"] = False
+                updated_direct_acquisition_info["unresolved_reasons"] = [
+                    *updated_direct_acquisition_info.get("unresolved_reasons", []),
+                    reason,
+                ]
+                result.direct_acquisition_info = updated_direct_acquisition_info
+
         for fact in verified_facts:
             try:
                 self.repo.save_fact(fact)
@@ -1099,8 +1156,16 @@ class Pipeline:
         # ``verdict.research_status``/``verdict.run_status`` are computed
         # from them below -- never a status assigned after the verdict
         # that already read the stale value.
+        # Phase 4.2B correction 1: reads ``result.direct_acquisition_info``
+        # (never ``self.direct_acquisition_info``) -- ``result``'s own copy
+        # is the one the quarantine/Evidence-Integrity consistency check
+        # above may have just amended (coverage_complete flipped False,
+        # an unresolved reason appended); ``self.direct_acquisition_info``
+        # stays the ORIGINAL, upstream-computed, constructor-supplied
+        # value for the lifetime of this Pipeline instance and must never
+        # be mutated in place (a caller could reuse the same instance).
         literature_blocking_reasons = _literature_incomplete_blocking_reasons(
-            collection_results, self.direct_acquisition_info
+            collection_results, result.direct_acquisition_info
         )
         blocking_reasons.extend(literature_blocking_reasons)
         if literature_blocking_reasons:

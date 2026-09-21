@@ -78,7 +78,12 @@ def test_normal_abstract_fields():
     assert article.pmid == "90000001"
     assert "Sample Compound" in article.article_title
     assert article.journal_title == "Journal of Fictional Oncology"
-    assert article.publication_date == "2025-Jun"
+    # Phase 4.2B correction 1: the raw fixture's <Month>Jun</Month> is now
+    # normalized to zero-padded numeric ("06"), matching the Date
+    # Integrity contract (schemas/fact.py::parse_date_bounds) rather than
+    # the raw NCBI wire token -- "2025-Jun" was never a valid "YYYY-MM"
+    # value and would be rejected/quarantined by Source validation.
+    assert article.publication_date == "2025-06"
     assert article.electronic_publication_date == "2025-05-20"
     assert article.language == "eng"
     assert "Journal Article" in article.publication_types

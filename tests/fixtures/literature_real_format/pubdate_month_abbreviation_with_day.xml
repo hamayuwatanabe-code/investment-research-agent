@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation Status="MEDLINE" Owner="NLM">
+<PMID Version="1">90000030</PMID>
+<Article PubModel="Print-Electronic">
+<Journal>
+<Title>Journal of Fictional Molecular Therapeutics</Title>
+<ISOAbbreviation>J Fict Mol Ther</ISOAbbreviation>
+<JournalIssue><Volume>7</Volume><Issue>2</Issue><PubDate><Year>2025</Year><Month>Feb</Month><Day>04</Day></PubDate></JournalIssue>
+</Journal>
+<ArticleTitle>A fictional report of a Sample Compound mechanism in a fictional model system</ArticleTitle>
+<Abstract>
+<AbstractText>This is an unstructured abstract describing a wholly fictional study. No real company, drug, or patient data is described anywhere in this fixture. This fixture exists to exercise PubMed's own real-world PubDate shape, where JournalIssue/PubDate/Month is a 3-letter English abbreviation rather than a zero-padded number.</AbstractText>
+</Abstract>
+<AuthorList CompleteYN="Y">
+<Author ValidYN="Y">
+<LastName>Sample</LastName><ForeName>Jordan</ForeName><Initials>J</Initials>
+<AffiliationInfo><Affiliation>Department of Fictional Pharmacology, Sample University</Affiliation></AffiliationInfo>
+</Author>
+</AuthorList>
+<Language>eng</Language>
+<PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType></PublicationTypeList>
+<ArticleDate DateType="Electronic"><Year>2025</Year><Month>02</Month><Day>01</Day></ArticleDate>
+</Article>
+<MedlineJournalInfo><Country>United States</Country></MedlineJournalInfo>
+</MedlineCitation>
+<PubmedData>
+<History><PubMedPubDate PubStatus="pubmed"><Year>2025</Year><Month>2</Month><Day>5</Day></PubMedPubDate></History>
+<PublicationStatus>ppublish</PublicationStatus>
+<ArticleIdList>
+<ArticleId IdType="pubmed">90000030</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>
