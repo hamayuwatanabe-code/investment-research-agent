@@ -1089,9 +1089,34 @@ class Pipeline:
         # complete fetch, and never fires at all when the flag was never
         # used (``direct_acquisition_info`` then reads
         # ``feature_enabled=False``).
-        blocking_reasons.extend(
-            _literature_incomplete_blocking_reasons(collection_results, self.direct_acquisition_info)
+        # Phase 4.2A correction 2: kept in its own variable (never inlined
+        # into the ``blocking_reasons.extend(...)`` call above) so the
+        # RunContext/result-level propagation below can act on Literature's
+        # OWN contribution specifically, without re-deriving it or
+        # re-running the completeness/sufficiency checks. Held BEFORE the
+        # ``if verdict is not None:`` block runs, so ``ctx.status``/
+        # ``result.failures`` are already correct by the time
+        # ``verdict.research_status``/``verdict.run_status`` are computed
+        # from them below -- never a status assigned after the verdict
+        # that already read the stale value.
+        literature_blocking_reasons = _literature_incomplete_blocking_reasons(
+            collection_results, self.direct_acquisition_info
         )
+        blocking_reasons.extend(literature_blocking_reasons)
+        if literature_blocking_reasons:
+            # Without this, a run whose ONLY incompleteness is Literature's
+            # own (completeness.blocked=False, sufficiency.sufficient=True,
+            # result.failures otherwise empty) left ctx.status at COMPLETE
+            # -- verdict.research_status/action were correctly withheld by
+            # the blocking_reasons branch below, but verdict.run_status
+            # (line ~1134, copied straight from ctx.status) and result.
+            # incomplete/result.context.status all read COMPLETE, producing
+            # exactly the contradiction (status=COMPLETE, research_status=
+            # BLOCKED_PENDING_VERIFICATION, action=None) an audit found.
+            ctx.status = RunStatus.INCOMPLETE_RESEARCH
+            for reason in literature_blocking_reasons:
+                if reason not in result.failures:  # never register the same reason twice
+                    result.failures.append(reason)
 
         if verdict is not None:
             if blocking_reasons:

@@ -25,6 +25,7 @@ from investment_research.llm.client import LLMBudget, LLMClient
 from investment_research.orchestrator.isolation import policy_for
 from investment_research.orchestrator.pipeline import Pipeline
 from investment_research.research import literature_live_smoke as live
+from investment_research.research.escalation import EscalationReport
 from investment_research.research.literature_acquisition_adapter import (
     NCBI_EFETCH_URL,
     NCBI_ESEARCH_URL,
@@ -42,8 +43,17 @@ from investment_research.research.literature_pipeline_integration import (
     run_literature_pipeline_acquisition,
     validate_literature_pipeline_request,
 )
+from investment_research.research.provider import DomainCoverage, NullResearchProvider
 from investment_research.research.source_routing import ImplementationStatus
-from investment_research.schemas.enums import FetchOutcome, ResearchStatus
+from investment_research.schemas.enums import (
+    REQUIRED_RESEARCH_DOMAINS,
+    FetchOutcome,
+    ResearchStatus,
+    RunStatus,
+    SearchStatus,
+)
+from investment_research.scoring.completeness import CompletenessResult
+from investment_research.scoring.evidence_sufficiency import EvidenceSufficiencyMatrix
 
 from . import _literature_fixture_support as fx
 from ._network_guard import forbid_external_network_autouse  # noqa: F401
@@ -926,9 +936,329 @@ def test_result_to_json_includes_direct_acquisition_info_key_when_flag_on(repo, 
     assert payload["direct_acquisition_info"]["feature_enabled"] is True
 
 
+class _AvailableNullResearchProvider(NullResearchProvider):
+    """Reports ``available()=True`` (unlike ``NullResearchProvider``) but
+    keeps the same safe no-op ``search()``/``fetch()`` -- used only so the
+    escalation stage does not add its own "skipped" noise to
+    ``result.failures`` in the non-vacuous tests below.
+    ``pipeline_module.escalate`` is ALSO faked (see
+    ``_install_noise_free_pipeline_harness``), so this provider's
+    ``search``/``fetch`` are never actually invoked either."""
+
+    def available(self):
+        return True, ""
+
+
+def _install_noise_free_pipeline_harness(monkeypatch) -> None:
+    """Phase 4.2A correction 2: neutralizes every KNOWN source of
+    Literature-UNRELATED ``result.failures``/``ctx.status`` noise in a
+    real ``Pipeline.run()`` call, so a test can prove a status/action
+    transition is caused BY Literature specifically -- never merely
+    coincide with noise the DEMOBIO fixture already produces on its own
+    (competitive/microstructure/kill_agent DEGRADED from sparse fixture
+    data; an "escalation skipped" message from no research provider being
+    configured; the Search Completeness Gate blocking on domains this
+    fixture's structured collectors alone never satisfy).
+
+    Verified empirically before being written into this suite (see this
+    correction's own commit message): WITHOUT this harness, temporarily
+    disabling Correction 2's own fix and re-running the exact Scenario A/B
+    setups below still produced ``status=INCOMPLETE_RESEARCH`` --
+    vacuously, via unrelated DEMOBIO noise, not via the fix -- exactly the
+    trap an audit warned about. WITH this harness and Correction 2
+    disabled, the SAME setups instead reproduced the audit's reported
+    contradiction exactly (``status=COMPLETE``,
+    ``research_status=BLOCKED_PENDING_VERIFICATION``, ``action=None``,
+    ``result.incomplete=False``) -- proving this harness is what makes the
+    tests below non-vacuous, and that Correction 2 is what fixes that
+    contradiction. See ``test_noise_free_harness_reaches_genuine_complete_
+    baseline`` for the harness's own self-check (no Literature at all ->
+    a genuine, failure-free COMPLETE run).
+
+    Every patch here targets ONLY test noise unrelated to Literature's own
+    evidence -- never touches Literature-specific code, and never widens
+    what the real completeness/sufficiency gates would accept in
+    production (production callers never monkeypatch anything)."""
+    import investment_research.orchestrator.pipeline as pipeline_module
+
+    def fake_assess_completeness(**_kwargs):
+        return CompletenessResult(
+            coverage={
+                domain: DomainCoverage(domain=domain, status=SearchStatus.SEARCHED)
+                for domain in REQUIRED_RESEARCH_DOMAINS
+            }
+        )
+
+    def fake_assess_evidence_sufficiency(**_kwargs):
+        return EvidenceSufficiencyMatrix(decision_grade_fact_total=1)
+
+    def fake_escalate(facts, _provider, *, company, **_kwargs):
+        return list(facts), EscalationReport()
+
+    monkeypatch.setattr(pipeline_module, "assess_completeness", fake_assess_completeness)
+    monkeypatch.setattr(
+        pipeline_module, "assess_evidence_sufficiency", fake_assess_evidence_sufficiency
+    )
+    monkeypatch.setattr(pipeline_module, "escalate", fake_escalate)
+
+    real_run_agent = Pipeline._run_agent
+    noisy_agent_ids = {"competitive", "microstructure", "kill_agent"}
+
+    def patched_run_agent(self, agent, guard, result, **kwargs):
+        # Snapshot/restore rather than skip the real call: every agent's
+        # REAL facts/evaluation still publish to the bus normally -- only
+        # the generic degraded/failed bookkeeping (_run_agent's own
+        # result.failures.append/ctx.status=INCOMPLETE_RESEARCH for a hard
+        # failure) is undone, and only for these three agents, whose
+        # degradation against this fixture is about missing competitor/
+        # microstructure/research-provider data -- never about Literature.
+        before_status = result.context.status
+        before_len = len(result.failures)
+        output = real_run_agent(self, agent, guard, result, **kwargs)
+        if agent.agent_id in noisy_agent_ids:
+            del result.failures[before_len:]
+            result.context.status = before_status
+        return output
+
+    monkeypatch.setattr(Pipeline, "_run_agent", patched_run_agent)
+
+
+def _noise_free_pipeline(repo, monkeypatch, **kwargs) -> Pipeline:
+    _install_noise_free_pipeline_harness(monkeypatch)
+    return Pipeline(
+        repo, NullSearchProvider(), today=TODAY, research=_AvailableNullResearchProvider(), **kwargs
+    )
+
+
+# =============================================================================
+# 6d. Correction 2: RunStatus/result.failures propagation -- non-vacuous
+#    proof via a noise-free Pipeline.run() baseline (task sections 1-2)
+# =============================================================================
+def test_noise_free_harness_reaches_genuine_complete_baseline(monkeypatch, repo, fixture_dir):
+    """Validates the harness ITSELF: with no Literature involved at all,
+    a real Pipeline.run() over DEMOBIO reaches a genuinely COMPLETE,
+    failure-free state -- the necessary precondition for every non-vacuous
+    claim below (otherwise unrelated DEMOBIO noise could produce the same
+    final status coincidentally, exactly the trap an audit flagged)."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+    pipeline = _noise_free_pipeline(repo, monkeypatch)
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result], price=metadata["price"],
+        aliases=metadata.get("aliases", ()),
+    )
+    assert result.context.status is RunStatus.COMPLETE
+    assert result.failures == []
+    assert result.incomplete is False
+    assert result.verdict.research_status is ResearchStatus.COMPLETE
+    assert result.verdict.action is not None  # a real Action was actually reached
+
+
+def test_scenario_a_coverage_incomplete_alone_forces_incomplete_research(monkeypatch, repo, fixture_dir):
+    """Scenario A, non-vacuous: starting from the harness's own proven-
+    COMPLETE baseline, a Chunk-Projection-only failure
+    (CollectionResult.degraded=False, coverage_complete=False) is the ONLY
+    thing that differs -- and it alone flips every one of these."""
+    import dataclasses
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={
+        _efetch_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
+        fx.europepmc_search_url("90000015"): fx.ok(_EPMC_EMPTY),
+    })
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(pmid="90000015"), ticker="DEMOBIO", http_client=http, env=_ENV
+    )
+    assert not bundle.collection_result.degraded
+    assert bundle.coverage_complete
+    incomplete_bundle = dataclasses.replace(
+        bundle, coverage_complete=False,
+        unresolved_reasons=("document doc_x: version chain corrupted: simulated for this test",),
+    )
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(incomplete_bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(incomplete_bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, incomplete_bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+
+    assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.run_status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert result.verdict.action is None
+    assert result.incomplete is True
+    # Non-vacuous: failures contains ONLY the Literature-attributed entry
+    # -- proving nothing else in this run contributed to the transition.
+    assert len(result.failures) == 1
+    assert "Literature Document-First" in result.failures[0]
+    assert "coverage" in result.failures[0].lower()
+
+
+def test_scenario_b_refused_alone_forces_incomplete_research(monkeypatch, repo, fixture_dir):
+    """Scenario B, non-vacuous: the defensive credential re-check refused
+    before any request -- collection_result is None, so ONLY direct_
+    acquisition_info's refused=True signal exists. Starting from the same
+    proven-COMPLETE baseline, this alone flips every one of these."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={})
+    bundle = run_literature_pipeline_acquisition(_pmid_request(), ticker="DEMOBIO", http_client=http, env={})
+    assert bundle.refused
+    assert bundle.collection_result is None
+    assert http.requested_urls == []
+    assert bundle.physical_attempt_count == 0
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result],  # no literature CollectionResult at all
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+
+    assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.run_status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert result.verdict.action is None
+    assert result.incomplete is True
+    assert len(result.failures) == 1
+    assert "Literature Document-First" in result.failures[0]
+    assert "refused" in result.failures[0].lower()
+    assert "IRA_NCBI_TOOL" in result.failures[0]
+
+
+def test_degraded_and_incomplete_coverage_do_not_duplicate_failures(monkeypatch, repo, fixture_dir):
+    """Both signals present simultaneously (a fully-failed acquisition:
+    Evidence Projection degraded AND Chunk Projection incomplete) must
+    still contribute exactly ONE result.failures entry, never two --
+    proven against the same noise-free baseline."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(
+        responses={_esearch_url("NCT09990001[si]", 20): fx.failed(FetchOutcome.ERROR, "x")}
+    )
+    bundle = run_literature_pipeline_acquisition(_nct_request(), ticker="DEMOBIO", http_client=http, env=_ENV)
+    assert bundle.collection_result.degraded
+    assert bundle.coverage_complete is False
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    literature_failures = [f for f in result.failures if "Literature Document-First" in f]
+    assert len(literature_failures) == 1
+    assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.run_status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.action is None
+
+
+def test_flag_off_leaves_status_and_failures_unchanged_non_vacuous(monkeypatch, repo, fixture_dir):
+    """Flag unused: direct_acquisition_info is empty -- no Literature-
+    attributed change to ctx.status/result.failures/verdict at all,
+    verified against the same proven-COMPLETE baseline (not merely "ended
+    up INCOMPLETE for some other reason, so nothing could be observed")."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    pipeline = _noise_free_pipeline(repo, monkeypatch)  # no chunks, no direct_acquisition_info
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result], price=metadata["price"],
+        aliases=metadata.get("aliases", ()),
+    )
+    assert result.context.status is RunStatus.COMPLETE
+    assert result.failures == []
+    assert result.incomplete is False
+    assert result.verdict.research_status is ResearchStatus.COMPLETE
+    assert result.verdict.action is not None
+
+
+def test_clean_acquisition_leaves_status_and_failures_unchanged_non_vacuous(monkeypatch, repo, fixture_dir):
+    """A genuinely complete, non-degraded Literature fetch never
+    contributes a status/failures/verdict change on its own -- the 'never
+    over-blocks' half of the guarantee, proven against the same
+    proven-COMPLETE baseline."""
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={
+        _efetch_url(["90000015"]): fx.ok(fx.fixture_text("batch_articleset.xml")),
+        fx.europepmc_search_url("90000015"): fx.ok(_EPMC_EMPTY),
+    })
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(pmid="90000015"), ticker="DEMOBIO", http_client=http, env=_ENV
+    )
+    assert not bundle.collection_result.degraded
+    assert bundle.coverage_complete
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, bundle.collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+    assert result.context.status is RunStatus.COMPLETE
+    assert result.failures == []
+    assert result.incomplete is False
+    assert result.verdict.research_status is ResearchStatus.COMPLETE
+    assert result.verdict.action is not None
+
+
+def test_result_to_json_never_shows_complete_status_with_blocked_research_status(
+    monkeypatch, repo, fixture_dir
+):
+    """The exact contradiction an audit found (status=COMPLETE,
+    research_status=BLOCKED_PENDING_VERIFICATION, action=None) must never
+    appear in --json output for a Literature-incomplete run."""
+    import investment_research.cli as cli_module
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={})
+    bundle = run_literature_pipeline_acquisition(_pmid_request(), ticker="DEMOBIO", http_client=http, env={})
+    assert bundle.refused
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result], price=metadata["price"],
+        aliases=metadata.get("aliases", ()),
+    )
+    payload = cli_module.result_to_json(result)
+    assert payload["research_status"] == str(ResearchStatus.BLOCKED_PENDING_VERIFICATION)
+    assert payload["status"] == str(RunStatus.INCOMPLETE_RESEARCH)
+    assert payload["action"] is None
+    # The specific contradiction: never COMPLETE status with a BLOCKED research_status.
+    assert not (payload["status"] == str(RunStatus.COMPLETE) and "BLOCKED" in payload["research_status"])
+
+
 def test_pipeline_never_calls_literature_acquisition_code_directly():
     """pipeline.py's own blocking-propagation check (Phase 4.2A) reads
-    only CollectionResult.collector/.degraded/.describe() -- it must never
+    CollectionResult.collector/.degraded/.describe() and the plain dict
+    self.direct_acquisition_info (Phase 4.2A correction 1) -- it must never
     import literature_evidence_projection/literature_chunk_projection/
     literature_pipeline_integration, or call any acquisition function
     itself, whatever a run's collection_results happen to contain."""
@@ -950,7 +1280,10 @@ def test_literature_bridge_collector_label_constant_stays_in_sync():
 
 
 # =============================================================================
-# 7. cli.py wiring: flag OFF is byte-identical; flag ON follows production
+# 7. cli.py wiring: flag OFF preserves observable output/behavior (facts,
+#    chunks, verdict, report, --json keys) -- NOT the Python import graph
+#    or object structure, which do differ (see literature_pipeline_
+#    integration.py's own module docstring); flag ON follows production
 #    order (task sections 2/7)
 # =============================================================================
 def test_flag_off_run_one_makes_zero_literature_calls(monkeypatch, repo, fixture_dir, tmp_path):
