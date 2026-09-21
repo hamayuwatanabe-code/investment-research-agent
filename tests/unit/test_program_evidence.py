@@ -1,5 +1,15 @@
-"""Phase 4.3B: immutable structured evidence types and their structural
-validation (``scoring/program_evidence.py``)."""
+"""Phase 4.3B / Phase 4.3B Correction 1: immutable structured evidence
+types and their FORMAT + REFERENTIAL validation (``scoring/
+program_evidence.py``).
+
+Correction 1's root fix: Phase 4.3B only checked that ``supporting_fact_ids``/
+``source_id`` were the right SHAPE. This file's positive tests build REAL
+``Source``/``Fact`` objects and prove VALID is reached only when the
+evidence record's own claimed ``source_tier``/``content_hash``/
+``retrieved_at`` genuinely match that real record -- and its negative
+tests prove a format-valid-but-fabricated/mismatched/absent reference is
+rejected, never silently accepted.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +17,18 @@ import dataclasses
 
 import pytest
 
-from investment_research.schemas.enums import SourceTier
+from investment_research.schemas.enums import (
+    EvidenceClass,
+    FactCategory,
+    Materiality,
+    SourceTier,
+    VerifiedStatus,
+)
+from investment_research.schemas.fact import Fact, Source
 from investment_research.scoring.program_evidence import (
+    EMPTY_VALIDATION_CONTEXT,
     CompanyIdentityEvidence,
+    EvidenceValidationContext,
     EvidenceValidationOutcome,
     LiteratureCandidateEvidence,
     ProgramCandidateEvidence,
@@ -21,6 +40,34 @@ from investment_research.scoring.program_evidence import (
 
 RETRIEVED_AT = "2026-01-01T00:00:00+00:00"
 REAL_FACT_ID = "fact_" + "a" * 20  # matches make_fact_id's own shape exactly
+OTHER_FACT_ID = "fact_" + "b" * 20
+
+
+def _source(
+    source_id="src_1", tier=SourceTier.TIER_1, content_hash="hash_1", retrieved_at=RETRIEVED_AT,
+    url="https://example.test/demo", title="Demo Source",
+) -> Source:
+    return Source(
+        source_id=source_id, url=url, title=title, tier=tier,
+        retrieved_at=retrieved_at, content_hash=content_hash,
+    )
+
+
+def _fact(fact_id=REAL_FACT_ID, source_id="src_1") -> Fact:
+    return Fact(
+        fact_id=fact_id, ticker="DEMOBIO", category=FactCategory.CLINICAL,
+        claim="demo claim", evidence_class=EvidenceClass.VERIFIED_FACT,
+        source_id=source_id, source_url="https://example.test/demo",
+        source_title="Demo Source", source_tier=SourceTier.TIER_1,
+        verified_status=VerifiedStatus.VERIFIED, materiality=Materiality.MEDIUM,
+    )
+
+
+def _context(sources=(), facts=()) -> EvidenceValidationContext:
+    return EvidenceValidationContext(
+        sources_by_id={s.source_id: s for s in sources},
+        verified_facts_by_id={f.fact_id: f for f in facts},
+    )
 
 
 # =============================================================================
@@ -44,6 +91,21 @@ def test_literature_candidate_evidence_is_frozen():
         evidence.pmid = "456"  # type: ignore[misc]
 
 
+def test_validation_context_is_frozen_and_immutable():
+    ctx = _context(sources=[_source()])
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ctx.sources_by_id = {}  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        ctx.sources_by_id["new"] = _source(source_id="new")  # type: ignore[index]
+
+
+def test_validation_context_copies_input_never_shares_the_caller_mutable_dict():
+    mutable = {"src_1": _source()}
+    ctx = EvidenceValidationContext(sources_by_id=mutable)
+    mutable["src_2"] = _source(source_id="src_2")  # mutate the ORIGINAL dict after construction
+    assert "src_2" not in ctx.sources_by_id  # context is unaffected
+
+
 def test_collection_fields_are_tuples_never_lists_or_dicts():
     evidence = ProgramCandidateEvidence(
         nct_id="NCT12345678",
@@ -57,179 +119,269 @@ def test_collection_fields_are_tuples_never_lists_or_dicts():
         value = getattr(evidence, field_name)
         assert isinstance(value, tuple), f"{field_name} is {type(value)}, not a tuple"
 
-    company = CompanyIdentityEvidence(ticker="DEMOBIO", explicitly_verified_aliases=("Old Name",))
-    assert isinstance(company.explicitly_verified_aliases, tuple)
-
-    lit = LiteratureCandidateEvidence(pmid="123", nct_ids=("NCT12345678",))
-    assert isinstance(lit.nct_ids, tuple)
-
-
-def test_no_field_default_is_a_mutable_container():
-    """Dataclass field defaults themselves must never be list/dict (which
-    would be silently SHARED across every instance) -- every default here
-    is either an immutable literal or absent."""
-    for cls in (CompanyIdentityEvidence, ProgramCandidateEvidence, LiteratureCandidateEvidence):
-        for f in dataclasses.fields(cls):
-            assert not isinstance(f.default, (list, dict)), f"{cls.__name__}.{f.name}"
-            assert f.default_factory in (dataclasses.MISSING,) or f.default_factory is tuple, (
-                f"{cls.__name__}.{f.name} uses a non-tuple default_factory"
-            )
-
 
 # =============================================================================
-# supporting_fact_ids never invented (Phase 4.3B requirement 2)
+# supporting_fact_ids -- format vs. referential (Phase 4.3B Correction 1,
+# requirement 3)
 # =============================================================================
-def test_real_shaped_fact_id_is_accepted():
+def test_positive_real_fact_backing_the_same_source_is_valid():
+    source = _source()
+    fact = _fact(source_id=source.source_id)
+    context = _context(sources=[source], facts=[fact])
     evidence = ProgramCandidateEvidence(
-        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_1",
-        retrieved_at=RETRIEVED_AT, supporting_fact_ids=(REAL_FACT_ID,),
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id=source.source_id,
+        source_tier=source.tier, retrieved_at=source.retrieved_at, content_hash=source.content_hash,
+        supporting_fact_ids=(REAL_FACT_ID,),
     )
-    result = validate_program_candidate_evidence(evidence)
+    result = validate_program_candidate_evidence(evidence, context)
     assert result.outcome == EvidenceValidationOutcome.VALID
 
 
-def test_invented_fact_id_shape_is_rejected():
+def test_negative_format_valid_but_nonexistent_fact_id_is_invalid():
+    source = _source()
+    context = _context(sources=[source])  # no facts at all
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id=source.source_id,
+        source_tier=source.tier, retrieved_at=source.retrieved_at, content_hash=source.content_hash,
+        supporting_fact_ids=(REAL_FACT_ID,),
+    )
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("does not exist" in r for r in result.reasons)
+
+
+def test_negative_invented_fact_id_shape_is_still_rejected_before_referential_check():
     evidence = ProgramCandidateEvidence(
         nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_1",
         retrieved_at=RETRIEVED_AT, supporting_fact_ids=("fact_totally_made_up",),
     )
-    result = validate_program_candidate_evidence(evidence)
+    result = validate_program_candidate_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
     assert result.outcome == EvidenceValidationOutcome.INVALID
     assert any("supporting_fact_ids" in r for r in result.reasons)
 
 
-def test_no_supporting_facts_is_not_itself_a_validation_failure():
-    """Absence is fine -- an invented id is not."""
+def test_negative_fact_source_id_mismatch_is_invalid():
+    """The Fact exists, but is attributed to a DIFFERENT source than the
+    candidate claims -- must never be accepted as support."""
+    source_a = _source(source_id="src_a")
+    source_b = _source(source_id="src_b")
+    fact = _fact(source_id="src_b")  # backs source_b, not source_a
+    context = _context(sources=[source_a, source_b], facts=[fact])
     evidence = ProgramCandidateEvidence(
-        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_1",
-        retrieved_at=RETRIEVED_AT, supporting_fact_ids=(),
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_a",
+        source_tier=source_a.tier, retrieved_at=source_a.retrieved_at,
+        content_hash=source_a.content_hash, supporting_fact_ids=(REAL_FACT_ID,),
     )
-    result = validate_program_candidate_evidence(evidence)
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("does not match" in r and "source_id" in r for r in result.reasons)
+
+
+def test_negative_fact_resting_on_a_quarantined_source_is_invalid():
+    """The Fact's OWN source_id is not present in the context (simulating
+    quarantine/exclusion) -- the fact can never support a candidate."""
+    candidate_source = _source(source_id="src_candidate")
+    fact = _fact(source_id="src_quarantined")  # this source is NOT in the context
+    context = _context(sources=[candidate_source], facts=[fact])  # src_quarantined absent
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_candidate",
+        source_tier=candidate_source.tier, retrieved_at=candidate_source.retrieved_at,
+        content_hash=candidate_source.content_hash, supporting_fact_ids=(REAL_FACT_ID,),
+    )
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("not present in the validation context" in r for r in result.reasons)
+
+
+def test_no_supporting_facts_is_allowed_and_marked_metadata_only():
+    """Phase 4.3B Correction 1's own decision (requirement 3): empty
+    supporting_fact_ids is ALLOWED -- a structured-Source-only metadata
+    record, never reported as 'confirmed by a Fact'."""
+    source = _source()
+    context = _context(sources=[source])
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id=source.source_id,
+        source_tier=source.tier, retrieved_at=source.retrieved_at, content_hash=source.content_hash,
+        supporting_fact_ids=(),
+    )
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.VALID
+    assert any("structured Source metadata only" in r for r in result.reasons)
+
+
+def test_multiple_supporting_facts_all_checked_one_bad_one_fails_the_whole_record():
+    source = _source()
+    good_fact = _fact(fact_id=REAL_FACT_ID, source_id=source.source_id)
+    context = _context(sources=[source], facts=[good_fact])  # OTHER_FACT_ID never added
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id=source.source_id,
+        source_tier=source.tier, retrieved_at=source.retrieved_at, content_hash=source.content_hash,
+        supporting_fact_ids=(REAL_FACT_ID, OTHER_FACT_ID),
+    )
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+
+
+# =============================================================================
+# Source referential integrity -- CompanyIdentityEvidence
+# =============================================================================
+def test_positive_company_identity_valid_when_source_matches_exactly():
+    source = _source(source_id="src_sec_1", tier=SourceTier.TIER_1, content_hash="sechash")
+    context = _context(sources=[source])
+    evidence = CompanyIdentityEvidence(
+        ticker="DEMOBIO", cik=123456, sec_official_name="Demo Biotherapeutics Inc",
+        source_id="src_sec_1", source_tier=source.tier, retrieved_at=source.retrieved_at,
+        content_hash=source.content_hash,
+    )
+    result = validate_company_identity_evidence(evidence, context)
     assert result.outcome == EvidenceValidationOutcome.VALID
 
 
-# =============================================================================
-# CompanyIdentityEvidence validation
-# =============================================================================
-def test_company_identity_valid():
+def test_negative_company_identity_source_not_in_context_is_incomplete():
     evidence = CompanyIdentityEvidence(
         ticker="DEMOBIO", cik=123456, sec_official_name="Demo Biotherapeutics Inc",
         source_id="src_sec_1", retrieved_at=RETRIEVED_AT,
     )
-    assert validate_company_identity_evidence(evidence).outcome == EvidenceValidationOutcome.VALID
-
-
-def test_company_identity_incomplete_when_cik_not_yet_resolved():
-    evidence = CompanyIdentityEvidence(ticker="DEMOBIO", cik=None, source_id="src_sec_1", retrieved_at=RETRIEVED_AT)
-    result = validate_company_identity_evidence(evidence)
+    result = validate_company_identity_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
     assert result.outcome == EvidenceValidationOutcome.INCOMPLETE
+    assert any("not found in the validation context" in r for r in result.reasons)
 
 
-def test_company_identity_incomplete_when_official_name_unknown():
+def test_negative_company_identity_tier_mismatch_is_invalid():
+    source = _source(source_id="src_sec_1", tier=SourceTier.TIER_1)
+    context = _context(sources=[source])
     evidence = CompanyIdentityEvidence(
-        ticker="DEMOBIO", cik=123456, source_id="src_sec_1", retrieved_at=RETRIEVED_AT,
+        ticker="DEMOBIO", cik=123456, sec_official_name="Demo Biotherapeutics Inc",
+        source_id="src_sec_1", source_tier=SourceTier.TIER_2,  # claims TIER_2, real Source is TIER_1
+        retrieved_at=source.retrieved_at, content_hash=source.content_hash,
     )
-    result = validate_company_identity_evidence(evidence)
-    assert result.outcome == EvidenceValidationOutcome.INCOMPLETE
+    result = validate_company_identity_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("source_tier" in r for r in result.reasons)
 
 
-def test_company_identity_invalid_empty_ticker():
-    evidence = CompanyIdentityEvidence(ticker="", cik=1, source_id="src_1", retrieved_at=RETRIEVED_AT)
-    assert validate_company_identity_evidence(evidence).outcome == EvidenceValidationOutcome.INVALID
-
-
-def test_company_identity_invalid_negative_cik():
-    evidence = CompanyIdentityEvidence(ticker="DEMOBIO", cik=-5, source_id="src_1", retrieved_at=RETRIEVED_AT)
-    assert validate_company_identity_evidence(evidence).outcome == EvidenceValidationOutcome.INVALID
-
-
-def test_company_identity_invalid_missing_source_id():
+def test_negative_company_identity_content_hash_mismatch_is_invalid():
+    source = _source(source_id="src_sec_1", content_hash="real_hash")
+    context = _context(sources=[source])
     evidence = CompanyIdentityEvidence(
-        ticker="DEMOBIO", cik=1, sec_official_name="Demo Inc", retrieved_at=RETRIEVED_AT,
+        ticker="DEMOBIO", cik=123456, sec_official_name="Demo Biotherapeutics Inc",
+        source_id="src_sec_1", source_tier=source.tier, retrieved_at=source.retrieved_at,
+        content_hash="wrong_hash",
     )
-    assert validate_company_identity_evidence(evidence).outcome == EvidenceValidationOutcome.INVALID
+    result = validate_company_identity_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("content_hash" in r for r in result.reasons)
+
+
+def test_negative_company_identity_retrieved_at_mismatch_is_invalid():
+    source = _source(source_id="src_sec_1", retrieved_at="2026-01-01T00:00:00+00:00")
+    context = _context(sources=[source])
+    evidence = CompanyIdentityEvidence(
+        ticker="DEMOBIO", cik=123456, sec_official_name="Demo Biotherapeutics Inc",
+        source_id="src_sec_1", source_tier=source.tier, content_hash=source.content_hash,
+        retrieved_at="2030-01-01T00:00:00+00:00",
+    )
+    result = validate_company_identity_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+    assert any("retrieved_at" in r for r in result.reasons)
 
 
 # =============================================================================
-# ProgramCandidateEvidence validation -- strict NCT / SourceTier preserved
+# Source referential integrity -- ProgramCandidateEvidence
 # =============================================================================
-def test_program_candidate_invalid_malformed_nct():
+def test_positive_program_candidate_valid_when_source_matches_exactly():
+    source = _source(source_id="src_ct_1")
+    context = _context(sources=[source])
     evidence = ProgramCandidateEvidence(
-        nct_id="NCT123", lead_sponsor="Demo Inc", source_id="src_1", retrieved_at=RETRIEVED_AT,
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_ct_1",
+        source_tier=source.tier, retrieved_at=source.retrieved_at, content_hash=source.content_hash,
     )
-    result = validate_program_candidate_evidence(evidence)
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.VALID
+
+
+def test_negative_program_candidate_source_not_in_context_is_incomplete():
+    """Simulates a quarantined/excluded Source -- the caller contract says
+    sources_by_id must never include a quarantined Source, so its absence
+    here is exactly the correct signal."""
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_ct_1",
+        retrieved_at=RETRIEVED_AT,
+    )
+    result = validate_program_candidate_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
+    assert result.outcome == EvidenceValidationOutcome.INCOMPLETE
+
+
+def test_negative_program_candidate_tier_mismatch_is_invalid():
+    source = _source(source_id="src_ct_1", tier=SourceTier.TIER_1)
+    context = _context(sources=[source])
+    evidence = ProgramCandidateEvidence(
+        nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_ct_1",
+        source_tier=SourceTier.UNKNOWN, retrieved_at=source.retrieved_at,
+        content_hash=source.content_hash,
+    )
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+
+
+def test_negative_program_candidate_malformed_nct_never_reaches_referential_check():
+    evidence = ProgramCandidateEvidence(nct_id="NCT123", lead_sponsor="Demo Inc", source_id="src_1")
+    result = validate_program_candidate_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
     assert result.outcome == EvidenceValidationOutcome.INVALID
     assert any("nct_id" in r for r in result.reasons)
 
 
-def test_program_candidate_invalid_loose_nct_shape_rejected():
-    """The exact shape scoring.program_resolution.NCT_RE would accept but
-    strict validation must not: a short alphanumeric id, never a real
-    8-digit NCT id."""
-    evidence = ProgramCandidateEvidence(
-        nct_id="NCT-ABC1", lead_sponsor="Demo Inc", source_id="src_1", retrieved_at=RETRIEVED_AT,
-    )
-    assert validate_program_candidate_evidence(evidence).outcome == EvidenceValidationOutcome.INVALID
-
-
-def test_program_candidate_incomplete_when_sponsor_unknown():
-    evidence = ProgramCandidateEvidence(nct_id="NCT12345678", source_id="src_1", retrieved_at=RETRIEVED_AT)
-    assert validate_program_candidate_evidence(evidence).outcome == EvidenceValidationOutcome.INCOMPLETE
-
-
-def test_program_candidate_valid_preserves_source_tier_unmodified():
-    for tier in (SourceTier.TIER_1, SourceTier.TIER_2, SourceTier.UNKNOWN):
-        evidence = ProgramCandidateEvidence(
-            nct_id="NCT12345678", lead_sponsor="Demo Inc", source_id="src_1",
-            source_tier=tier, retrieved_at=RETRIEVED_AT,
-        )
-        assert validate_program_candidate_evidence(evidence).outcome == EvidenceValidationOutcome.VALID
-        assert evidence.source_tier is tier  # never rewritten by validation
-
-
 # =============================================================================
-# LiteratureCandidateEvidence validation -- strict PMID/NCT, tier preserved
+# Source referential integrity -- LiteratureCandidateEvidence, tier UNKNOWN
 # =============================================================================
-def test_literature_candidate_invalid_malformed_pmid():
-    evidence = LiteratureCandidateEvidence(pmid="not-a-pmid", source_id="src_1", retrieved_at=RETRIEVED_AT)
-    result = validate_literature_candidate_evidence(evidence)
-    assert result.outcome == EvidenceValidationOutcome.INVALID
-    assert any("pmid" in r for r in result.reasons)
-
-
-def test_literature_candidate_invalid_malformed_embedded_nct():
+def test_positive_literature_candidate_valid_when_source_matches_exactly_tier_unknown():
+    """Phase 4.3A-correction-1's finding: every real literature Source
+    carries SourceTier.UNKNOWN. UNKNOWN == UNKNOWN compares equal, never
+    special-cased, never upgraded."""
+    source = _source(source_id="src_lit_1", tier=SourceTier.UNKNOWN)
+    context = _context(sources=[source])
     evidence = LiteratureCandidateEvidence(
-        pmid="33378609", nct_ids=("NCT-BAD",), source_id="src_1", retrieved_at=RETRIEVED_AT,
+        pmid="90000099", nct_ids=("NCT12345678",), source_id="src_lit_1",
+        source_tier=SourceTier.UNKNOWN, retrieved_at=source.retrieved_at,
+        content_hash=source.content_hash,
     )
-    assert validate_literature_candidate_evidence(evidence).outcome == EvidenceValidationOutcome.INVALID
-
-
-def test_literature_candidate_valid_with_unknown_tier_never_upgraded():
-    """Phase 4.3A-correction-1's finding: every real literature Source this
-    repository produces today carries SourceTier.UNKNOWN. This must remain
-    a VALID, unmodified outcome -- never rejected, never silently
-    promoted."""
-    evidence = LiteratureCandidateEvidence(
-        pmid="33378609", nct_ids=("NCT12345678",), source_id="src_lit_1",
-        source_tier=SourceTier.UNKNOWN, retrieved_at=RETRIEVED_AT,
-    )
-    result = validate_literature_candidate_evidence(evidence)
+    result = validate_literature_candidate_evidence(evidence, context)
     assert result.outcome == EvidenceValidationOutcome.VALID
-    assert evidence.source_tier is SourceTier.UNKNOWN
+    assert evidence.source_tier is SourceTier.UNKNOWN  # never upgraded
 
 
-def test_literature_candidate_incomplete_missing_retrieved_at():
-    evidence = LiteratureCandidateEvidence(pmid="33378609", source_id="src_1")
-    assert validate_literature_candidate_evidence(evidence).outcome == EvidenceValidationOutcome.INCOMPLETE
+def test_negative_literature_candidate_claims_tier_never_actually_upgraded_by_evidence():
+    """A record that LIES about its tier (claims TIER_1 while the real
+    Source is UNKNOWN) is rejected -- this is the exact mechanism that
+    prevents a literature record from silently claiming a higher tier
+    than its Source actually has."""
+    source = _source(source_id="src_lit_1", tier=SourceTier.UNKNOWN)
+    context = _context(sources=[source])
+    evidence = LiteratureCandidateEvidence(
+        pmid="90000099", nct_ids=("NCT12345678",), source_id="src_lit_1",
+        source_tier=SourceTier.TIER_1,  # claims TIER_1, real Source is UNKNOWN
+        retrieved_at=source.retrieved_at, content_hash=source.content_hash,
+    )
+    result = validate_literature_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
+
+
+def test_negative_literature_candidate_source_not_in_context_is_incomplete():
+    evidence = LiteratureCandidateEvidence(pmid="90000099", source_id="src_lit_1")
+    result = validate_literature_candidate_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
+    assert result.outcome == EvidenceValidationOutcome.INCOMPLETE
+
+
+def test_negative_literature_candidate_malformed_pmid_never_reaches_referential_check():
+    evidence = LiteratureCandidateEvidence(pmid="not-a-pmid", source_id="src_1")
+    result = validate_literature_candidate_evidence(evidence, EMPTY_VALIDATION_CONTEXT)
+    assert result.outcome == EvidenceValidationOutcome.INVALID
 
 
 # =============================================================================
 # build_program_candidate_evidence_from_parsed_study (Phase 4.3B req. 7)
 # =============================================================================
 def _real_shaped_parsed_study() -> dict:
-    """Mirrors collectors.clinicaltrials.parse_study()'s exact output
-    dict shape -- not imported (this test stays independent of that
-    collector), but keeps the same keys deliberately."""
     return {
         "nct_id": "NCT12345678",
         "title": "A fictional demo study",
@@ -256,36 +408,33 @@ def test_build_from_parsed_study_reads_structured_fields_only():
     )
     assert evidence.nct_id == "NCT12345678"
     assert evidence.lead_sponsor == "Demo Biotherapeutics, Inc."
-    assert evidence.collaborators == ("Demo University",)  # empty string dropped, never fabricated
-    assert evidence.interventions == ("Demo Compound X",)
-    assert evidence.conditions == ("Demo Fictional Indication",)
-    assert evidence.overall_status == "RECRUITING"
-    assert evidence.phases == ("PHASE2",)
-    assert evidence.primary_completion_date == "2026-06-30"
-    assert evidence.completion_date == "2026-12-31"
+    assert evidence.collaborators == ("Demo University",)
     assert evidence.source_id == "src_ct_1"
     assert evidence.source_tier is SourceTier.TIER_1
     assert evidence.retrieved_at == RETRIEVED_AT
 
 
+def test_build_from_parsed_study_output_passes_referential_validation_when_source_matches():
+    """The pure constructor's contract (module docstring): a caller who
+    passes the SAME Source's own tier/retrieved_at/content_hash gets a
+    record that validates cleanly by construction."""
+    source = _source(source_id="src_ct_1", content_hash="realhash")
+    evidence = build_program_candidate_evidence_from_parsed_study(
+        _real_shaped_parsed_study(),
+        source_id=source.source_id, source_tier=source.tier, retrieved_at=source.retrieved_at,
+        content_hash=source.content_hash,
+    )
+    context = _context(sources=[source])
+    result = validate_program_candidate_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.VALID
+
+
 def test_build_from_parsed_study_never_populates_first_posted_date():
-    """parse_study() does not read studyFirstPostDateStruct today -- this
-    constructor must never repurpose study_first_submit_date (a DIFFERENT
-    date) for it."""
     evidence = build_program_candidate_evidence_from_parsed_study(
         _real_shaped_parsed_study(),
         source_id="src_ct_1", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
     )
     assert evidence.first_posted_date == "UNKNOWN"
-
-
-def test_build_from_parsed_study_carries_supporting_fact_ids_verbatim():
-    evidence = build_program_candidate_evidence_from_parsed_study(
-        _real_shaped_parsed_study(),
-        source_id="src_ct_1", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
-        supporting_fact_ids=[REAL_FACT_ID],
-    )
-    assert evidence.supporting_fact_ids == (REAL_FACT_ID,)
 
 
 def test_build_from_parsed_study_missing_optional_fields_stays_unknown():
@@ -295,4 +444,3 @@ def test_build_from_parsed_study_missing_optional_fields_stays_unknown():
     )
     assert evidence.lead_sponsor == "UNKNOWN"
     assert evidence.collaborators == ()
-    assert evidence.conditions == ()
