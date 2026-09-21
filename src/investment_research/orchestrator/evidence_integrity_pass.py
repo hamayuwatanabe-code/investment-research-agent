@@ -92,7 +92,7 @@ Phase 4.3C Correction 1: same-run_id audit identity
 two calls to ``Repository.save_agent_run`` sharing BOTH values silently
 overwrite each other (``INSERT OR REPLACE``). Since a future Adaptive
 Acquisition step would call this pass a second time under the SAME
-``run_id``, ``FullIntegrityPassInput.audit_agent_id`` lets a caller give
+``run_id``, a dedicated ``FullIntegrityPassInput`` field lets a caller give
 each call's ``AgentRunRecord`` a distinct ``agent_id`` -- defaulting to
 ``EvidenceIntegrityAgent.agent_id`` itself (``"evidence_integrity"``),
 which is EXACTLY today's (and Phase 4.3C's own) single-pass production
@@ -111,6 +111,27 @@ production's observable output; see
 compatibility tests. A second pass, for a future Adaptive Acquisition
 step, is proven SAFE here (this module, offline, in tests) but is not
 connected to Pipeline in this phase.
+
+---------------------------------------------------------------------------
+Phase 4.3C Correction 2: audit identity is a closed type
+---------------------------------------------------------------------------
+
+Correction 1's own plain ``str``-typed identity field let any caller inject
+ANY string as the stored ``AgentRunRecord.agent_id`` -- a caller could, by
+typo or by design, collide with an unrelated agent's own row, or invent an
+identity that is not actually either of the two audited pass kinds this
+module supports. That field is removed outright; a new field named
+``pass_kind`` takes its place, typed :class:`IntegrityPassKind` -- a
+two-member closed enum (``INITIAL``/``ADAPTIVE``), so the only strings that
+can ever reach ``AgentRunRecord.agent_id`` from this module are the two
+this module itself maps them to (:data:`_AUDIT_AGENT_IDS`): ``INITIAL`` ->
+``"evidence_integrity"`` (``EvidenceIntegrityAgent.agent_id`` itself --
+Production's one identity, unchanged since before Correction 1) and
+``ADAPTIVE`` -> ``"evidence_integrity_adaptive"`` (the offline-harness-only
+second-pass identity). ``pass_kind`` defaults to ``INITIAL``, so a caller
+that never sets it -- Production, today -- gets the same audit record as
+before this correction. Production's Stage 2 call site passes
+``IntegrityPassKind.INITIAL`` explicitly and never any other member.
 """
 
 from __future__ import annotations
@@ -119,6 +140,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from enum import Enum
 from typing import Any
 
 from ..agents.base import inputs_hash
@@ -128,6 +150,34 @@ from ..schemas.agent_io import AgentInput, AgentRunRecord
 from ..schemas.fact import Fact, Source
 from ..schemas.validation import QuarantinedSource
 from ..storage.repository import Repository
+
+
+class IntegrityPassKind(Enum):
+    """Closed identity for which audited call to
+    :func:`run_full_evidence_integrity_pass` this is -- see this module's
+    own "Correction 2" docstring section. Not a caller-chosen string: the
+    only two values that exist are these two members, and only this module
+    decides what ``AgentRunRecord.agent_id`` each is filed under
+    (:data:`_AUDIT_AGENT_IDS`)."""
+
+    #: Production's one call per run (``Pipeline.run()``'s Stage 2). Also
+    #: the default -- a caller that never sets ``pass_kind`` gets this.
+    INITIAL = "initial"
+    #: A second, later pass over the SAME ``run_id`` (offline harness only
+    #: in this phase -- a future Adaptive Acquisition step, never wired to
+    #: Pipeline/CLI here). Exists so its ``AgentRunRecord`` does not
+    #: collide with ``INITIAL``'s under ``agent_runs``'s ``PRIMARY KEY
+    #: (run_id, agent_id)``.
+    ADAPTIVE = "adaptive"
+
+
+#: The only mapping from :class:`IntegrityPassKind` to a stored
+#: ``AgentRunRecord.agent_id`` -- see this module's "Correction 2" section.
+#: Never exposed for a caller to extend or override.
+_AUDIT_AGENT_IDS: dict[IntegrityPassKind, str] = {
+    IntegrityPassKind.INITIAL: "evidence_integrity",
+    IntegrityPassKind.ADAPTIVE: "evidence_integrity_adaptive",
+}
 
 #: Mirrors ``orchestrator.pipeline._LITERATURE_BRIDGE_COLLECTOR_LABEL``
 #: and ``research.literature_evidence_projection.BRIDGE_COLLECTOR_LABEL``
@@ -177,17 +227,19 @@ class FullIntegrityPassInput:
     direct_acquisition_info: Mapping[str, Any] = field(default_factory=dict)
     today: date | None = None
     stale_after_days: int = 400
-    #: The identity this call's own ``AgentRunRecord.agent_id`` is filed
-    #: under (Phase 4.3C correction 1). Defaults to
+    #: Which audited call this is (Phase 4.3C correction 2) -- a closed
+    #: :class:`IntegrityPassKind`, never a caller-chosen string. Determines
+    #: this call's own ``AgentRunRecord.agent_id`` via
+    #: :data:`_AUDIT_AGENT_IDS`. Defaults to ``INITIAL``, mapped to
     #: ``EvidenceIntegrityAgent.agent_id`` itself (``"evidence_integrity"``)
     #: -- production's one call never overrides this, so its audit record
     #: is identical to every prior phase's. A second, later pass sharing
     #: the SAME ``run_id`` (offline harness only, never Production in this
-    #: phase) MUST pass a different value here, or its
-    #: ``Repository.save_agent_run`` call will silently overwrite the
-    #: first pass's own row (``agent_runs``'s ``PRIMARY KEY (run_id,
-    #: agent_id)`` -- see this module's own top docstring).
-    audit_agent_id: str = "evidence_integrity"
+    #: phase) MUST pass ``ADAPTIVE``, or its ``Repository.save_agent_run``
+    #: call will silently overwrite the first pass's own row (``agent_runs``'s
+    #: ``PRIMARY KEY (run_id, agent_id)`` -- see this module's own top
+    #: docstring).
+    pass_kind: IntegrityPassKind = IntegrityPassKind.INITIAL
 
 
 @dataclass(frozen=True)
@@ -251,9 +303,10 @@ def run_full_evidence_integrity_pass(
             f"agent exceeded its {agent.timeout_seconds}s budget ({elapsed:.1f}s)"
         )
 
+    resolved_agent_id = _AUDIT_AGENT_IDS[pass_input.pass_kind]
     record = AgentRunRecord(
         run_id=pass_input.run_id,
-        agent_id=pass_input.audit_agent_id,
+        agent_id=resolved_agent_id,
         status=output.status,
         started_at=started,
         finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -266,7 +319,7 @@ def run_full_evidence_integrity_pass(
     repo.save_agent_run(record)
 
     if not output.ok or output.degraded:
-        message = f"{pass_input.audit_agent_id}: {output.status} :: {'; '.join(output.errors)[:300]}"
+        message = f"{resolved_agent_id}: {output.status} :: {'; '.join(output.errors)[:300]}"
         failures.append(message)
         if not output.ok:
             status_incomplete = True
@@ -365,5 +418,6 @@ __all__ = [
     "LITERATURE_BRIDGE_COLLECTOR_LABEL",
     "FullIntegrityPassInput",
     "FullIntegrityPassOutput",
+    "IntegrityPassKind",
     "run_full_evidence_integrity_pass",
 ]

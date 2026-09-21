@@ -56,6 +56,7 @@ from ..schemas.enums import (
     RunStatus,
 )
 from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
+from ..schemas.fact import Fact
 from ..schemas.validation import QuarantinedSource
 from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.decision_gate_consistency import enforce_complete_only_action, sync_verdict_channel
@@ -65,7 +66,11 @@ from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
 from ..storage.repository import Repository
 from ..thesis.versioning import diff_against_previous, snapshot_for
-from .evidence_integrity_pass import FullIntegrityPassInput, run_full_evidence_integrity_pass
+from .evidence_integrity_pass import (
+    FullIntegrityPassInput,
+    IntegrityPassKind,
+    run_full_evidence_integrity_pass,
+)
 from .isolation import (
     Channel,
     EvidenceBus,
@@ -560,30 +565,32 @@ class Pipeline:
             )
 
         # ---- Stage 1: collect (no evaluation) ---------------------------
-        if resume_plan is not None and not resume_plan.should_run("collect"):
+        skip_collect = resume_plan is not None and not resume_plan.should_run("collect")
+        if skip_collect:
+            assert resume_plan is not None  # narrows for mypy; skip_collect implies this
             # Collection is the expensive stage; a resumed run reuses the facts
             # it already obtained, and they keep their original run_id and
             # provenance so the report still shows when each was collected.
-            # Phase 4.3C correction 1: this run's Evidence Integrity pass is
-            # never skipped (see orchestrator/evidence_integrity_pass.py's
-            # own docstring) -- restored facts are RE-VERIFIED, not merely
-            # trusted, by feeding them into the pass below as
-            # pre_integrity_facts.
+            # Phase 4.3C correction 2: whether these restored facts still
+            # need to go through Evidence Integrity, or are already the
+            # verified set from an earlier invocation of this run_id, is
+            # decided below in Stage 2 from resume_plan.should_run("verify")
+            # -- this branch only restores what "collect" itself checkpoints
+            # and persists; it does not assume what kind of facts these are.
             log.info(
                 "resume: skipping collection, reusing %d fact(s)",
                 len(resume_plan.restored_facts),
             )
             bus.add_facts(resume_plan.restored_facts)
-            pre_integrity_facts = list(resume_plan.restored_facts)
             ctx.notes.append(
-                f"resumed with {len(pre_integrity_facts)} previously-collected fact(s)"
+                f"resumed with {len(resume_plan.restored_facts)} previously-collected fact(s)"
             )
             result.failures.append(
                 "RESUMED RUN: collection was not re-executed; "
-                f"{len(pre_integrity_facts)} fact(s) were restored from run {ctx.run_id} "
-                "and re-verified through Evidence Integrity"
+                f"{len(resume_plan.restored_facts)} fact(s) were restored from run {ctx.run_id}"
             )
             collector_output = None
+            pre_integrity_facts: list[Fact] = []
         else:
             collector_output = self._run_agent(
                 FactCollectorAgent(collection_results),
@@ -593,41 +600,85 @@ class Pipeline:
                 user_preferences=user_preferences,
             )
             pre_integrity_facts = list(collector_output.facts)
-
-        # ---- Stage 2: verify (Phase 4.3C) --------------------------------
-        # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
-        # execution, verified_facts determination, Source persistence/
-        # quarantine, quarantine-cascade fact exclusion, and the Phase
-        # 4.2B-correction-1 Literature completeness-consistency check --
-        # extracted to orchestrator.evidence_integrity_pass as one unit, so
-        # the identical sequence can also run safely as a SECOND pass in an
-        # offline test harness (never in production, never connected here
-        # to Adaptive Acquisition). Production still runs it exactly once,
-        # and (Phase 4.3C correction 1) this call always executes
-        # EvidenceIntegrityAgent for real -- there is no bypass.
-        pass_input = FullIntegrityPassInput(
-            ticker=ctx.ticker,
-            company_name=company_name,
-            run_id=ctx.run_id,
-            pre_integrity_facts=tuple(pre_integrity_facts),
-            sources=tuple(bus.sources),
-            collection_results=tuple(collection_results),
-            direct_acquisition_info=result.direct_acquisition_info,
-            today=self.today,
-            stale_after_days=self.stale_after_days,
-        )
-        pass_output = run_full_evidence_integrity_pass(pass_input, self.repo)
-
-        verified_facts = list(pass_output.verified_facts)
-        bus.facts = verified_facts
-        result.quarantined_sources = list(pass_output.quarantined_sources)
-        result.failures.extend(pass_output.failures)
-        if pass_output.status_incomplete:
-            ctx.status = RunStatus.INCOMPLETE_RESEARCH
-        result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
-        result.agent_records.append(pass_output.agent_run_record)
+            # Phase 4.3C correction 2: persisted here, before Evidence
+            # Integrity runs, so a crash between collection and verify
+            # leaves genuinely pre-Integrity facts recoverable on --resume.
+            # Previously nothing was written to `facts` until inside the
+            # Integrity pass itself (evidence_integrity_pass.py), so
+            # "collect done, verify not yet done" was not a state --resume
+            # could actually distinguish -- see orchestrator/resume.py.
+            for fact in pre_integrity_facts:
+                with contextlib.suppress(Exception):
+                    self.repo.save_fact(fact)
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
+
+        # ---- Stage 2: verify (Phase 4.3C / correction 2) ------------------
+        # Phase 4.3C correction 2: whether Evidence Integrity re-runs at all
+        # is a resume-orchestration decision made HERE, from
+        # resume_plan.should_run("verify") -- never inside
+        # run_full_evidence_integrity_pass, which (correction 1) always
+        # executes the agent for real whenever it is actually called.
+        # Resuming after "collect" but before "verify" restores genuinely
+        # pre-Integrity facts (persisted just above) and this pass IS
+        # called on them; resuming after "verify" already completed
+        # restores already-verified facts (persisted by that earlier
+        # call's own Repository.save_fact, inside the pass) and this pass
+        # is NOT called again -- zero further EvidenceIntegrityAgent
+        # executions for those facts in this invocation.
+        skip_verify = resume_plan is not None and not resume_plan.should_run("verify")
+        if skip_verify:
+            assert resume_plan is not None  # narrows for mypy; skip_verify implies this
+            verified_facts = list(resume_plan.restored_facts)
+            bus.facts = verified_facts
+            ctx.notes.append(
+                f"resumed with {len(verified_facts)} already-verified fact(s); "
+                "Evidence Integrity was not re-executed"
+            )
+            result.failures.append(
+                "RESUMED RUN: Evidence Integrity was not re-executed; "
+                f"{len(verified_facts)} already-verified fact(s) were restored from "
+                f"run {ctx.run_id}"
+            )
+        else:
+            if skip_collect:
+                assert resume_plan is not None  # narrows for mypy; skip_collect implies this
+                pre_integrity_facts = list(resume_plan.restored_facts)
+            # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
+            # execution, verified_facts determination, Source persistence/
+            # quarantine, quarantine-cascade fact exclusion, and the Phase
+            # 4.2B-correction-1 Literature completeness-consistency check --
+            # extracted to orchestrator.evidence_integrity_pass as one
+            # unit, so the identical sequence can also run safely as a
+            # SECOND pass in an offline test harness (never in production,
+            # never connected here to Adaptive Acquisition). Production
+            # runs it at most once per invocation, always as
+            # IntegrityPassKind.INITIAL, and (Phase 4.3C correction 1)
+            # this call always executes EvidenceIntegrityAgent for real
+            # when made -- there is no bypass.
+            pass_input = FullIntegrityPassInput(
+                ticker=ctx.ticker,
+                company_name=company_name,
+                run_id=ctx.run_id,
+                pre_integrity_facts=tuple(pre_integrity_facts),
+                sources=tuple(bus.sources),
+                collection_results=tuple(collection_results),
+                direct_acquisition_info=result.direct_acquisition_info,
+                today=self.today,
+                stale_after_days=self.stale_after_days,
+                pass_kind=IntegrityPassKind.INITIAL,
+            )
+            pass_output = run_full_evidence_integrity_pass(pass_input, self.repo)
+
+            verified_facts = list(pass_output.verified_facts)
+            bus.facts = verified_facts
+            result.quarantined_sources = list(pass_output.quarantined_sources)
+            result.failures.extend(pass_output.failures)
+            if pass_output.status_incomplete:
+                ctx.status = RunStatus.INCOMPLETE_RESEARCH
+            result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
+            result.agent_records.append(pass_output.agent_run_record)
+
         checkpoint("verify", {"verified": len(verified_facts)})
 
         # ---- Stage 2b: primary-source escalation (requirement P4) --------

@@ -26,12 +26,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from investment_research.agents.evidence_integrity import EvidenceIntegrityAgent
 from investment_research.agents.fact_collector import FactCollectorAgent
 from investment_research.collectors.base import CollectionResult
 from investment_research.orchestrator.evidence_integrity_pass import (
     LITERATURE_BRIDGE_COLLECTOR_LABEL,
     FullIntegrityPassInput,
+    IntegrityPassKind,
     run_full_evidence_integrity_pass,
 )
 from investment_research.schemas.agent_io import AgentInput
@@ -222,7 +225,7 @@ def test_pass_2_new_facts_are_never_left_unevaluated(repo):
     pass2 = run_full_evidence_integrity_pass(
         _pin(
             pre_integrity_facts=combined_raw, sources=combined_sources,
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -274,7 +277,7 @@ def test_cross_pass_full_set_re_evaluation_changes_pass_1_fact_classification(re
     pass2 = run_full_evidence_integrity_pass(
         _pin(
             pre_integrity_facts=combined_raw, sources=combined_sources,
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -308,7 +311,7 @@ def test_pass_2_quarantines_a_new_malformed_source_and_keeps_initial_valid_facts
     pass2 = run_full_evidence_integrity_pass(
         _pin(
             pre_integrity_facts=combined_raw, sources=combined_sources,
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -383,7 +386,7 @@ def test_pass_2_literature_cascade_flips_coverage_complete(repo):
             pre_integrity_facts=combined_raw, sources=combined_sources,
             collection_results=(literature_collection_result,),
             direct_acquisition_info={"feature_enabled": True, "coverage_complete": True},
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -429,7 +432,7 @@ def test_two_pass_harness_executes_the_agent_exactly_twice_over_the_full_combine
     pass2 = run_full_evidence_integrity_pass(
         _pin(
             pre_integrity_facts=combined_raw, sources=(source_1, source_2),
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -453,12 +456,17 @@ def test_no_bypass_argument_or_branch_remains_in_source():
     ).read_text(encoding="utf-8")
     assert "already_verified" not in module_text
     assert "already_verified" not in pipeline_text
+    # Phase 4.3C correction 2: the caller-chosen-string audit identity is
+    # gone too, replaced by the closed IntegrityPassKind enum.
+    assert "audit_agent_id" not in module_text
+    assert "audit_agent_id" not in pipeline_text
 
 
 def test_initial_and_adaptive_agent_run_records_both_survive_under_the_same_run_id(repo):
     """agent_runs's own PRIMARY KEY (run_id, agent_id) means two records
     sharing both would silently overwrite each other -- proves that using
-    a distinct audit_agent_id for the second call keeps BOTH queryable."""
+    a distinct pass_kind (ADAPTIVE) for the second call keeps BOTH
+    queryable."""
     shared_run_id = "shared-run"
     source_1 = _source("src_1", url="https://www.sec.gov/one")
     raw_1 = [_raw_fact("Initial claim.", source_1, company_claim=False)]
@@ -478,7 +486,7 @@ def test_initial_and_adaptive_agent_run_records_both_survive_under_the_same_run_
     adaptive = run_full_evidence_integrity_pass(
         _pin(
             run_id=shared_run_id, pre_integrity_facts=combined_raw, sources=(source_1, source_2),
-            audit_agent_id="evidence_integrity_adaptive",
+            pass_kind=IntegrityPassKind.ADAPTIVE,
         ),
         repo,
     )
@@ -496,9 +504,12 @@ def test_initial_and_adaptive_agent_run_records_both_survive_under_the_same_run_
 
 
 def test_default_audit_agent_id_matches_pre_correction_1_production_identity(repo):
-    """A caller that never sets audit_agent_id (production, today) gets
-    EXACTLY the same AgentRunRecord.agent_id Phase 4.3C's own single-pass
-    production call produced before this correction."""
+    """A caller that never sets pass_kind (production, today; default is
+    IntegrityPassKind.INITIAL) gets EXACTLY the same
+    AgentRunRecord.agent_id Phase 4.3C's own single-pass production call
+    produced before Correction 1 -- unaffected by Correction 2's move from
+    a caller-chosen string to a closed enum, since INITIAL maps to the
+    same ``"evidence_integrity"`` identity the default string always was."""
     source = _source("src_1", url="https://www.sec.gov/example")
     raw = [_raw_fact("Claim.", source, company_claim=False)]
     stage1 = _stage1_facts(raw)
@@ -506,6 +517,23 @@ def test_default_audit_agent_id_matches_pre_correction_1_production_identity(rep
         _pin(pre_integrity_facts=tuple(stage1), sources=(source,)), repo,
     )
     assert out.agent_run_record.agent_id == "evidence_integrity"
+
+
+def test_pass_kind_is_a_closed_enum_not_a_caller_chosen_string(repo):
+    """Phase 4.3C Correction 2: a caller cannot inject an arbitrary
+    AgentRunRecord.agent_id. pass_kind is typed IntegrityPassKind -- a
+    two-member closed enum -- so a raw string, even one shaped like an
+    agent id, is not a member of that enum and cannot be looked up in the
+    module's private INITIAL/ADAPTIVE -> agent_id mapping; the call fails
+    loudly (KeyError) rather than silently filing an audit row under
+    whatever string was passed."""
+    source = _source("src_1", url="https://www.sec.gov/example")
+    raw = [_raw_fact("Claim.", source, company_claim=False)]
+    stage1 = _stage1_facts(raw)
+    bad_input = _pin(pre_integrity_facts=tuple(stage1), sources=(source,))
+    object.__setattr__(bad_input, "pass_kind", "evidence_integrity_evil")  # bypass the type system
+    with pytest.raises(KeyError):
+        run_full_evidence_integrity_pass(bad_input, repo)
 
 
 # =============================================================================
