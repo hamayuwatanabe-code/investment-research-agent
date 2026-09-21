@@ -7,9 +7,9 @@ Reading that Stage exactly (never approximated) shows it is NOT just an
 run:
 
 1. ``EvidenceIntegrityAgent`` execution.
-2. ``verified_facts`` determination (``list(integrity.facts) or raw_facts``
-   -- a genuinely empty Integrity output falls back to the raw set, never
-   to an empty one).
+2. ``verified_facts`` determination (``list(integrity.facts) or
+   pre_integrity_facts`` -- a genuinely empty Integrity output falls back
+   to the pre-Integrity set, never to an empty one).
 3. Replacing ``EvidenceBus.facts`` with the verified set (never merged
    with whatever ``FactCollectorAgent``'s own raw facts already publish
    there).
@@ -52,14 +52,65 @@ while making this pass genuinely callable with no live Pipeline at all --
 required for the offline 2-pass harness Phase 4.3C's own test suite
 builds (never connected to Pipeline/CLI/HTTP/LLM).
 
+---------------------------------------------------------------------------
+Phase 4.3C Correction 1: no bypass, ever
+---------------------------------------------------------------------------
+
+Phase 4.3C's own first cut added a boolean skip-flag field (named for the
+notion of facts being "already verified") that, when set, skipped
+constructing and executing ``EvidenceIntegrityAgent`` entirely -- meant
+only for ``Pipeline.run()``'s pre-existing ``--resume`` shortcut.
+Investigating it for this correction found it was worse than merely
+redundant: ``Pipeline.run()``'s own wiring passed the (empty, in resume
+mode) ``raw_facts`` LOCAL VARIABLE into that bypass path rather than
+``resume_plan.restored_facts`` -- so a resumed run would have silently
+discarded its own restored facts the moment this pass's output was
+assigned back to ``verified_facts``. No test caught this because no
+existing test drives ``Pipeline.run(resume=True)`` end to end.
+
+This correction removes the bypass completely, as the far safer design:
+``run_full_evidence_integrity_pass`` now ALWAYS executes
+``EvidenceIntegrityAgent`` for real, on every call, unconditionally --
+"calling this function" and "Evidence Integrity actually ran" are now the
+same fact, structurally, not by convention. ``Pipeline.run()``'s own
+``--resume`` branch is updated (see that module) to feed
+``resume_plan.restored_facts`` into this pass as
+``pre_integrity_facts`` -- meaning a resumed run now genuinely
+RE-VERIFIES its restored facts rather than trusting a stale, unverified
+assumption; this is a deliberate, in-scope consequence of removing the
+bypass, not an accidental behavior change smuggled in alongside it. That
+skip-flag field itself is deleted, not merely unused, so "skip Integrity"
+is not just discouraged but structurally impossible to express through
+this contract at all.
+
+---------------------------------------------------------------------------
+Phase 4.3C Correction 1: same-run_id audit identity
+---------------------------------------------------------------------------
+
+``storage/schema.sql``'s ``agent_runs`` table has
+``PRIMARY KEY (run_id, agent_id)`` (confirmed by reading it directly) --
+two calls to ``Repository.save_agent_run`` sharing BOTH values silently
+overwrite each other (``INSERT OR REPLACE``). Since a future Adaptive
+Acquisition step would call this pass a second time under the SAME
+``run_id``, ``FullIntegrityPassInput.audit_agent_id`` lets a caller give
+each call's ``AgentRunRecord`` a distinct ``agent_id`` -- defaulting to
+``EvidenceIntegrityAgent.agent_id`` itself (``"evidence_integrity"``),
+which is EXACTLY today's (and Phase 4.3C's own) single-pass production
+identity, so a caller that never sets this field (production, today)
+gets a byte-identical audit record to before this correction. This is a
+plain string field, not a new table/column -- no DB schema migration.
+The real ``EvidenceIntegrityAgent`` instance's own ``.agent_id``
+(``"evidence_integrity"``, a class attribute) is never changed by this --
+only the STORED ``AgentRunRecord.agent_id`` a given call chooses to file
+its own audit row under.
+
 Production still calls this exactly ONCE per run (see
-``Pipeline.run()``'s Stage 2, updated in this same phase to call
-``run_full_evidence_integrity_pass`` once, replacing its previous inline
-block) -- this phase changes nothing about production's observable
-behavior; see ``tests/unit/test_evidence_integrity_pass.py``'s own
-single-pass-compatibility tests. A second pass, for a future Adaptive
-Acquisition step, is proven SAFE here (this module, offline, in tests)
-but is not connected to Pipeline in this phase.
+``Pipeline.run()``'s Stage 2) -- this phase changes nothing about
+production's observable output; see
+``tests/unit/test_evidence_integrity_pass.py``'s own single-pass-
+compatibility tests. A second pass, for a future Adaptive Acquisition
+step, is proven SAFE here (this module, offline, in tests) but is not
+connected to Pipeline in this phase.
 """
 
 from __future__ import annotations
@@ -101,13 +152,15 @@ class FullIntegrityPassInput:
     ticker: str
     company_name: str
     run_id: str
-    #: Stage-1 Facts (already through ``FactCollectorAgent``, NOT yet
-    #: through Evidence Integrity) -- this pass runs
-    #: ``EvidenceIntegrityAgent`` over exactly this set, in full, every
-    #: call; it never re-uses a prior pass's already-assessed
-    #: ``verified_facts`` as a substitute for re-running Integrity on the
-    #: full combined set.
-    raw_facts: tuple[Fact, ...]
+    #: Facts already through ``FactCollectorAgent`` (a ``RawFact`` ->
+    #: ``Fact`` conversion this helper never performs itself -- that
+    #: conversion is exclusively ``FactCollectorAgent._to_fact``'s job;
+    #: this field is genuinely ``Fact``, never ``RawFact``), NOT yet
+    #: through Evidence Integrity -- this pass runs
+    #: ``EvidenceIntegrityAgent`` over exactly this set, in full, EVERY
+    #: call, unconditionally (Phase 4.3C correction 1: there is no input
+    #: shape or flag that skips this).
+    pre_integrity_facts: tuple[Fact, ...]
     #: Every ``Source`` known so far (already deduplicated by the caller,
     #: e.g. ``EvidenceBus.add_sources``'s own dedup) -- this pass persists/
     #: quarantines exactly this set, in full, every call.
@@ -124,16 +177,17 @@ class FullIntegrityPassInput:
     direct_acquisition_info: Mapping[str, Any] = field(default_factory=dict)
     today: date | None = None
     stale_after_days: int = 400
-    #: True ONLY for ``Pipeline.run()``'s pre-existing ``--resume`` shortcut
-    #: (base commit ``3996fdf``, lines 563-578), which explicitly skips
-    #: re-running ``EvidenceIntegrityAgent`` over restored facts -- when
-    #: True, ``raw_facts`` is treated as ALREADY verified (no agent is
-    #: invoked, no ``AgentRunRecord`` is produced) and this pass performs
-    #: only items 3-9. Every other caller, including both passes of the
-    #: offline 2-pass harness, MUST leave this ``False`` -- a second pass
-    #: that skipped re-running Evidence Integrity would be exactly the
-    #: "bypass Integrity" shape Phase 4.3C requirement B/6 forbids.
-    already_verified: bool = False
+    #: The identity this call's own ``AgentRunRecord.agent_id`` is filed
+    #: under (Phase 4.3C correction 1). Defaults to
+    #: ``EvidenceIntegrityAgent.agent_id`` itself (``"evidence_integrity"``)
+    #: -- production's one call never overrides this, so its audit record
+    #: is identical to every prior phase's. A second, later pass sharing
+    #: the SAME ``run_id`` (offline harness only, never Production in this
+    #: phase) MUST pass a different value here, or its
+    #: ``Repository.save_agent_run`` call will silently overwrite the
+    #: first pass's own row (``agent_runs``'s ``PRIMARY KEY (run_id,
+    #: agent_id)`` -- see this module's own top docstring).
+    audit_agent_id: str = "evidence_integrity"
 
 
 @dataclass(frozen=True)
@@ -156,12 +210,13 @@ class FullIntegrityPassOutput:
     #: inconsistency was found (including when the input had no Literature
     #: acquisition info at all).
     direct_acquisition_info: Mapping[str, Any]
-    #: The ``EvidenceIntegrityAgent`` call's own audit record, or ``None``
-    #: for the ``already_verified=True`` (resume) case, where no agent was
-    #: invoked at all. The caller is responsible for appending a non-``None``
-    #: record to whatever ``result.agent_records`` list production uses;
-    #: this module never holds one itself.
-    agent_run_record: AgentRunRecord | None
+    #: The ``EvidenceIntegrityAgent`` call's own audit record -- ALWAYS
+    #: populated (Phase 4.3C correction 1: this pass never skips running
+    #: the agent, so there is never a case with no record to return). The
+    #: caller is responsible for appending it to whatever
+    #: ``result.agent_records`` list production uses; this module never
+    #: holds one itself.
+    agent_run_record: AgentRunRecord
 
 
 def run_full_evidence_integrity_pass(
@@ -169,61 +224,56 @@ def run_full_evidence_integrity_pass(
 ) -> FullIntegrityPassOutput:
     """The full Evidence Integrity pass (Phase 4.3C). See this module's
     own top docstring for the nine things this reproduces, read directly
-    from ``Pipeline.run()``'s existing Stage 2 at base commit ``3996fdf``.
+    from ``Pipeline.run()``'s existing Stage 2 at base commit ``3996fdf``,
+    and for Phase 4.3C correction 1's own two changes (no bypass; a
+    same-run_id-safe audit identity).
     """
     failures: list[str] = []
     status_incomplete = False
-    record: AgentRunRecord | None = None
 
-    if pass_input.already_verified:
-        # The --resume shortcut: raw_facts are already-verified facts
-        # restored from a prior run; EvidenceIntegrityAgent is never
-        # invoked, exactly like today's Pipeline.run() resume branch.
-        verified_facts: list[Fact] = list(pass_input.raw_facts)
-    else:
-        agent = EvidenceIntegrityAgent(
-            today=pass_input.today, stale_after_days=pass_input.stale_after_days
+    agent = EvidenceIntegrityAgent(
+        today=pass_input.today, stale_after_days=pass_input.stale_after_days
+    )
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    agent_input = AgentInput(
+        agent_id=agent.agent_id,
+        run_id=pass_input.run_id,
+        ticker=pass_input.ticker,
+        company_name=pass_input.company_name,
+        facts=tuple(pass_input.pre_integrity_facts),
+    )
+    started_monotonic = time.monotonic()
+    output = agent.execute(agent_input)
+    elapsed = time.monotonic() - started_monotonic
+    if elapsed > agent.timeout_seconds:
+        output.degraded = True
+        output.errors.append(
+            f"agent exceeded its {agent.timeout_seconds}s budget ({elapsed:.1f}s)"
         )
-        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        agent_input = AgentInput(
-            agent_id=agent.agent_id,
-            run_id=pass_input.run_id,
-            ticker=pass_input.ticker,
-            company_name=pass_input.company_name,
-            facts=tuple(pass_input.raw_facts),
-        )
-        started_monotonic = time.monotonic()
-        output = agent.execute(agent_input)
-        elapsed = time.monotonic() - started_monotonic
-        if elapsed > agent.timeout_seconds:
-            output.degraded = True
-            output.errors.append(
-                f"agent exceeded its {agent.timeout_seconds}s budget ({elapsed:.1f}s)"
-            )
 
-        record = AgentRunRecord(
-            run_id=pass_input.run_id,
-            agent_id=output.agent_id,
-            status=output.status,
-            started_at=started,
-            finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            duration_ms=output.duration_ms,
-            fact_count=len(output.facts),
-            error_count=len(output.errors),
-            errors=" | ".join(output.errors)[:2000],
-        )
-        record.inputs_hash = inputs_hash(agent_input)
-        repo.save_agent_run(record)
+    record = AgentRunRecord(
+        run_id=pass_input.run_id,
+        agent_id=pass_input.audit_agent_id,
+        status=output.status,
+        started_at=started,
+        finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        duration_ms=output.duration_ms,
+        fact_count=len(output.facts),
+        error_count=len(output.errors),
+        errors=" | ".join(output.errors)[:2000],
+    )
+    record.inputs_hash = inputs_hash(agent_input)
+    repo.save_agent_run(record)
 
-        if not output.ok or output.degraded:
-            message = f"{agent.agent_id}: {output.status} :: {'; '.join(output.errors)[:300]}"
-            failures.append(message)
-            if not output.ok:
-                status_incomplete = True
+    if not output.ok or output.degraded:
+        message = f"{pass_input.audit_agent_id}: {output.status} :: {'; '.join(output.errors)[:300]}"
+        failures.append(message)
+        if not output.ok:
+            status_incomplete = True
 
-        # Item 2: a genuinely empty Integrity output falls back to
-        # raw_facts, never to an empty verified set.
-        verified_facts = list(output.facts) or list(pass_input.raw_facts)
+    # Item 2: a genuinely empty Integrity output falls back to
+    # pre_integrity_facts, never to an empty verified set.
+    verified_facts: list[Fact] = list(output.facts) or list(pass_input.pre_integrity_facts)
 
     # Items 4/5: persist Sources, quarantining (never crashing on) a
     # malformed one.

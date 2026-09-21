@@ -564,16 +564,24 @@ class Pipeline:
             # Collection is the expensive stage; a resumed run reuses the facts
             # it already obtained, and they keep their original run_id and
             # provenance so the report still shows when each was collected.
+            # Phase 4.3C correction 1: this run's Evidence Integrity pass is
+            # never skipped (see orchestrator/evidence_integrity_pass.py's
+            # own docstring) -- restored facts are RE-VERIFIED, not merely
+            # trusted, by feeding them into the pass below as
+            # pre_integrity_facts.
             log.info(
                 "resume: skipping collection, reusing %d fact(s)",
                 len(resume_plan.restored_facts),
             )
             bus.add_facts(resume_plan.restored_facts)
-            verified_facts = list(resume_plan.restored_facts)
-            ctx.notes.append(f"resumed with {len(verified_facts)} previously-collected fact(s)")
+            pre_integrity_facts = list(resume_plan.restored_facts)
+            ctx.notes.append(
+                f"resumed with {len(pre_integrity_facts)} previously-collected fact(s)"
+            )
             result.failures.append(
-                "RESUMED RUN: collection and verification were not re-executed; "
-                f"{len(verified_facts)} fact(s) were restored from run {ctx.run_id}"
+                "RESUMED RUN: collection was not re-executed; "
+                f"{len(pre_integrity_facts)} fact(s) were restored from run {ctx.run_id} "
+                "and re-verified through Evidence Integrity"
             )
             collector_output = None
         else:
@@ -584,7 +592,7 @@ class Pipeline:
                 params=params,
                 user_preferences=user_preferences,
             )
-        raw_facts = list(collector_output.facts) if collector_output else []
+            pre_integrity_facts = list(collector_output.facts)
 
         # ---- Stage 2: verify (Phase 4.3C) --------------------------------
         # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
@@ -594,21 +602,19 @@ class Pipeline:
         # extracted to orchestrator.evidence_integrity_pass as one unit, so
         # the identical sequence can also run safely as a SECOND pass in an
         # offline test harness (never in production, never connected here
-        # to Adaptive Acquisition). Production still runs it exactly once.
-        # already_verified mirrors this method's own pre-existing --resume
-        # shortcut above: when the resume branch already restored verified
-        # facts, EvidenceIntegrityAgent must not be re-run over them.
+        # to Adaptive Acquisition). Production still runs it exactly once,
+        # and (Phase 4.3C correction 1) this call always executes
+        # EvidenceIntegrityAgent for real -- there is no bypass.
         pass_input = FullIntegrityPassInput(
             ticker=ctx.ticker,
             company_name=company_name,
             run_id=ctx.run_id,
-            raw_facts=tuple(raw_facts),
+            pre_integrity_facts=tuple(pre_integrity_facts),
             sources=tuple(bus.sources),
             collection_results=tuple(collection_results),
             direct_acquisition_info=result.direct_acquisition_info,
             today=self.today,
             stale_after_days=self.stale_after_days,
-            already_verified=collector_output is None,
         )
         pass_output = run_full_evidence_integrity_pass(pass_input, self.repo)
 
@@ -619,8 +625,7 @@ class Pipeline:
         if pass_output.status_incomplete:
             ctx.status = RunStatus.INCOMPLETE_RESEARCH
         result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
-        if pass_output.agent_run_record is not None:
-            result.agent_records.append(pass_output.agent_run_record)
+        result.agent_records.append(pass_output.agent_run_record)
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
         checkpoint("verify", {"verified": len(verified_facts)})
