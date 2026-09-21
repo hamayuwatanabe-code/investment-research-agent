@@ -195,6 +195,45 @@ def _normalize_pubmed_day(day: str) -> str | None:
     return f"{value:02d}" if 1 <= value <= 31 else None
 
 
+#: A 4-digit, word-bounded year token -- used only to find candidate years
+#: inside a free-text ``MedlineDate`` (never to parse a month/day out of
+#: one: ``_normalize_medline_date`` below never reads anything but the
+#: year positions this matches).
+_YEAR_TOKEN_RE = re.compile(r"\b\d{4}\b")
+
+
+def _normalize_medline_date(medline_date: str) -> str:
+    """``MedlineDate`` is NLM's own free-text fallback for an imprecise
+    date -- a season (``"2021 Winter"``), a within-year month range
+    (``"2021 Jan-Feb"``), a cross-year range (``"2020-2021"``), or any
+    other free-text NLM chose not to structure. This is never day- or
+    month-precision-determinable (a season/range names no single day or
+    month), so the ONLY precision this function ever extracts is the
+    YEAR -- and only when the text names exactly one -- never a guessed
+    month/day from a season name or a range's first/last token.
+
+    Contract (never any other value out of this function):
+    - exactly one distinct 4-digit year appears in the text -> that year,
+      ``"YYYY"`` (covers a plain year, a season within one year, and a
+      within-year month range: the year is the one thing genuinely
+      certain in all three shapes)
+    - zero years, or more than one DISTINCT year (a cross-year range like
+      ``"2020-2021"``, where which year the underlying event actually
+      falls in cannot be determined) -> ``UNKNOWN``
+
+    The raw ``MedlineDate`` string itself is NEVER returned by this
+    function or passed on to a ``Source`` date field -- only ``"YYYY"`` or
+    ``UNKNOWN``, both of which the Date Integrity contract
+    (``schemas/fact.py::parse_date_bounds``) already accepts, so a
+    ``MedlineDate`` article can never be quarantined merely for having a
+    low-precision date -- only a genuinely different, truly malformed
+    field can still trigger quarantine (requirement 11)."""
+    years = {int(match.group(0)) for match in _YEAR_TOKEN_RE.finditer(medline_date or "")}
+    if len(years) == 1:
+        return str(years.pop())
+    return UNKNOWN
+
+
 def _normalize_pubmed_date_parts(year: str, month: str, day: str) -> str:
     """The SINGLE normalization point for a PubMed/Europe-PMC-shaped
     Year/Month/Day into exactly the precision levels this repository's
@@ -237,17 +276,19 @@ def _pub_date(date_el: ET.Element | None) -> str:
     imprecise date) -- never a guessed day when only year/month is known.
 
     ``MedlineDate`` (a season, a range like ``"2021 Jan-Feb"``, or any
-    other free-text imprecise date NLM chose not to structure) is returned
-    verbatim, UNCHANGED from this function's pre-existing behavior --
-    never parsed or guessed into a specific date here. The structured
-    Year/Month/Day path below is what Phase 4.2B correction 1 fixes: see
-    ``_normalize_pubmed_date_parts``.
+    other free-text imprecise date NLM chose not to structure) is degraded
+    to whatever precision IS genuinely certain -- see
+    ``_normalize_medline_date`` -- never returned verbatim (Phase 4.2B
+    correction 2: a low-precision date must never, by itself, be a reason
+    to quarantine the Source and lose an otherwise-acquired paper). The
+    structured Year/Month/Day path below is what Phase 4.2B correction 1
+    fixed: see ``_normalize_pubmed_date_parts``.
     """
     if date_el is None:
         return UNKNOWN
     medline_date = _text(date_el, "MedlineDate")
     if medline_date != UNKNOWN:
-        return medline_date
+        return _normalize_medline_date(medline_date)
     year = _text(date_el, "Year")
     if year == UNKNOWN:
         return UNKNOWN

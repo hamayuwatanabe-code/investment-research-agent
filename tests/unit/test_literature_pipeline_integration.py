@@ -1498,14 +1498,15 @@ def test_pubmed_month_abbreviation_date_normalizes_and_source_survives(repo, fix
 
 
 def test_pubmed_date_normalization_matrix_all_survive_source_validation():
-    """Requirement 2's full matrix, driven directly against
+    """Phase 4.2B correction 1+2's full matrix, driven directly against
     ``collectors.literature._pub_date`` (the single normalization point):
     numeric month, English month name in multiple letter cases, year-month
-    only, year only, and unknown/ambiguous values -- every normalized,
-    non-UNKNOWN output must pass the Date Integrity contract
-    (``schemas.fact.parse_date_bounds``), and every genuinely
-    unparseable/ambiguous input must fall back to UNKNOWN or a coarser
-    precision, never a guessed date."""
+    only, year only, a MedlineDate season/range degrading to year-only, a
+    cross-year MedlineDate range and other unparseable/ambiguous values
+    falling back to UNKNOWN, and a missing element -- every non-UNKNOWN
+    output must pass the Date Integrity contract
+    (``schemas.fact.parse_date_bounds``), and nothing here is ever a
+    guessed date."""
     import xml.etree.ElementTree as ET
 
     from investment_research.collectors.literature import _pub_date
@@ -1525,37 +1526,51 @@ def test_pubmed_date_normalization_matrix_all_survive_source_validation():
         return el
 
     cases = [
+        # 1. The exact reported bug shape.
         ({"year": "2025", "month": "Feb", "day": "04"}, "2025-02-04"),
+        # 2. Numeric month and English month name, multiple letter cases.
         ({"year": "2025", "month": "feb", "day": "4"}, "2025-02-04"),  # lowercase, unpadded day
         ({"year": "2025", "month": "FEB", "day": "04"}, "2025-02-04"),  # uppercase
+        ({"year": "2025", "month": "Feb", "day": "04"}, "2025-02-04"),  # mixed case
         ({"year": "2025", "month": "Dec", "day": "31"}, "2025-12-31"),
         ({"year": "2025", "month": "02", "day": "04"}, "2025-02-04"),  # already-numeric month
         ({"year": "2025", "month": "2", "day": "4"}, "2025-02-04"),  # unpadded numeric
-        ({"year": "2025", "month": "Feb"}, "2025-02"),  # year-month only
-        ({"year": "2025"}, "2025"),  # year only
+        # 3. Year-month only, year only.
+        ({"year": "2025", "month": "Feb"}, "2025-02"),
+        ({"year": "2025"}, "2025"),
+        # 4. A season -- only the year is certain.
+        ({"medline_date": "2025 Winter"}, "2025"),
+        # 5. A within-year month range -- only the year is certain.
+        ({"medline_date": "2025 Jan-Feb"}, "2025"),
+        # 6. A cross-year range -- no single year is certain.
+        ({"medline_date": "2024-2025"}, "UNKNOWN"),
+        # 7. Genuinely undeterminable text.
+        ({"medline_date": "Spring/Summer, exact year uncertain"}, "UNKNOWN"),
+        ({"year": "2025", "month": "Xyz", "day": "04"}, "2025"),  # unrecognized month token
     ]
     for kwargs, expected in cases:
         result = _pub_date(_date_el(**kwargs))
         assert result == expected, f"{kwargs} -> {result!r}, expected {expected!r}"
-        assert parse_date_bounds(result) is not None, f"{expected!r} rejected by Date Integrity"
+        if result != "UNKNOWN":
+            assert parse_date_bounds(result) is not None, f"{expected!r} rejected by Date Integrity"
 
-    # Unknown/ambiguous values: never guessed, never a specific date.
-    assert _pub_date(_date_el(year="2025", month="Xyz", day="04")) == "2025"  # unrecognized month
+    # 8. A missing PubDate element entirely.
     assert _pub_date(None) == "UNKNOWN"
-    assert _pub_date(_date_el(medline_date="2025 Jan-Feb")) == "2025 Jan-Feb"  # verbatim, unparsed
-    assert parse_date_bounds("2025 Jan-Feb") is None  # correctly still fails the contract
+
+    # The MedlineDate free-text string is NEVER passed through verbatim --
+    # requirement: never misattribute an imprecise season/range into
+    # anything more specific than the year it genuinely names.
+    assert _pub_date(_date_el(medline_date="2025 Jan-Feb")) != "2025 Jan-Feb"
 
 
-def test_pubmed_medline_date_range_quarantines_and_flips_coverage_complete(monkeypatch, repo, fixture_dir):
-    """Requirement 3: a genuinely unparseable PubDate (NLM's own
-    MedlineDate range fallback, deliberately left unparsed per the
-    never-guess contract) IS quarantined by Source validation -- and once
-    it is, ``result.direct_acquisition_info["coverage_complete"]`` must
-    flip from the acquisition stage's stale ``True`` to ``False`` with a
-    sanitized ``unresolved_reasons`` entry, ``RunStatus``, and
-    ``research_status``/``action`` following through -- proven against the
-    same noise-free baseline used for the Correction 2 scenarios, so the
-    transition is attributable to THIS fix alone."""
+def test_pubmed_medline_date_range_degrades_to_year_never_quarantined(monkeypatch, repo, fixture_dir):
+    """Phase 4.2B correction 2 (requirements 4/5/9/10): a PubDate that is
+    NLM's own MedlineDate range fallback (``"2025 Jan-Feb"``) degrades to
+    the one precision genuinely certain -- the year -- rather than being
+    rejected. A low date precision alone must never quarantine an
+    otherwise-acquired paper: the Source passes validation, is never
+    quarantined, its Facts survive Evidence Integrity, and
+    coverage_complete is never disturbed for this genuinely clean fetch."""
     fixtures = FixtureCollector(fixture_dir)
     metadata = fixtures.metadata("DEMOBIO")
     base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
@@ -1567,15 +1582,17 @@ def test_pubmed_medline_date_range_quarantines_and_flips_coverage_complete(monke
     bundle = run_literature_pipeline_acquisition(
         _pmid_request(pmid="90000031"), ticker="DEMOBIO", http_client=http, env=_ENV
     )
-    # Upstream (acquisition-stage) diagnostics are stale by design here --
-    # Evidence/Chunk Projection succeeded on their own terms, so the bridge
-    # itself reports a clean, complete fetch; only downstream Source
-    # validation (inside Pipeline.run()) can see the malformed date.
     assert not bundle.collection_result.degraded
     assert bundle.coverage_complete
 
-    medline_sources = [s for s in bundle.collection_result.sources if "Jan-Feb" in s.published_date]
-    assert medline_sources  # the fixture's own MedlineDate range, verbatim, pre-quarantine
+    pubmed_sources = [
+        s for s in bundle.collection_result.sources if "efetch" in s.url or "pubmed" in s.url.lower()
+    ]
+    assert pubmed_sources
+    # Degraded to year-only -- never the raw "2025 Jan-Feb" string, never a
+    # guessed month/day.
+    assert any(s.published_date == "2025" for s in pubmed_sources)
+    assert not any("Jan-Feb" in s.published_date for s in bundle.collection_result.sources)
 
     pipeline = _noise_free_pipeline(
         repo, monkeypatch, chunks=list(bundle.chunks),
@@ -1586,10 +1603,78 @@ def test_pubmed_medline_date_range_quarantines_and_flips_coverage_complete(monke
         price=metadata["price"], aliases=metadata.get("aliases", ()),
     )
 
-    # The MedlineDate-range Source really was quarantined.
+    # Never quarantined -- a low-precision (year-only) date is not, by
+    # itself, a validation failure.
+    assert result.quarantined_sources == []
+    assert not any("quarantined" in f for f in result.failures)
+
+    submitted_fact_ids = {raw.fact_id() for raw in bundle.collection_result.raw_facts}
+    assert submitted_fact_ids
+    surviving_fact_ids = {f.fact_id for f in result.bus.facts}
+    assert submitted_fact_ids <= surviving_fact_ids
+
+    assert result.direct_acquisition_info["coverage_complete"] is True
+    assert result.context.status is RunStatus.COMPLETE
+    assert result.failures == []
+    literature_blocking = [
+        r for r in (result.verdict.blocking_verification_required if result.verdict else ())
+        if "Literature Document-First" in r
+    ]
+    assert literature_blocking == []
+
+
+def test_genuinely_malformed_source_field_still_quarantines_and_flips_coverage_complete(
+    monkeypatch, repo, fixture_dir
+):
+    """Requirement 11: a genuinely invalid field OTHER than the (now
+    always-safe) date fields must still be rejected and quarantined by
+    Source validation exactly as before -- and the downstream
+    completeness-consistency fix (Phase 4.2B correction 1) must still
+    correctly flip ``coverage_complete``/``RunStatus``/``research_status``/
+    ``action`` in that case. Since ``_pub_date`` can no longer itself
+    produce a value Source validation would reject, this simulates the
+    remaining failure mode directly: a Source with a malformed ``url``
+    (never something ``_pub_date``/the adapter could produce), injected
+    into an otherwise-genuine, already-acquired literature bundle -- the
+    same technique the Correction 1 test suite uses to simulate a failure
+    downstream of a clean acquisition (see
+    ``test_chunk_projection_failure_alone_forces_action_none``)."""
+    import dataclasses
+
+    fixtures = FixtureCollector(fixture_dir)
+    metadata = fixtures.metadata("DEMOBIO")
+    base_result = fixtures.collect("DEMOBIO", metadata["company_name"])
+
+    http = fx.FakeHttpClient(responses={
+        _efetch_url(["90000030"]): fx.ok(fx.fixture_text("pubdate_month_abbreviation_with_day.xml")),
+        fx.europepmc_search_url("90000030"): fx.ok(_EPMC_EMPTY),
+    })
+    bundle = run_literature_pipeline_acquisition(
+        _pmid_request(pmid="90000030"), ticker="DEMOBIO", http_client=http, env=_ENV
+    )
+    assert not bundle.collection_result.degraded
+    assert bundle.coverage_complete
+
+    corrupted_sources = tuple(
+        dataclasses.replace(s, url="not a well-formed url") if "efetch" in s.url else s
+        for s in bundle.collection_result.sources
+    )
+    assert corrupted_sources != bundle.collection_result.sources
+    corrupted_collection_result = dataclasses.replace(bundle.collection_result, sources=corrupted_sources)
+
+    pipeline = _noise_free_pipeline(
+        repo, monkeypatch, chunks=list(bundle.chunks),
+        direct_acquisition_info=bundle_diagnostics(bundle, enabled=True),
+    )
+    result = pipeline.run(
+        "DEMOBIO", metadata["company_name"], [base_result, corrupted_collection_result],
+        price=metadata["price"], aliases=metadata.get("aliases", ()),
+    )
+
+    # The malformed-url Source really was quarantined -- the general
+    # Source-validation/quarantine mechanism is unaffected by this fix.
     assert result.quarantined_sources
-    quarantined_ids = {q.source_id for q in result.quarantined_sources}
-    assert quarantined_ids & {s.source_id for s in medline_sources}
+    assert any(q.field == "url" for q in result.quarantined_sources)
 
     # direct_acquisition_info corrected downstream: never stale True.
     assert result.direct_acquisition_info["feature_enabled"] is True
@@ -1597,10 +1682,8 @@ def test_pubmed_medline_date_range_quarantines_and_flips_coverage_complete(monke
     unresolved = result.direct_acquisition_info.get("unresolved_reasons", [])
     assert unresolved
     assert any("quarantined" in r.lower() for r in unresolved)
-    # Sanitized: no raw document body/abstract text, no bare URL.
     blob = " ".join(unresolved)
-    assert "fictional study" not in blob
-    assert "http" not in blob
+    assert "http" not in blob  # sanitized: no raw URL
 
     assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
     assert result.verdict.run_status is RunStatus.INCOMPLETE_RESEARCH
@@ -1608,9 +1691,6 @@ def test_pubmed_medline_date_range_quarantines_and_flips_coverage_complete(monke
     assert result.verdict.action is None
     assert result.incomplete is True
 
-    # Exactly one Literature-attributed result.failures entry -- never
-    # duplicated between the quarantine-cascade's own generic message and
-    # this fix's consistency-check block.
     literature_failures = [f for f in result.failures if "Literature Document-First" in f]
     assert len(literature_failures) == 1
     literature_blocking = [

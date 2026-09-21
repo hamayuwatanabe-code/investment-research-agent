@@ -50,7 +50,7 @@ in any file.
 | `online_book_chapter.xml` | A PubMed article with `PublicationType=Online Book` | PMID `90000025`; `publication_stage=BOOK_OR_CHAPTER`, never treated as peer-reviewed |
 | `europepmc_search_preprint.json` | Europe PMC `/search` response with `source=PPR` (preprint server) | Paired with `preprint.xml` (PMID `90000022`); `peer_review_status=NOT_PEER_REVIEWED` |
 | `pubdate_month_abbreviation_with_day.xml` | `JournalIssue/PubDate` uses a 3-letter English month abbreviation with a day (`<Month>Feb</Month><Day>04</Day>`), NCBI's own real-world shape for this element | PMID `90000030`; Phase 4.2B correction 1 -- must normalize to `"2025-02-04"`, never be quarantined |
-| `pubdate_medline_range_unparseable.xml` | `JournalIssue/PubDate` is a `MedlineDate` range (`"2025 Jan-Feb"`), NLM's own free-text fallback for an imprecise date | PMID `90000031`; Phase 4.2B correction 1 -- must stay verbatim/unparsed (never guessed into a specific date) and correctly quarantine, exercising the downstream completeness-consistency fix |
+| `pubdate_medline_range_unparseable.xml` | `JournalIssue/PubDate` is a `MedlineDate` range (`"2025 Jan-Feb"`), NLM's own free-text fallback for an imprecise date | PMID `90000031`; Phase 4.2B correction 2 -- the raw string is never passed to `Source.published_date`; degrades to the one certain precision (`"2025"`, year-only) and must NOT be quarantined -- a low-precision date is never itself a reason to lose an acquired paper |
 
 A "duplicate article" scenario (the same PMID requested twice, e.g. via two
 different `EvidenceRequirement`s) deliberately reuses `normal_abstract.xml`
