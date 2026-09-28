@@ -98,6 +98,45 @@ H. Integrity-pass mid-crash points A/B/C: collect-checkpoint-only,
 I. AgentRunRecord partial-state handling: a stale/partial record left by
    a crashed pass does not collide with, or survive alongside, the
    record the resumed pass writes.
+
+Phase 4.3C Correction 4 goes one step further than Correction 3's own
+"re-evaluate the whole restored set" fix: re-evaluating a fact that a
+PARTIAL prior pass had already advanced to its post-Integrity version
+(section H's crash point C) fed that ALREADY-PROCESSED version back into
+Evidence Integrity a second time -- safe for evidence_class/
+verified_status/confidence (Correction 3 confirmed those stay correct),
+but not for `notes`, which accumulated duplicate reasoning text and could
+leave a stale, now-contradicted reason in place. Correction 4 fixes this
+at its ROOT, not by patching the symptom:
+
+1. ``Repository.pristine_facts_for_resume`` (new) returns the EARLIEST
+   version this run_id persisted per fact_id -- the genuine Stage-1,
+   pre-Integrity snapshot -- distinct from ``facts_for_resume``'s LATEST.
+   ``resume.build_plan`` and ``Pipeline.run()`` now feed a resumed
+   Evidence Integrity re-run this pristine set (falling back, per fact
+   and with an explicit reported failure, to that fact's own latest
+   version only when no pristine snapshot can be found -- see
+   ``Repository.pristine_facts_for_resume``'s own docstring for the two
+   schema-inherent reasons that can happen). This means Evidence
+   Integrity's input is now ALWAYS the pristine content on resume, so a
+   fact is never fed through evaluation twice in the sense that produced
+   the notes bug in the first place.
+2. ``agents/evidence_integrity.py``'s own notes-building is also made
+   genuinely idempotent (``_INTEGRITY_NOTES_MARKER``): it now recomputes
+   its own contribution to ``notes`` fresh every time from the CURRENT
+   fact state, discarding (never accumulating) whatever it contributed on
+   a prior run, while never touching the ORIGINAL collector-authored
+   notes before it. This is what makes ``notes`` safe to compare in
+   ``_fact_snapshot`` again, and what makes a genuine second pass (a
+   fact's classification legitimately changing, e.g. a future Adaptive
+   Acquisition step -- tested in test_evidence_integrity_pass.py, not
+   here, since that is the offline 2-pass harness's own concern) produce
+   updated, not merely appended-to, reasoning.
+
+``notes`` is restored to ``_fact_snapshot``'s strict comparison (removed
+by Correction 3 with a test pinning the duplication as a known,
+out-of-scope limitation); that pinning test is reversed below into one
+proving the opposite now holds.
 """
 
 from __future__ import annotations
@@ -357,26 +396,22 @@ def _crash_after_verify_checkpoint(monkeypatch) -> None:
 #:     fact was rewritten, not what the current content means (section F
 #:     tests version count/meaning directly, separately).
 #:   - created_at: a raw persistence timestamp, not a Fact field at all.
-#:   - notes: EXCLUDED from this strict comparison for a documented, real
-#:     reason found while building this snapshot (see
-#:     test_repeated_evidence_integrity_evaluation_accumulates_notes_text
-#:     in section H, which pins the behavior explicitly rather than
-#:     hiding it): EvidenceIntegrityAgent._classify builds notes as
-#:     `[fact.notes] + <its own new notes>` every time it runs -- re-
-#:     running it on a fact that already carries a prior pass's notes
-#:     (crash point C's own scenario: one fact's fully-Integrity-processed
-#:     version was persisted before the crash, then the resumed full pass
-#:     genuinely re-evaluates the WHOLE restored set, this fact included)
-#:     appends the same reasoning text again rather than being a no-op.
-#:     This is a pre-existing characteristic of EvidenceIntegrityAgent
-#:     itself (not introduced by, or specific to, resume), it does not
-#:     change evidence_class/verified_status/confidence/independent_
-#:     confirmation/is_decision_grade (confirmed: every other field in
-#:     this tuple DOES match exactly across a crash-point-C resume), and
-#:     fixing EvidenceIntegrityAgent's own note-accumulation logic is out
-#:     of scope for a Pipeline-resume correction -- so it is reported,
-#:     not silently patched over by weakening what this snapshot checks
-#:     everywhere else.
+#:
+#: notes IS included (Phase 4.3C correction 4 -- Correction 3 had
+#: excluded it here, with a test pinning the exclusion as a known,
+#: out-of-scope EvidenceIntegrityAgent limitation; that test is REVERSED
+#: below, not merely deleted, since the underlying defect is now actually
+#: fixed at its source: Pipeline.run() feeds a resumed Evidence Integrity
+#: re-run the PRISTINE, pre-Integrity version of each fact
+#: (resume_plan.pristine_facts, from Repository.pristine_facts_for_resume)
+#: rather than whatever partially-processed version an interrupted pass
+#: happened to leave as "latest", AND agents/evidence_integrity.py's own
+#: notes-building now recomputes its own contribution fresh each time
+#: (see _INTEGRITY_NOTES_MARKER there) instead of treating a prior pass's
+#: reasoning as more opaque carry-forward text. Together these make
+#: notes genuinely stable under resume and correctly UPDATED (not merely
+#: appended to) when a second, legitimate pass changes a fact's
+#: classification -- see section D below for that second case.
 def _fact_snapshot(fact: Fact) -> tuple:
     return (
         fact.fact_id,
@@ -403,6 +438,7 @@ def _fact_snapshot(fact: Fact) -> tuple:
         fact.unit,
         str(fact.provenance),
         bool(fact.stale),
+        fact.notes,
         tuple(sorted(x for x in fact.tags if x)),
         str(fact.content_kind),
         fact.primary_source_url,
@@ -607,6 +643,12 @@ def test_resume_after_verify_complete_does_not_rerun_integrity(repo, monkeypatch
     assert {f.fact_id for f in resumed.bus.facts} == {f.fact_id for f in verified_before_resume}
     assert len(resumed.bus.facts) == len(verified_before_resume)
     assert any("Evidence Integrity was not re-executed" in f for f in resumed.failures)
+    # notes (Phase 4.3C correction 4): carried forward untouched, exactly
+    # as persisted -- Evidence Integrity never runs in this branch, so it
+    # never gets a chance to accumulate or drop anything.
+    before_notes = {f.fact_id: f.notes for f in verified_before_resume}
+    after_notes = {f.fact_id: f.notes for f in resumed.bus.facts}
+    assert after_notes == before_notes
 
     # Still exactly one stored record -- the resumed call added none.
     rows_after = _integrity_agent_run_rows(repo, run_id)
@@ -749,6 +791,53 @@ def test_two_persisted_versions_exist_with_the_expected_meaning_after_resume(rep
     assert v2["verified_status"] == "VERIFIED"
     assert v2["evidence_class"] == "VERIFIED_FACT"
     assert v2["superseded_by"] is None  # the current/latest row
+
+
+def test_pristine_and_latest_resume_queries_are_separate_contracts(repo, monkeypatch):
+    """Phase 4.3C correction 4: Repository.pristine_facts_for_resume
+    (EARLIEST version this run_id persisted) and Repository.
+    facts_for_resume (LATEST) are two DELIBERATELY separate methods, not
+    one method with a mode flag -- the existing `facts` table schema has
+    no column marking which pipeline stage wrote a given version, only
+    `version` and `run_id` (confirmed by reading storage/schema.sql
+    directly), so the only reliable signal is MIN vs MAX version among the
+    rows this run_id itself wrote. This test proves the two queries
+    genuinely diverge once Evidence Integrity has touched a fact, using
+    crash point C's own mixed-version state (one fact already at its
+    post-Integrity v2, the other still at its pristine v1)."""
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    run_id = "resume-f-pristine-contract"
+    with monkeypatch.context() as m:
+        _crash_point_c_after_partial_fact_save(m, after_n=1)
+        with pytest.raises(_SimulatedCrash, match="crash point C"):
+            pipeline.run(**_run_kwargs(), run_id=run_id)
+
+    pristine = {f.fact_id: f for f in repo.pristine_facts_for_resume(run_id)}
+    latest = {f.fact_id: f for f in repo.facts_for_resume(run_id)}
+    assert set(pristine) == set(latest)
+    assert len(pristine) == 2
+    # Every pristine entry is genuinely pre-Integrity...
+    assert all(f.verified_status == VerifiedStatus.NOT_VERIFIED for f in pristine.values())
+    assert all(f.evidence_class.value in ("COMPANY_CLAIM", "UNVERIFIED_CLAIM")
+               for f in pristine.values())
+    assert all(int(f.version) == 1 for f in pristine.values())
+    # ...while latest genuinely reflects the mix left by the partial crash:
+    # at least one fact already advanced past pristine.
+    assert any(int(f.version) > 1 for f in latest.values())
+    assert any(
+        latest[fid].verified_status != pristine[fid].verified_status for fid in pristine
+    )
+
+
+def test_pristine_facts_for_resume_returns_nothing_for_a_run_with_no_collect_checkpoint():
+    """Phase 4.3C correction 4's own requirement: for a run_id that never
+    reached Stage 1's persist step at all (e.g. an old-format run from
+    before Phase 4.3C correction 2 first made Stage 1 persist pre-
+    Integrity facts, or simply a run_id nothing was ever collected for),
+    pristine_facts_for_resume must return an EMPTY list -- never guess,
+    never fall back to some other version. Absence, not a wrong answer."""
+    repo = _new_repo()
+    assert repo.pristine_facts_for_resume("never-existed") == []
 
 
 def test_production_never_queries_the_db_facts_table_mid_run():
@@ -919,34 +1008,31 @@ def test_crash_point_c_after_partial_fact_save_resumes_to_full_equivalence(monke
 
     # The resumed full pass re-evaluates the ENTIRE restored set (never
     # just the not-yet-saved remainder), so the mix from the partial crash
-    # never leaks into the final result.
+    # never leaks into the final result. This now includes notes (Phase
+    # 4.3C correction 4) -- see _assert_semantically_equivalent's own use
+    # of _fact_snapshot, which compares notes strictly.
     _assert_semantically_equivalent(full, control_repo, resumed, repo)
 
 
-def test_repeated_evidence_integrity_evaluation_accumulates_notes_text(monkeypatch):
-    """Pins, rather than hides, a real finding from building the semantic
-    snapshot above: EvidenceIntegrityAgent's own notes-building logic
-    (`agents/evidence_integrity.py`) does `[fact.notes] + <new notes>`
-    every time it runs, so a fact that genuinely goes through Evidence
-    Integrity TWICE (crash point C's own scenario: its post-Integrity
-    version was persisted before the crash, then the resumed full pass
-    correctly re-evaluates the WHOLE restored set, this fact included --
-    exactly what Correction 3 requires) ends up with its reasoning text
-    duplicated. This is a pre-existing characteristic of
-    EvidenceIntegrityAgent itself -- not introduced by, or unique to,
-    resume (the same would happen in the offline 2-pass harness in
-    tests/unit/test_evidence_integrity_pass.py if a fact were fed through
-    pass 2 unchanged from pass 1) -- and does not change evidence_class,
-    verified_status, confidence, independent_confirmation, or
-    is_decision_grade; only the free-text notes field is affected. Fixing
-    EvidenceIntegrityAgent's own note-accumulation is out of scope for a
-    Pipeline-resume correction, so _fact_snapshot excludes notes (see its
-    own docstring) rather than papering over this with a looser overall
-    comparison, and this test exists so the exclusion is never silently
-    forgotten or mistaken for a full field-parity claim."""
+def test_repeated_evidence_integrity_evaluation_is_now_idempotent_no_duplication(monkeypatch):
+    """REVERSES (per Phase 4.3C correction 4's own explicit requirement)
+    Correction 3's test that pinned notes-duplication as a known,
+    out-of-scope limitation. Crash point C is the exact scenario that
+    exposed it: a fact whose post-Integrity version was persisted before
+    the crash, fed back into a resumed full pass that correctly
+    re-evaluates the WHOLE restored set. Two fixes now apply together:
+    Pipeline.run() feeds that resumed pass the PRISTINE (pre-Integrity)
+    version of the fact, never its partially-processed one
+    (resume_plan.pristine_facts); and even where a fact genuinely is
+    evaluated by EvidenceIntegrityAgent more than once (this pristine
+    swap included, since strictly speaking pristine facts ARE going
+    through their real first evaluation here -- the point is there is no
+    SECOND, redundant one), its own notes-building is idempotent
+    (_INTEGRITY_NOTES_MARKER). Reasoning text appears at most once, and
+    the collector-original note survives underneath it."""
     repo = _new_repo()
     pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
-    run_id = "resume-notes-accumulation"
+    run_id = "resume-notes-idempotent"
     with monkeypatch.context() as m:
         _crash_point_c_after_partial_fact_save(m, after_n=1)
         with pytest.raises(_SimulatedCrash, match="crash point C"):
@@ -957,12 +1043,20 @@ def test_repeated_evidence_integrity_evaluation_accumulates_notes_text(monkeypat
 
     company_fact = next(f for f in resumed.bus.facts if f.company_claim)
     reasoning = "event date unknown; publication date must not be read as the event date"
-    assert company_fact.notes.count(reasoning) == 2  # accumulated, not deduplicated
-    # Confirms the exclusion is deliberate and narrow: every OTHER semantic
-    # field for this same fact stayed correct despite the double pass.
+    assert company_fact.notes.count(reasoning) <= 1  # never duplicated
+    assert company_fact.notes.count("Evidence Integrity: ") <= 1  # one contribution, not stacked
+    assert "collected_by=" in company_fact.notes  # collector-original note survives
     assert company_fact.evidence_class.value == "VERIFIED_FACT"
     assert company_fact.verified_status.value == "VERIFIED"
     assert company_fact.independent_confirmation is True
+
+    # And it now matches an uninterrupted control run's notes exactly --
+    # the strongest form of "no duplication": byte-identical to a run
+    # that never crashed at all.
+    control_repo = _new_repo()
+    control = _run_control_full(control_repo)
+    control_company_fact = next(f for f in control.bus.facts if f.company_claim)
+    assert company_fact.notes == control_company_fact.notes
 
 
 # =============================================================================

@@ -36,6 +36,42 @@ from .base import Agent
 
 log = logging.getLogger(__name__)
 
+#: Phase 4.3C correction 4: marks the start of this agent's OWN
+#: contribution to a Fact's notes. Before this, `_assess` treated the
+#: ENTIRE existing `fact.notes` string as opaque, carry-forward text
+#: (`notes = [fact.notes] if fact.notes else []`, then appended this
+#: pass's own reasoning) -- correct for a fact's first evaluation, but
+#: not idempotent for a genuine second one (an Adaptive-Acquisition-style
+#: offline 2-pass harness, or -- before Phase 4.3C correction 4's own
+#: pristine-restore fix -- a resumed run that had fed a partially-
+#: Integrity-processed fact back in): an unchanged reason got duplicated
+#: verbatim, and a reason that was true in the first pass but is no
+#: longer true (e.g. "no independent confirmation found", once a second
+#: pass finds one) stayed baked into the string forever, contradicting
+#: the fact's own, now-updated verified_status/evidence_class. This
+#: marker lets a re-run identify and discard ONLY its own prior
+#: contribution (never the collector-original notes before it, e.g.
+#: FactCollectorAgent's "collected_by=..."), then recompute its own
+#: reasoning fresh from the CURRENT fact state every time -- genuinely
+#: idempotent when nothing relevant changed, genuinely updated when it
+#: did, and never destructive of what came before Evidence Integrity
+#: ever touched the fact.
+_INTEGRITY_NOTES_MARKER = "Evidence Integrity: "
+
+
+def _split_off_integrity_notes(notes: str) -> str:
+    """The portion of `notes` that existed BEFORE this agent's own prior
+    contribution (if any) -- see `_INTEGRITY_NOTES_MARKER`'s own
+    docstring. Idempotent: calling this on a string with no marker
+    returns it unchanged."""
+    if _INTEGRITY_NOTES_MARKER not in notes:
+        return notes
+    base = notes.split(_INTEGRITY_NOTES_MARKER, 1)[0].rstrip()
+    if base.endswith(";"):
+        base = base[:-1].rstrip()
+    return base
+
+
 #: Categories whose facts are material to a kill decision by default.
 _CRITICAL_CATEGORIES = {
     FactCategory.REGULATORY,
@@ -175,20 +211,35 @@ class EvidenceIntegrityAgent(Agent):
         materiality = self._materiality(fact)
         confidence = self._confidence(fact, evidence_class, confirmed, stale, len(corroborating))
 
-        notes = [fact.notes] if fact.notes else []
+        # Phase 4.3C correction 4: recompute this agent's OWN reasoning
+        # fresh every time, from the CURRENT fact state -- never carry an
+        # earlier pass's own reasoning forward as if it were more opaque
+        # collector-original text (see _INTEGRITY_NOTES_MARKER's own
+        # docstring for why that was wrong: not idempotent, and could
+        # leave a stale, now-contradicted reason in place).
+        base_notes = _split_off_integrity_notes(fact.notes)
+        integrity_reasons: list[str] = []
         if fact.is_search_derived:
-            notes.append(
+            integrity_reasons.append(
                 f"read from a {fact.content_kind}, not the source document body; "
                 "not usable as verified evidence"
             )
         if fact.company_claim and not confirmed:
-            notes.append("company statement; no independent confirmation found")
+            integrity_reasons.append("company statement; no independent confirmation found")
         if stale:
-            notes.append(f"stale: effective date {effective} older than {self.stale_after_days}d")
+            integrity_reasons.append(
+                f"stale: effective date {effective} older than {self.stale_after_days}d"
+            )
         if fact.source_tier in (SourceTier.TIER_4, SourceTier.TIER_5):
-            notes.append("tier 4/5 source: cannot settle a material question alone")
+            integrity_reasons.append("tier 4/5 source: cannot settle a material question alone")
         if fact.event_date == UNKNOWN and fact.publication_date != UNKNOWN:
-            notes.append("event date unknown; publication date must not be read as the event date")
+            integrity_reasons.append(
+                "event date unknown; publication date must not be read as the event date"
+            )
+
+        notes = [base_notes] if base_notes else []
+        if integrity_reasons:
+            notes.append(_INTEGRITY_NOTES_MARKER + "; ".join(integrity_reasons))
 
         return replace(
             fact,

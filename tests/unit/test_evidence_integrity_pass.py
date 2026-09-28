@@ -291,6 +291,96 @@ def test_cross_pass_full_set_re_evaluation_changes_pass_1_fact_classification(re
     assert reassessed.independent_confirmation != pass1.verified_facts[0].independent_confirmation
 
 
+def test_repeated_pass_over_an_already_processed_fact_is_notes_idempotent(repo):
+    """Phase 4.3C correction 4: the actual scenario the notes-duplication
+    defect required -- a SECOND Evidence Integrity pass whose input is a
+    fact that has ALREADY been through Evidence Integrity once (its own
+    prior output, not a pristine Stage-1 fact -- the shape a partial-
+    pass-crash resume could produce before this correction's own
+    pristine-restore fix in Pipeline.run(), and the shape a real
+    Adaptive Acquisition re-evaluation of an unchanged fact could produce
+    too). Nothing about the fact or its evidence changes between the two
+    calls, so this must be a true no-op for notes -- not an accumulation."""
+    source = _source("src_1", url="https://www.sec.gov/example")
+    raw = [_raw_fact("Claim with no corroboration.", source, company_claim=True)]
+    stage1 = _stage1_facts(raw)
+
+    pass1 = run_full_evidence_integrity_pass(
+        _pin(pre_integrity_facts=tuple(stage1), sources=(source,)), repo,
+    )
+    fact_after_pass1 = pass1.verified_facts[0]
+    assert "Evidence Integrity: " in fact_after_pass1.notes
+
+    # The ALREADY-PROCESSED fact, not a pristine one, is the input here.
+    pass2 = run_full_evidence_integrity_pass(
+        _pin(
+            pre_integrity_facts=(fact_after_pass1,), sources=(source,),
+            pass_kind=IntegrityPassKind.ADAPTIVE,
+        ),
+        repo,
+    )
+    fact_after_pass2 = pass2.verified_facts[0]
+
+    assert fact_after_pass2.notes == fact_after_pass1.notes  # byte-identical, not accumulated
+    assert fact_after_pass2.notes.count("Evidence Integrity: ") == 1
+    assert fact_after_pass2.evidence_class == fact_after_pass1.evidence_class
+    assert fact_after_pass2.verified_status == fact_after_pass1.verified_status
+
+
+def test_repeated_pass_over_an_already_processed_fact_updates_stale_notes_on_reclassification(repo):
+    """Same starting point as the test directly above (an ALREADY-
+    PROCESSED fact as pass 2's own input, not a pristine one), but this
+    time genuinely new, independent corroborating evidence arrives
+    between the two passes -- pass 2 must UPDATE the fact's reasoning to
+    match its new classification, not merely append to what pass 1 had
+    already written. Before Phase 4.3C correction 4, pass 1's "company
+    statement; no independent confirmation found" would have survived
+    verbatim into pass 2's notes even after pass 2 found confirmation and
+    upgraded the fact to VERIFIED_FACT/VERIFIED -- directly contradicting
+    the fact's own, now-current fields."""
+    claim_text = "Primary endpoint was not met in the Phase 3 trial."
+    company_source = _source("src_company", url="https://www.sec.gov/8k", tier=SourceTier.TIER_1)
+    raw_1 = [_raw_fact(claim_text, company_source, category=FactCategory.CLINICAL, company_claim=True)]
+    stage1_initial = _stage1_facts(raw_1, run_id="pass1")
+
+    pass1 = run_full_evidence_integrity_pass(
+        _pin(pre_integrity_facts=tuple(stage1_initial), sources=(company_source,)), repo,
+    )
+    fact_after_pass1 = pass1.verified_facts[0]
+    stale_reason = "company statement; no independent confirmation found"
+    assert stale_reason in fact_after_pass1.notes
+
+    press_source = _source("src_press2", url="https://www.example-press.test/article2", tier=SourceTier.TIER_3)
+    raw_2 = [
+        _raw_fact(claim_text, press_source, category=FactCategory.CLINICAL, company_claim=False)
+    ]
+    stage1_new = _stage1_facts(raw_2, run_id="pass2")
+
+    # The ALREADY-PROCESSED pass-1 output, not the pristine Stage-1 fact,
+    # is what pass 2 receives for this fact_id -- combined with the new,
+    # genuinely pristine corroborating fact.
+    combined = (fact_after_pass1, *stage1_new)
+    combined_sources = (company_source, press_source)
+    pass2 = run_full_evidence_integrity_pass(
+        _pin(
+            pre_integrity_facts=combined, sources=combined_sources,
+            pass_kind=IntegrityPassKind.ADAPTIVE,
+        ),
+        repo,
+    )
+
+    reassessed = next(f for f in pass2.verified_facts if f.fact_id == fact_after_pass1.fact_id)
+    assert reassessed.evidence_class == EvidenceClass.VERIFIED_FACT
+    assert reassessed.verified_status == VerifiedStatus.VERIFIED
+    # The stale, now-contradicted pass-1 reason is gone -- never merely
+    # duplicated alongside a (nonexistent, in this case) new one.
+    assert stale_reason not in reassessed.notes
+    assert reassessed.notes.count("Evidence Integrity: ") <= 1
+    # The collector-original note (never Evidence Integrity's own) is
+    # never lost across any number of passes.
+    assert "collected_by=" in reassessed.notes
+
+
 def test_pass_2_quarantines_a_new_malformed_source_and_keeps_initial_valid_facts(repo):
     source_1 = _source("src_1", url="https://www.sec.gov/one")
     raw_1 = [_raw_fact("Initial valid claim.", source_1, company_claim=False)]

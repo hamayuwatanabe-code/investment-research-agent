@@ -16,6 +16,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..schemas.agent_io import AgentRunRecord, RunContext
+from ..schemas.enums import (
+    ContentKind,
+    DocumentAuthority,
+    EvidenceClass,
+    FactCategory,
+    Materiality,
+    Provenance,
+    SourceTier,
+    VerifiedStatus,
+)
 from ..schemas.evaluation import (
     CatalystEvent,
     KillGateResult,
@@ -27,6 +37,53 @@ from ..schemas.fact import Contradiction, Fact, Source
 from ..schemas.validation import QuarantinedSource, SchemaError, validate_fact, validate_source
 
 log = logging.getLogger(__name__)
+
+
+def _split_csv(value: str | None) -> tuple[str, ...]:
+    return tuple(value.split(",")) if value else ()
+
+
+def _fact_from_row(row: sqlite3.Row) -> Fact:
+    """Reconstructs a Fact from a raw `facts` row, every column
+    ``Fact.to_row()`` writes (Phase 4.3C correction 3/4) -- shared by
+    :meth:`Repository.facts_for_resume` and
+    :meth:`Repository.pristine_facts_for_resume`, which differ only in
+    WHICH version of each fact_id they select, never in how a selected row
+    is turned back into a ``Fact``."""
+    return Fact(
+        fact_id=row["fact_id"],
+        ticker=row["ticker"],
+        category=FactCategory(row["category"]),
+        claim=row["claim"],
+        evidence_class=EvidenceClass(row["evidence_class"]),
+        source_id=row["source_id"],
+        source_url=row["source_url"],
+        source_title=row["source_title"] or "",
+        source_tier=SourceTier(row["source_tier"]),
+        publication_date=row["publication_date"],
+        event_date=row["event_date"],
+        effective_date=row["effective_date"],
+        filing_date=row["filing_date"],
+        verified_status=VerifiedStatus(row["verified_status"]),
+        confidence=float(row["confidence"]),
+        company_claim=bool(row["company_claim"]),
+        independent_confirmation=bool(row["independent_confirmation"]),
+        corroborating_source_ids=_split_csv(row["corroborating_source_ids"]),
+        contradicting_evidence=_split_csv(row["contradicting_evidence"]),
+        materiality=Materiality(row["materiality"]),
+        value=row["value"],
+        unit=row["unit"],
+        provenance=Provenance(row["provenance"]),
+        stale=bool(row["stale"]),
+        version=int(row["version"]),
+        run_id=row["run_id"],
+        notes=row["notes"] or "",
+        tags=_split_csv(row["tags"]),
+        content_kind=ContentKind(row["content_kind"]),
+        primary_source_url=row["primary_source_url"],
+        document_id=row["document_id"],
+        source_authority=DocumentAuthority(row["source_authority"]),
+    )
 
 _CONTENT_FIELDS = (
     "claim",
@@ -472,7 +529,18 @@ class Repository:
         return out
 
     def facts_for_resume(self, run_id: str) -> list:
-        """Rehydrate the latest version of every fact recorded for a run.
+        """Rehydrate the LATEST version of every fact recorded for a run --
+        i.e. whatever this run's own persistence has most recently written
+        for each fact_id: the verified/post-Integrity version once "verify"
+        has completed, but possibly still the pristine pre-Integrity
+        version (or a genuine mix, if a crash landed mid-persist-loop) when
+        it has not. Phase 4.3C correction 4: callers deciding whether to
+        feed Evidence Integrity an already-processed fact must NOT use
+        this method for that -- see :meth:`pristine_facts_for_resume`,
+        which answers a different question ("what did THIS run's own
+        collect stage actually produce, before Evidence Integrity touched
+        it at all") that this method cannot answer once even one fact has
+        advanced past version 1.
 
         Phase 4.3C correction 3: this reconstructs EVERY column
         ``Fact.to_row()`` writes, not a subset -- a prior version of this
@@ -490,18 +558,6 @@ class Repository:
         the query already selects the MAX(version) row for each fact_id,
         so a genuinely-latest row's own ``superseded_by`` is always NULL.
         """
-        from ..schemas.enums import (
-            ContentKind,
-            DocumentAuthority,
-            EvidenceClass,
-            FactCategory,
-            Materiality,
-            Provenance,
-            SourceTier,
-            VerifiedStatus,
-        )
-        from ..schemas.fact import Fact
-
         rows = self.conn.execute(
             """SELECT f.* FROM facts f
                JOIN (SELECT fact_id, MAX(version) AS v FROM facts WHERE run_id = ?
@@ -509,52 +565,62 @@ class Repository:
                ON f.fact_id = m.fact_id AND f.version = m.v""",
             (run_id,),
         ).fetchall()
-        facts = []
-        for row in rows:
-            corroborating = row["corroborating_source_ids"] or ""
-            contradicting = row["contradicting_evidence"] or ""
-            tags = row["tags"] or ""
-            facts.append(
-                Fact(
-                    fact_id=row["fact_id"],
-                    ticker=row["ticker"],
-                    category=FactCategory(row["category"]),
-                    claim=row["claim"],
-                    evidence_class=EvidenceClass(row["evidence_class"]),
-                    source_id=row["source_id"],
-                    source_url=row["source_url"],
-                    source_title=row["source_title"] or "",
-                    source_tier=SourceTier(row["source_tier"]),
-                    publication_date=row["publication_date"],
-                    event_date=row["event_date"],
-                    effective_date=row["effective_date"],
-                    filing_date=row["filing_date"],
-                    verified_status=VerifiedStatus(row["verified_status"]),
-                    confidence=float(row["confidence"]),
-                    company_claim=bool(row["company_claim"]),
-                    independent_confirmation=bool(row["independent_confirmation"]),
-                    corroborating_source_ids=tuple(
-                        corroborating.split(",")
-                    ) if corroborating else (),
-                    contradicting_evidence=tuple(
-                        contradicting.split(",")
-                    ) if contradicting else (),
-                    materiality=Materiality(row["materiality"]),
-                    value=row["value"],
-                    unit=row["unit"],
-                    provenance=Provenance(row["provenance"]),
-                    stale=bool(row["stale"]),
-                    version=int(row["version"]),
-                    run_id=row["run_id"],
-                    notes=row["notes"] or "",
-                    tags=tuple(tags.split(",")) if tags else (),
-                    content_kind=ContentKind(row["content_kind"]),
-                    primary_source_url=row["primary_source_url"],
-                    document_id=row["document_id"],
-                    source_authority=DocumentAuthority(row["source_authority"]),
-                )
-            )
-        return facts
+        return [_fact_from_row(row) for row in rows]
+
+    def pristine_facts_for_resume(self, run_id: str) -> list:
+        """Rehydrate the EARLIEST version this run_id itself persisted for
+        each fact_id -- Phase 4.3C correction 4's answer to "what did
+        Stage 1 (collect) actually produce, before Evidence Integrity ever
+        touched it, for facts THIS run collected".
+
+        Why MIN(version), and why it is safe for the case this exists for:
+        ``Pipeline.run()``'s Stage 1 persists every ``pre_integrity_facts``
+        entry via ``Repository.save_fact`` BEFORE Evidence Integrity runs
+        at all (Phase 4.3C correction 2), and a freshly created ``Fact``'s
+        own ``run_id`` field is stamped with the CURRENT run's run_id by
+        ``FactCollectorAgent._to_fact`` regardless of what (if anything)
+        already exists in the database. So for a fact_id this run_id
+        genuinely collects for the first time, its own Stage-1 save is
+        version 1 -- and if that SAME run's own Evidence Integrity pass
+        later changes it, the resulting new version is saved from a Fact
+        object that (via ``dataclasses.replace``, which never touches
+        ``run_id``) still carries the SAME run_id, so both versions share
+        one run_id and MIN correctly picks the earlier, pristine one.
+
+        Where this is NOT reliable, by construction, given the existing
+        schema (no schema change is possible here: the ``facts`` table has
+        no column marking "which pipeline stage wrote this version", only
+        ``version`` and ``run_id`` -- confirmed by reading
+        ``storage/schema.sql`` directly):
+
+        * A fact whose content is BYTE-IDENTICAL to one an EARLIER,
+          different run_id already saved: ``Repository.save_fact``'s own
+          duplicate-detection (unchanged content is a no-op) means THIS
+          run's Stage-1 attempt writes no new row at all, so nothing here
+          carries this run_id for that fact_id -- it is silently absent
+          from this method's result, not wrongly included at some other
+          run's version.
+        * A run created before Phase 4.3C correction 2 (which is what
+          first made Stage 1 persist pre-Integrity facts at all, before
+          Evidence Integrity ran): no version tagged with that run_id
+          exists yet at the point of interruption either, so this method
+          returns nothing for it -- again absence, not a wrong guess.
+
+        Both cases mean incomplete (never wrong) coverage: some fact_ids
+        that a genuinely fresh collection produced may be missing from
+        this method's result. The caller (``Pipeline.run()``) is
+        responsible for detecting a coverage shortfall against
+        ``facts_for_resume``'s own fact_id set and reporting it -- this
+        method does not guess a value for what it cannot find.
+        """
+        rows = self.conn.execute(
+            """SELECT f.* FROM facts f
+               JOIN (SELECT fact_id, MIN(version) AS v FROM facts WHERE run_id = ?
+                     GROUP BY fact_id) m
+               ON f.fact_id = m.fact_id AND f.version = m.v""",
+            (run_id,),
+        ).fetchall()
+        return [_fact_from_row(row) for row in rows]
 
     def save_research_coverage(self, run_id: str, ticker: str, coverage) -> int:
         n = 0

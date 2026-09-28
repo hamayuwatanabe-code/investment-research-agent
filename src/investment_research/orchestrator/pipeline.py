@@ -516,10 +516,40 @@ class Pipeline:
         if resume:
             checkpoints = self.repo.checkpoints(ctx.run_id)
             restored = self.repo.facts_for_resume(ctx.run_id)
-            resume_plan = build_resume_plan(ctx.run_id, checkpoints, restored, today=self.today)
+            # Phase 4.3C correction 4: also fetched unconditionally (cheap;
+            # returns [] when nothing qualifies) so a resume that turns out
+            # to need Evidence Integrity re-run (should_run("verify") below)
+            # can feed it the PRISTINE, pre-Integrity content instead of
+            # whatever `restored` happens to be -- see
+            # Repository.pristine_facts_for_resume's own docstring.
+            pristine = self.repo.pristine_facts_for_resume(ctx.run_id)
+            resume_plan = build_resume_plan(
+                ctx.run_id, checkpoints, restored, pristine_facts=pristine, today=self.today
+            )
             result.resume_plan = resume_plan
             ctx.notes.append(f"resume: {resume_plan.reason}")
             log.info("resume plan for %s: %s", ctx.run_id, resume_plan.reason)
+            if resume_plan.pristine_missing_fact_ids:
+                # Reported, never silently guessed (Phase 4.3C correction
+                # 4's own explicit requirement) -- see this repo method's
+                # docstring for the two schema-inherent reasons this can
+                # happen (byte-identical content already saved by an
+                # earlier, different run_id; or a run interrupted before
+                # Phase 4.3C correction 2 ever made Stage 1 persist
+                # pre-Integrity facts at all). Pipeline.run() falls back,
+                # per fact, to that fact's own restored (latest) version
+                # below -- re-running Evidence Integrity on an
+                # already-processed fact is safe (Phase 4.3C correction 3),
+                # just not the PREFERRED input when a genuine pristine
+                # snapshot is available.
+                message = (
+                    f"resume: {len(resume_plan.pristine_missing_fact_ids)} fact(s) have no "
+                    "recoverable pristine (pre-Integrity) snapshot for this run_id -- "
+                    "falling back to their latest persisted version as Evidence "
+                    f"Integrity's input: {', '.join(sorted(resume_plan.pristine_missing_fact_ids))}"
+                )
+                result.failures.append(message)
+                log.warning(message)
 
         self.repo.upsert_company(ctx.ticker, company_name, aliases=list(aliases))
         self.repo.start_run(ctx)
@@ -663,7 +693,19 @@ class Pipeline:
         else:
             if skip_collect:
                 assert resume_plan is not None  # narrows for mypy; skip_collect implies this
-                pre_integrity_facts = list(resume_plan.restored_facts)
+                # Phase 4.3C correction 4: feed the PRISTINE (pre-Integrity)
+                # version of each restored fact -- never whatever
+                # partially- or fully-Integrity-processed version happened
+                # to be latest when an earlier attempt crashed mid-pass
+                # (see resume_plan.pristine_facts's own docstring). A
+                # fact_id with no recoverable pristine snapshot (already
+                # reported above, at resume-plan-build time) falls back to
+                # its own restored (latest) version instead of being
+                # dropped.
+                pristine_by_id = {f.fact_id: f for f in resume_plan.pristine_facts}
+                pre_integrity_facts = [
+                    pristine_by_id.get(f.fact_id, f) for f in resume_plan.restored_facts
+                ]
             # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
             # execution, verified_facts determination, Source persistence/
             # quarantine, quarantine-cascade fact exclusion, and the Phase

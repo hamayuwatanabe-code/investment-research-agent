@@ -84,6 +84,26 @@ class ResumePlan:
     resume_from_stage: str
     resume_from_index: int
     restored_facts: list[Fact] = field(default_factory=list)
+    #: Phase 4.3C correction 4: the PRISTINE, pre-Integrity version of
+    #: each fact in ``restored_facts`` that this run_id's own Stage 1
+    #: (collect) actually produced -- for use instead of
+    #: ``restored_facts`` whenever ``should_run("verify")`` is True (see
+    #: ``Pipeline.run()``'s own Stage 2), so a resumed re-run of Evidence
+    #: Integrity always evaluates the ORIGINAL collect-time content, never
+    #: a partially- or fully-Integrity-processed version an interrupted
+    #: pass happened to leave behind. Populated only for the fact_ids
+    #: ``Repository.pristine_facts_for_resume`` could actually find (see
+    #: that method's own docstring for the two schema-inherent reasons it
+    #: cannot always); ``pristine_missing_fact_ids`` names the rest, and
+    #: is never silently empty-filled by this dataclass or ``build_plan``.
+    pristine_facts: list[Fact] = field(default_factory=list)
+    #: fact_ids present in (fresh, non-stale) ``restored_facts`` for which
+    #: no pristine version could be found. ``Pipeline.run()`` is
+    #: responsible for reporting this explicitly and falling back, per
+    #: fact, to that fact's own ``restored_facts`` (latest) version
+    #: instead -- this dataclass only records which fact_ids need that
+    #: fallback, it does not perform it.
+    pristine_missing_fact_ids: list[str] = field(default_factory=list)
     stale_fact_ids: list[str] = field(default_factory=list)
     completed_stages: list[str] = field(default_factory=list)
     reason: str = ""
@@ -131,9 +151,23 @@ def build_plan(
     checkpoints: Sequence[Checkpoint],
     facts: Sequence[Fact],
     *,
+    pristine_facts: Sequence[Fact] = (),
     today: date | None = None,
 ) -> ResumePlan:
-    """Work out where to restart and which facts survive."""
+    """Work out where to restart and which facts survive.
+
+    ``facts`` is the LATEST version of each fact_id this run_id has
+    persisted (``Repository.facts_for_resume``'s own contract);
+    ``pristine_facts`` (Phase 4.3C correction 4) is the EARLIEST --
+    ``Repository.pristine_facts_for_resume``'s own contract. Both are
+    filtered by the SAME staleness decision here, since Evidence
+    Integrity never rewrites a fact's dates (confirmed by reading
+    ``agents/evidence_integrity.py``'s own ``_assess`` directly: its
+    ``replace(...)`` call never touches ``event_date``/
+    ``publication_date``/``effective_date``/``filing_date``), so the two
+    versions of the same fact_id are always equally stale or equally
+    fresh.
+    """
     today = today or datetime.now(timezone.utc).date()
     completed = [c.stage for c in checkpoints if c.status == "OK"]
 
@@ -156,6 +190,8 @@ def build_plan(
         else:
             fresh.append(fact)
 
+    pristine_fresh: list[Fact] = []
+    pristine_missing: list[str] = []
     if stale:
         # Anything downstream of collection was computed from a fact set that no
         # longer holds, so re-collect rather than resume onto stale evidence.
@@ -169,12 +205,21 @@ def build_plan(
             f"resuming after {STAGES[last_index]!r}; "
             f"{len(fresh)} fact(s) restored, all within freshness thresholds"
         )
+        pristine_by_id = {f.fact_id: f for f in pristine_facts}
+        for fact in fresh:
+            pristine = pristine_by_id.get(fact.fact_id)
+            if pristine is not None:
+                pristine_fresh.append(pristine)
+            else:
+                pristine_missing.append(fact.fact_id)
 
     return ResumePlan(
         run_id=run_id,
         resume_from_stage=STAGES[resume_index],
         resume_from_index=resume_index,
         restored_facts=fresh,
+        pristine_facts=pristine_fresh,
+        pristine_missing_fact_ids=pristine_missing,
         stale_fact_ids=stale,
         completed_stages=completed,
         reason=reason,
