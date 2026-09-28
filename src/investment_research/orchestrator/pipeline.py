@@ -582,6 +582,26 @@ class Pipeline:
                 len(resume_plan.restored_facts),
             )
             bus.add_facts(resume_plan.restored_facts)
+            # Phase 4.3C correction 3: Source objects are NOT restored from
+            # facts_for_resume() (a restored Fact carries its source_id/
+            # source_url/source_tier denormalized onto itself, but that is
+            # not a Source object) and are not recoverable from the
+            # `sources` table either -- that table has no run_id column at
+            # all (confirmed by reading storage/schema.sql directly), so a
+            # malformed source that never got persisted in the first place
+            # (quarantine means "never written") cannot be looked up by
+            # run_id regardless. The caller-supplied `collection_results`
+            # is the one thing this invocation actually has that still
+            # carries genuine Source objects -- real --resume invocations
+            # already re-run collection to build it (see cli.py's run_one,
+            # which calls the same collect()/FixtureCollector/
+            # CorpusResearchProvider path unconditionally, resume or not),
+            # so using it here costs nothing extra. Without this, bus.sources
+            # stayed empty for the rest of a resumed run: no malformed
+            # source could be re-detected, and result.traceability's
+            # per-source enrichment (content_kind) silently went missing
+            # for every restored fact.
+            bus.add_sources(source for cr in collection_results for source in cr.sources)
             ctx.notes.append(
                 f"resumed with {len(resume_plan.restored_facts)} previously-collected fact(s)"
             )

@@ -472,8 +472,27 @@ class Repository:
         return out
 
     def facts_for_resume(self, run_id: str) -> list:
-        """Rehydrate the latest version of every fact recorded for a run."""
+        """Rehydrate the latest version of every fact recorded for a run.
+
+        Phase 4.3C correction 3: this reconstructs EVERY column
+        ``Fact.to_row()`` writes, not a subset -- a prior version of this
+        method silently dropped ``corroborating_source_ids``,
+        ``contradicting_evidence``, ``tags``, ``content_kind``,
+        ``primary_source_url``, ``document_id`` and ``source_authority``
+        back to their dataclass defaults on every restore, even though all
+        seven are real, persisted columns (confirmed by reading
+        ``storage/schema.sql`` and ``Fact.to_row()`` directly). A restored
+        fact whose real stored ``content_kind`` was ``SEARCH_SUMMARY``, or
+        whose real ``source_authority``/``document_id`` were set, would
+        silently read back as ``FULL_DOCUMENT``/``UNKNOWN``/``None`` after
+        a resume -- a genuine semantic corruption a fact-id-only comparison
+        can never catch. ``superseded_by`` is deliberately NOT restored:
+        the query already selects the MAX(version) row for each fact_id,
+        so a genuinely-latest row's own ``superseded_by`` is always NULL.
+        """
         from ..schemas.enums import (
+            ContentKind,
+            DocumentAuthority,
             EvidenceClass,
             FactCategory,
             Materiality,
@@ -492,6 +511,9 @@ class Repository:
         ).fetchall()
         facts = []
         for row in rows:
+            corroborating = row["corroborating_source_ids"] or ""
+            contradicting = row["contradicting_evidence"] or ""
+            tags = row["tags"] or ""
             facts.append(
                 Fact(
                     fact_id=row["fact_id"],
@@ -511,6 +533,12 @@ class Repository:
                     confidence=float(row["confidence"]),
                     company_claim=bool(row["company_claim"]),
                     independent_confirmation=bool(row["independent_confirmation"]),
+                    corroborating_source_ids=tuple(
+                        corroborating.split(",")
+                    ) if corroborating else (),
+                    contradicting_evidence=tuple(
+                        contradicting.split(",")
+                    ) if contradicting else (),
                     materiality=Materiality(row["materiality"]),
                     value=row["value"],
                     unit=row["unit"],
@@ -519,6 +547,11 @@ class Repository:
                     version=int(row["version"]),
                     run_id=row["run_id"],
                     notes=row["notes"] or "",
+                    tags=tuple(tags.split(",")) if tags else (),
+                    content_kind=ContentKind(row["content_kind"]),
+                    primary_source_url=row["primary_source_url"],
+                    document_id=row["document_id"],
+                    source_authority=DocumentAuthority(row["source_authority"]),
                 )
             )
         return facts
