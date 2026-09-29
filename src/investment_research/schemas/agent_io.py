@@ -21,10 +21,19 @@ The orchestrator never hands an agent the whole bus.  It hands it a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .enums import FactCategory, Materiality, RunStatus
 from .fact import Contradiction, Fact, Source, UnresolvedQuestion
+
+if TYPE_CHECKING:
+    # String-only (PEP 563 deferred annotations, already active above) so
+    # this stays a type-checking-only edge: schemas is the foundation layer
+    # and nothing here imports scoring at runtime. scoring/program_resolution
+    # itself only imports schemas.enums/schemas.fact, so there is no runtime
+    # cycle either way -- this import is kept TYPE_CHECKING-only to preserve
+    # the existing layering convention (no schemas/*.py imports `..scoring`).
+    from ..scoring.program_resolution import ProgramResolution
 
 
 @dataclass
@@ -106,6 +115,13 @@ class AgentInput:
     unresolved: tuple[UnresolvedQuestion, ...] = ()
     channels: dict[str, Evaluation] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
+    #: Phase 4.3D: the ONE centrally-computed ProgramResolution for this run,
+    #: attached ONLY for the agent_ids IsolationGuard.project() permits
+    #: ("science", "kill_agent") -- None for every other agent, including
+    #: Blind Judge/Bull/Bear, which must never see which trial was selected
+    #: or why. Never read directly by any agent except via this field: no
+    #: agent may recompute its own resolution from ``facts``.
+    program_resolution: ProgramResolution | None = None
 
     def channel(self, name: str) -> Evaluation | None:
         return self.channels.get(name)

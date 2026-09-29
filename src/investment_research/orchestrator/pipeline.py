@@ -62,6 +62,7 @@ from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.decision_gate_consistency import enforce_complete_only_action, sync_verdict_channel
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
+from ..scoring.program_resolution import ProgramResolution, resolve_current_program
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
 from ..storage.repository import (
@@ -424,6 +425,7 @@ class Pipeline:
         params: dict[str, Any],
         user_preferences: dict[str, Any] | None = None,
         facts: Sequence | None = None,
+        program_resolution: ProgramResolution | None = None,
     ) -> AgentOutput:
         ctx = result.context
         started = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -436,6 +438,7 @@ class Pipeline:
                 facts=facts,
                 params={**params, "run_id": ctx.run_id},
                 user_preferences=user_preferences,
+                program_resolution=program_resolution,
             )
         except LeakageError as exc:
             # An isolation breach is never survivable: continuing would produce
@@ -857,6 +860,24 @@ class Pipeline:
                 {"attempts": len(result.escalation.attempts) if result.escalation else 0},
             )
 
+        # ---- Central Program Resolution (Phase 4.3D) ----------------------
+        # Computed exactly ONCE per run, from the SAME verified_facts Domain
+        # Agents are about to receive -- after Stage 2 Evidence Integrity and
+        # Stage 2b primary-source escalation both complete, before Stage 3
+        # starts. ScienceAgent, LLMScienceAgent and KillAgent used to each
+        # independently call resolve_current_program() themselves (relying on
+        # both seeing near-identical fact sets to reach the same answer); they
+        # no longer do -- see IsolationGuard.project(), the only place this
+        # value is attached to an AgentInput, and only for agent_ids "science"
+        # and "kill_agent". Stage 3b's unresolved-question-driven escalation
+        # runs AFTER Science/Kill and is deliberately out of scope here:
+        # splitting an initial vs. a final resolution is a future phase, once
+        # Adaptive Acquisition exists to act on newly-escalated facts. A
+        # resumed run needs no special-casing: verified_facts above is
+        # already either the freshly-verified set or the restored one by this
+        # point, so this is naturally "decided once from the restored facts".
+        program_resolution = resolve_current_program(list(verified_facts))
+
         # ---- Stage 3: domain agents (facts only) ------------------------
         # Stage-aware budgeting: everything from here through bear/bull
         # (Stage 6) shares the "interpretive" quota, independent of discovery
@@ -885,7 +906,14 @@ class Pipeline:
             ):
                 agent = self._agent_for(deterministic.agent_id, deterministic, llm_cls, bus)
                 output = self._run_agent(
-                    agent, guard, result, params=params, user_preferences=user_preferences
+                    agent,
+                    guard,
+                    result,
+                    params=params,
+                    user_preferences=user_preferences,
+                    program_resolution=(
+                        program_resolution if deterministic.agent_id == "science" else None
+                    ),
                 )
                 if output.metrics.get("llm_backed"):
                     result.llm_agents_used.append(deterministic.agent_id)
@@ -984,7 +1012,12 @@ class Pipeline:
                 bus,
             )
             kill_output = self._run_agent(
-                llm_kill, guard, result, params=params, user_preferences=user_preferences
+                llm_kill,
+                guard,
+                result,
+                params=params,
+                user_preferences=user_preferences,
+                program_resolution=program_resolution,
             )
             if kill_output.metrics.get("llm_backed"):
                 result.llm_agents_used.append("kill_agent")
@@ -999,6 +1032,7 @@ class Pipeline:
                     result,
                     params=params,
                     user_preferences=user_preferences,
+                    program_resolution=program_resolution,
                 )
                 gate = _gate_from_output(deterministic_kill)
             else:

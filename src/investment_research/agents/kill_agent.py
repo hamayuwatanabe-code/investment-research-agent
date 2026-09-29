@@ -36,7 +36,6 @@ from ..schemas.enums import (
 )
 from ..schemas.fact import UnresolvedQuestion
 from ..scoring.kill_gate import evaluate_kill_gate
-from ..scoring.program_resolution import resolve_current_program
 from .base import Agent
 
 log = logging.getLogger(__name__)
@@ -144,20 +143,55 @@ class KillAgent(Agent):
         capital = data.channel(Channel.CAPITAL_STRUCTURE)
         runway = capital.payload.get("runway_months") if capital else None
 
-        # Same deterministic resolution Science uses, over the same fact set
-        # this agent already sees -- so both agree on which trial is current
-        # without introducing a new isolation surface (requirement D).
-        resolution = resolve_current_program(list(data.facts))
+        # Phase 4.3D: the central Pipeline-computed ProgramResolution is the
+        # ONLY source -- this agent no longer recomputes its own from
+        # data.facts (that was the pre-4.3D design: both Science and Kill
+        # independently called resolve_current_program() over near-identical
+        # fact sets, relying on implicit agreement rather than a single
+        # shared value).
+        resolution = data.program_resolution
+        if resolution is None:
+            # Fail closed: no central resolution supplied (e.g. this agent
+            # run standalone). Never recompute, never let any specific trial
+            # -- old, different, or otherwise -- drive a company-level kill:
+            # every per-trial finding stays PROVISIONAL, exactly as
+            # evaluate_kill_gate already treats a genuinely ambiguous
+            # resolution.
+            current_program_trial_id = UNKNOWN
+            program_relevance_unresolved_for_gate = True
+            program_resolved_payload: str = UNKNOWN
+            program_relevance_unresolved_payload = True
+            out.unresolved.append(
+                UnresolvedQuestion(
+                    question=(
+                        "PROGRAM_RELEVANCE_UNRESOLVED: no central programme resolution "
+                        "was supplied to this agent"
+                    ),
+                    why_it_matters=(
+                        "Without the centrally-resolved current programme, no specific "
+                        "trial's finding may drive a company-level kill assessment."
+                    ),
+                    category=FactCategory.CLINICAL,
+                    raised_by=self.agent_id,
+                )
+            )
+        else:
+            current_program_trial_id = (
+                UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
+            )
+            program_relevance_unresolved_for_gate = (
+                resolution.relevance_unresolved and len(resolution.candidates) > 1
+            )
+            program_resolved_payload = current_program_trial_id
+            program_relevance_unresolved_payload = resolution.relevance_unresolved
+
         gate = evaluate_kill_gate(
             list(data.facts),
             list(data.risk_flags),
             unsearched_categories=unsearched,
             runway_months=runway,
-            current_program_trial_id=(
-                UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
-            ),
-            program_relevance_unresolved=resolution.relevance_unresolved
-            and len(resolution.candidates) > 1,
+            current_program_trial_id=current_program_trial_id,
+            program_relevance_unresolved=program_relevance_unresolved_for_gate,
         )
 
         for assessment in gate.assessments:
@@ -216,10 +250,8 @@ class KillAgent(Agent):
                 for o in self.query_outcomes
             ],
             "unsearched_categories": [str(c) for c in unsearched],
-            "program_resolved": (
-                UNKNOWN if resolution.relevance_unresolved else resolution.trial_id
-            ),
-            "program_relevance_unresolved": resolution.relevance_unresolved,
+            "program_resolved": program_resolved_payload,
+            "program_relevance_unresolved": program_relevance_unresolved_payload,
             "search_hits": hits,
             "findings": [
                 {

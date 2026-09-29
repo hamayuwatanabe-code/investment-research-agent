@@ -20,9 +20,10 @@ Every agent below therefore *proposes*; the deterministic Kill Gate still
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..collectors.documents import Chunk, build_evidence_pack
 from ..orchestrator.isolation import Channel
@@ -30,6 +31,9 @@ from ..schemas.agent_io import AgentInput, AgentOutput, RiskFlag
 from ..schemas.enums import UNKNOWN, FactCategory, Materiality
 from ..schemas.fact import Contradiction, UnresolvedQuestion, make_contradiction_id
 from .llm_base import LLMAgent, PromptBuildResult, cited_only
+
+if TYPE_CHECKING:
+    from ..scoring.program_resolution import ProgramResolution
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +84,29 @@ def _pack_for(
         for f in data.facts
     ]
     return None, "\n".join(lines) or "(no evidence)", valid
+
+
+def _program_resolution_projection(resolution: ProgramResolution | None) -> str:
+    """Phase 4.3D: LLMScienceAgent's limited, read-only, JSON-safe view of the
+    central ProgramResolution -- exactly ``trial_id``, ``relevance_unresolved``,
+    ``rationale`` and ``candidates`` (each candidate's ``trial_id``/``status``/
+    ``phase`` only, never its ``fact_ids`` or ``has_lead_marker``: those add no
+    information the model needs and this projection is deliberately narrower
+    than the full dataclass). Returns "" when there is no resolution to show,
+    which the caller uses to omit the section entirely.
+    """
+    if resolution is None:
+        return ""
+    projection = {
+        "trial_id": resolution.trial_id,
+        "relevance_unresolved": resolution.relevance_unresolved,
+        "rationale": resolution.rationale,
+        "candidates": [
+            {"trial_id": c.trial_id, "status": c.status, "phase": c.phase}
+            for c in resolution.candidates
+        ],
+    }
+    return json.dumps(projection, ensure_ascii=False)
 
 
 def _flags(items: list[dict[str, Any]], agent_id: str, category: FactCategory) -> list[RiskFlag]:
@@ -264,7 +291,16 @@ score). A surrogate only supports approval if a regulator accepts it as reasonab
 predict clinical benefit -- a separate fact you must not assume.
 
 For a technology asset, differentiation that never appears in deployments, customers, patents or
-independent testing is an assertion, not a moat."""
+independent testing is an assertion, not a moat.
+
+When a CENTRAL PROGRAMME RESOLUTION is included in the prompt, it was computed deterministically,
+before you ran, from the same evidence, by a rule that never guesses. It is authoritative scope,
+not a suggestion you may weigh against your own reading:
+  - You may not select or invent a different NCT id as the "current" or "lead" programme.
+  - If its relevance_unresolved is true, you may not guess-select one candidate as current --
+    say plainly that the current programme could not be determined from the evidence.
+  - You may not describe another programme's data as if it were the company's current one.
+  - You cannot change which trial the resolution selected."""
 
     schema = {
         "type": "object",
@@ -294,6 +330,18 @@ independent testing is an assertion, not a moat."""
 
     def build_prompt(self, data: AgentInput) -> PromptBuildResult:
         pack, rendered, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
+        program_section = ""
+        projection = _program_resolution_projection(data.program_resolution)
+        if projection:
+            program_section = (
+                "\n\nCENTRAL PROGRAMME RESOLUTION (JSON, computed once, deterministically, "
+                "before any agent ran):\n"
+                f"{projection}\n"
+                "This is authoritative scope for which programme is current/lead. Do not "
+                "select or invent a different NCT id as current. If relevance_unresolved is "
+                "true, do not guess-select a candidate. Do not repurpose another programme's "
+                "data as the company's current one."
+            )
         return PromptBuildResult(
             prompt=(
                 "Assess the scientific or technical quality of the asset from this evidence.\n\n"
@@ -301,12 +349,24 @@ independent testing is an assertion, not a moat."""
                 "State whether the primary endpoint is a clinical outcome or a surrogate, and "
                 "score design quality 0-10 on checkable attributes only. Anything not evidenced "
                 "is UNKNOWN."
+                + program_section
             ),
             pack=pack,
             cited_ids=tuple(valid),
         )
 
     def interpret(self, payload: dict[str, Any], data: AgentInput) -> AgentOutput:
+        # Phase 4.3D / Section 6: this agent's schema has no field naming a
+        # current/lead trial id (see ``schema`` above -- ``mode``,
+        # ``endpoint_type``, ``primary_endpoint`` etc. are all free text or
+        # enums with no trial identifier). There is therefore nothing here to
+        # mechanically validate against the central ProgramResolution's
+        # selected trial_id/candidates: enforcement is prompt-constraint-only
+        # (see build_prompt's CENTRAL PROGRAMME RESOLUTION section and this
+        # class's system_extra). This is a deliberate choice, not an
+        # oversight -- inventing a mechanical check against a field that does
+        # not exist in the real output would be exactly the kind of
+        # validation the task asked NOT to invent.
         out = AgentOutput(agent_id=self.agent_id)
         _, _, valid = _pack_for(self.agent_id, data, self.pack_budget_tokens, self.chunks)
         findings, dropped = cited_only(payload.get("findings", []), valid)
@@ -350,6 +410,10 @@ independent testing is an assertion, not a moat."""
             result,
             self.baseline_from(data),
         )
+        # Auditable, mechanically-true fact about this run (never a claim
+        # about what the model itself did with it): whether a central
+        # ProgramResolution reached this agent's input at all.
+        out.metrics["program_resolution_supplied"] = data.program_resolution is not None
         return out
 
 

@@ -361,6 +361,88 @@ def test_kill_agent_output_is_proposal_only(client):
     assert payload["follow_up_queries"] == ["TESTCO 2024 meeting pivotal designation"]
 
 
+# --- central Program Resolution (Phase 4.3D, Section 6 / Test E) -----------
+def test_llm_science_agent_receives_the_central_resolution_and_cannot_override_it(client):
+    """The model's free text may mention a different trial, but this
+    schema has no field for a current/lead trial id (confirmed by reading
+    LLMScienceAgent.schema -- mode/endpoint_type/primary_endpoint/phase/
+    findings/etc. are all free text or enums with no trial identifier), so
+    nothing the model returns can be adopted as if it were the resolved
+    programme identity: program_resolved/program_relevance_unresolved are
+    never even read from the LLM's payload. Enforcement is prompt-
+    constraint-only (see LLMScienceAgent.build_prompt's CENTRAL PROGRAMME
+    RESOLUTION section), which this test also proves actually reached the
+    model -- and that only the ONE mocked (non-network) call was made."""
+    from investment_research.agents.llm_agents import LLMScienceAgent
+    from investment_research.agents.science import ScienceAgent
+    from investment_research.scoring.program_resolution import resolve_current_program
+
+    current_trial = "NCT50000001"
+    wrong_trial = "NCT50000002"
+    fact = make_fact(
+        f"{current_trial} overall status is RECRUITING",
+        category=FactCategory.CLINICAL,
+    )
+    resolution = resolve_current_program([fact])
+    assert resolution.trial_id == current_trial  # sanity: the fixture resolves cleanly
+
+    data = AgentInput(
+        agent_id="science",
+        run_id="r1",
+        ticker="TESTCO",
+        company_name="Test Company",
+        facts=(fact,),
+        program_resolution=resolution,
+    )
+
+    global RESPONSE
+    payload = {
+        "mode": "biotech",
+        "endpoint_type": "CLINICAL_OUTCOME",
+        # The model names a DIFFERENT trial in free text -- there is no
+        # structured field for this, so it cannot become "the resolved
+        # programme" anywhere downstream.
+        "primary_endpoint": f"overall survival, per {wrong_trial}",
+        "design_quality_score": 7.0,
+        "findings": [],
+    }
+    REQUESTS.clear()
+    RESPONSE = message(tool_use("submit_science_analysis", payload))
+
+    output = LLMScienceAgent(client, fallback=ScienceAgent()).run(data)
+
+    assert len(REQUESTS) == 1, "exactly one (mocked, non-network) LLM call was made"
+    prompt = REQUESTS[-1]["messages"][0]["content"]
+    assert "CENTRAL PROGRAMME RESOLUTION" in prompt
+    assert current_trial in prompt
+    assert output.metrics["llm_backed"] is True
+    assert output.metrics["program_resolution_supplied"] is True
+    # These keys simply do not exist on the LLM path's output -- there is
+    # nothing for the model's own trial mention to overwrite or masquerade as.
+    assert "program_resolved" not in output.evaluation.payload
+    assert "program_relevance_unresolved" not in output.evaluation.payload
+
+
+def test_llm_science_agent_prompt_omits_the_section_when_no_resolution_is_supplied(client):
+    fact, data = make_input(agent_id="science")
+    global RESPONSE
+    payload = {
+        "mode": "technology",
+        "design_quality_score": 5.0,
+        "findings": [],
+    }
+    REQUESTS.clear()
+    from investment_research.agents.llm_agents import LLMScienceAgent
+    from investment_research.agents.science import ScienceAgent
+
+    RESPONSE = message(tool_use("submit_science_analysis", payload))
+    output = LLMScienceAgent(client, fallback=ScienceAgent()).run(data)
+
+    prompt = REQUESTS[-1]["messages"][0]["content"]
+    assert "CENTRAL PROGRAMME RESOLUTION" not in prompt
+    assert output.metrics["program_resolution_supplied"] is False
+
+
 def test_bull_agent_reports_no_case_rather_than_inventing_one(client):
     from investment_research.agents.bull_agent import BullAgent
 

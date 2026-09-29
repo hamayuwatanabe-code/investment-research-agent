@@ -35,6 +35,7 @@ from typing import Any
 
 from ..schemas.agent_io import AgentInput, Evaluation, RiskFlag
 from ..schemas.fact import Contradiction, Fact, Source, UnresolvedQuestion
+from ..scoring.program_resolution import ProgramResolution
 
 log = logging.getLogger(__name__)
 
@@ -268,6 +269,19 @@ POLICIES: dict[str, IsolationPolicy] = {
 }
 
 
+#: Phase 4.3D: the ONLY agent_ids IsolationGuard.project() may attach the
+#: centrally-computed ProgramResolution to. "science" covers both the
+#: deterministic ScienceAgent and LLMScienceAgent (same agent_id, see
+#: Pipeline._agent_for); "kill_agent" covers both the deterministic KillAgent
+#: (including the always-run deterministic pass after any LLM Kill proposal)
+#: and LLMKillAgent (same agent_id) -- though LLMKillAgent itself never reads
+#: the field; only its deterministic fallback/successor does. This is the
+#: single enforcement point: project() checks this set regardless of what a
+#: caller passes in, so a stray Pipeline-side pass-through for a forbidden
+#: agent_id (e.g. blind_judge, bull_agent, bear_agent) is structurally inert.
+_PROGRAM_RESOLUTION_RECIPIENTS = frozenset({"science", "kill_agent"})
+
+
 def policy_for(agent_id: str) -> IsolationPolicy:
     try:
         return POLICIES[agent_id]
@@ -421,6 +435,7 @@ class IsolationGuard:
         facts: Sequence[Fact] | None = None,
         params: Mapping[str, Any] | None = None,
         user_preferences: Mapping[str, Any] | None = None,
+        program_resolution: ProgramResolution | None = None,
     ) -> AgentInput:
         policy = policy_for(agent_id)
         selected_facts = tuple(facts if facts is not None else self.bus.facts)
@@ -470,6 +485,14 @@ class IsolationGuard:
             unresolved=unresolved,
             channels=channels,
             params=params_out,
+            # Phase 4.3D: never trust the caller's own gating -- attached
+            # only for the fixed, hard-coded recipient set, independent of
+            # what was passed in. This is what makes "never in params, never
+            # reaches Blind Judge/Bull/Bear" a structural guarantee rather
+            # than a convention every call site has to get right.
+            program_resolution=(
+                program_resolution if agent_id in _PROGRAM_RESOLUTION_RECIPIENTS else None
+            ),
         )
 
         self._assert_clean(policy, agent_input, ticker, company_name, aliases, user_preferences)
