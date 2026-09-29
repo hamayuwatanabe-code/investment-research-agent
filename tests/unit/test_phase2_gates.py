@@ -214,17 +214,18 @@ def test_an_undated_fact_is_treated_as_stale():
 def test_resume_restarts_after_the_last_completed_stage():
     checkpoints = [Checkpoint("r1", stage, i) for i, stage in enumerate(STAGES[:5])]
     fact = make_fact("a", category=FactCategory.REGULATORY, event_date="2026-09-01")
-    plan = build_plan("r1", checkpoints, [fact], today=TODAY)
+    plan = build_plan("r1", checkpoints, snapshot_facts=[fact], today=TODAY)
     assert plan.resume_from_stage == STAGES[5]
     assert not plan.should_run(STAGES[0])
     assert plan.should_run(STAGES[5])
     assert plan.restored_facts == [fact]
+    assert plan.snapshot_unavailable_reason is None
 
 
 def test_stale_evidence_forces_a_full_recollection():
     checkpoints = [Checkpoint("r1", stage, i) for i, stage in enumerate(STAGES[:8])]
     stale = make_fact("a", category=FactCategory.REGULATORY, event_date="2026-01-01")
-    plan = build_plan("r1", checkpoints, [stale], today=TODAY)
+    plan = build_plan("r1", checkpoints, snapshot_facts=[stale], today=TODAY)
     assert plan.resume_from_stage == "collect"
     assert plan.is_fresh_start
     assert stale.fact_id in plan.stale_fact_ids
@@ -232,6 +233,18 @@ def test_stale_evidence_forces_a_full_recollection():
 
 
 def test_no_checkpoints_means_a_fresh_start():
-    plan = build_plan("r1", [], [], today=TODAY)
+    plan = build_plan("r1", [], today=TODAY)
     assert plan.is_fresh_start
     assert plan.should_run("collect")
+
+
+def test_missing_snapshot_short_circuits_to_an_unavailable_plan():
+    """Phase 4.3C correction 5: a needed snapshot that could not be
+    obtained never silently looks like "nothing to restore" -- staleness
+    is not even evaluated, and the reason is carried on the plan."""
+    checkpoints = [Checkpoint("r1", stage, i) for i, stage in enumerate(STAGES[:1])]
+    plan = build_plan("r1", checkpoints, snapshot_missing_reason="no collect snapshot", today=TODAY)
+    assert plan.snapshot_unavailable_reason == "no collect snapshot"
+    assert plan.restored_facts == []
+    assert plan.stale_fact_ids == []
+    assert "snapshot unavailable" in plan.reason

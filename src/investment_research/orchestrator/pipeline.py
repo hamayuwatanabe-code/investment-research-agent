@@ -64,7 +64,12 @@ from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
-from ..storage.repository import Repository
+from ..storage.repository import (
+    CollectSnapshot,
+    Repository,
+    ResumeSnapshotCorrupted,
+    VerifySnapshot,
+)
 from ..thesis.versioning import diff_against_previous, snapshot_for
 from .evidence_integrity_pass import (
     FullIntegrityPassInput,
@@ -78,7 +83,7 @@ from .isolation import (
     LeakageError,
     derive_fingerprints,
 )
-from .resume import Checkpoint, ResumePlan, stage_index
+from .resume import Checkpoint, ResumePlan, resume_point, stage_index
 from .resume import build_plan as build_resume_plan
 
 log = logging.getLogger(__name__)
@@ -204,6 +209,14 @@ class ResearchResult:
     #: Empty for every run that did not use such a path -- existing callers
     #: are entirely unaffected.
     direct_acquisition_info: dict[str, Any] = field(default_factory=dict)
+    #: Phase 4.3C correction 5: non-empty only when a resume genuinely
+    #: needed a Stage-1 (collect) or Stage-2 (verify) snapshot and could
+    #: not get one intact -- mirrors ``direct_acquisition_info``'s own
+    #: pattern (populated early, read once near Blind Judge to extend
+    #: ``blocking_reasons``) so this failure withholds ``Verdict.action``
+    #: the same way an incomplete Literature acquisition already does,
+    #: never silently completing as if nothing were missing.
+    resume_snapshot_failures: list[str] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -512,44 +525,71 @@ class Pipeline:
         )
 
         # ---- Resume (requirement P8) --------------------------------------
+        # Phase 4.3C correction 5: which snapshot (if any) is needed is
+        # decided BEFORE build_plan runs, from checkpoints alone
+        # (resume_point) -- collect/pristine when resuming before "verify",
+        # verify/verified when resuming after it, none at all for a fresh
+        # start. Never facts_for_resume/a MIN- or MAX-version query
+        # (removed -- both were proven vulnerable to the SAME cross-run
+        # content collision; see ResumePlan's own docstring in
+        # orchestrator/resume.py for the empirical reproduction). A
+        # snapshot that is needed but missing or corrupted is never
+        # silently treated as "nothing to restore": resume_plan.
+        # snapshot_unavailable_reason carries the reason forward to a
+        # fail-closed outcome (status=INCOMPLETE_RESEARCH, Action=None,
+        # a specific blocking reason -- see the Stage 1/Stage 2 handling
+        # below and the blocking_reasons computation near Blind Judge).
         resume_plan = None
+        collect_snapshot: CollectSnapshot | None = None
+        verify_snapshot: VerifySnapshot | None = None
         if resume:
             checkpoints = self.repo.checkpoints(ctx.run_id)
-            restored = self.repo.facts_for_resume(ctx.run_id)
-            # Phase 4.3C correction 4: also fetched unconditionally (cheap;
-            # returns [] when nothing qualifies) so a resume that turns out
-            # to need Evidence Integrity re-run (should_run("verify") below)
-            # can feed it the PRISTINE, pre-Integrity content instead of
-            # whatever `restored` happens to be -- see
-            # Repository.pristine_facts_for_resume's own docstring.
-            pristine = self.repo.pristine_facts_for_resume(ctx.run_id)
+            needed = resume_point(checkpoints)
+            snapshot_facts: Sequence[Fact] = ()
+            snapshot_missing_reason: str | None = None
+            if needed == stage_index("verify"):
+                try:
+                    collect_snapshot = self.repo.collect_snapshot_for_resume(ctx.run_id)
+                except ResumeSnapshotCorrupted as exc:
+                    snapshot_missing_reason = str(exc)
+                else:
+                    if collect_snapshot is None:
+                        snapshot_missing_reason = (
+                            f"no collect snapshot recorded for run_id={ctx.run_id!r}; "
+                            "cannot safely re-evaluate this run's Stage-1 facts without one"
+                        )
+                    else:
+                        snapshot_facts = collect_snapshot.facts
+            elif needed > stage_index("verify"):
+                try:
+                    verify_snapshot = self.repo.verify_snapshot_for_resume(ctx.run_id)
+                except ResumeSnapshotCorrupted as exc:
+                    snapshot_missing_reason = str(exc)
+                else:
+                    if verify_snapshot is None:
+                        snapshot_missing_reason = (
+                            f"no verify snapshot recorded for run_id={ctx.run_id!r}; "
+                            "cannot safely reuse this run's already-verified facts without one"
+                        )
+                    else:
+                        snapshot_facts = verify_snapshot.verified_facts
+            # needed == 0 (a fresh start): no snapshot is needed at all.
+
             resume_plan = build_resume_plan(
-                ctx.run_id, checkpoints, restored, pristine_facts=pristine, today=self.today
+                ctx.run_id,
+                checkpoints,
+                snapshot_facts=snapshot_facts,
+                snapshot_missing_reason=snapshot_missing_reason,
+                today=self.today,
             )
             result.resume_plan = resume_plan
             ctx.notes.append(f"resume: {resume_plan.reason}")
             log.info("resume plan for %s: %s", ctx.run_id, resume_plan.reason)
-            if resume_plan.pristine_missing_fact_ids:
-                # Reported, never silently guessed (Phase 4.3C correction
-                # 4's own explicit requirement) -- see this repo method's
-                # docstring for the two schema-inherent reasons this can
-                # happen (byte-identical content already saved by an
-                # earlier, different run_id; or a run interrupted before
-                # Phase 4.3C correction 2 ever made Stage 1 persist
-                # pre-Integrity facts at all). Pipeline.run() falls back,
-                # per fact, to that fact's own restored (latest) version
-                # below -- re-running Evidence Integrity on an
-                # already-processed fact is safe (Phase 4.3C correction 3),
-                # just not the PREFERRED input when a genuine pristine
-                # snapshot is available.
-                message = (
-                    f"resume: {len(resume_plan.pristine_missing_fact_ids)} fact(s) have no "
-                    "recoverable pristine (pre-Integrity) snapshot for this run_id -- "
-                    "falling back to their latest persisted version as Evidence "
-                    f"Integrity's input: {', '.join(sorted(resume_plan.pristine_missing_fact_ids))}"
-                )
+            if resume_plan.snapshot_unavailable_reason:
+                message = f"RESUME SNAPSHOT UNAVAILABLE: {resume_plan.snapshot_unavailable_reason}"
+                result.resume_snapshot_failures.append(message)
                 result.failures.append(message)
-                log.warning(message)
+                log.error(message)
 
         self.repo.upsert_company(ctx.ticker, company_name, aliases=list(aliases))
         self.repo.start_run(ctx)
@@ -596,6 +636,7 @@ class Pipeline:
 
         # ---- Stage 1: collect (no evaluation) ---------------------------
         skip_collect = resume_plan is not None and not resume_plan.should_run("collect")
+        snapshot_unavailable = resume_plan is not None and resume_plan.snapshot_unavailable_reason is not None
         if skip_collect:
             assert resume_plan is not None  # narrows for mypy; skip_collect implies this
             # Collection is the expensive stage; a resumed run reuses the facts
@@ -612,26 +653,25 @@ class Pipeline:
                 len(resume_plan.restored_facts),
             )
             bus.add_facts(resume_plan.restored_facts)
-            # Phase 4.3C correction 3: Source objects are NOT restored from
-            # facts_for_resume() (a restored Fact carries its source_id/
-            # source_url/source_tier denormalized onto itself, but that is
-            # not a Source object) and are not recoverable from the
-            # `sources` table either -- that table has no run_id column at
-            # all (confirmed by reading storage/schema.sql directly), so a
-            # malformed source that never got persisted in the first place
-            # (quarantine means "never written") cannot be looked up by
-            # run_id regardless. The caller-supplied `collection_results`
-            # is the one thing this invocation actually has that still
-            # carries genuine Source objects -- real --resume invocations
-            # already re-run collection to build it (see cli.py's run_one,
-            # which calls the same collect()/FixtureCollector/
-            # CorpusResearchProvider path unconditionally, resume or not),
-            # so using it here costs nothing extra. Without this, bus.sources
-            # stayed empty for the rest of a resumed run: no malformed
-            # source could be re-detected, and result.traceability's
-            # per-source enrichment (content_kind) silently went missing
-            # for every restored fact.
-            bus.add_sources(source for cr in collection_results for source in cr.sources)
+            # Phase 4.3C correction 5: Source objects come from THIS SAME
+            # snapshot the facts themselves came from -- collect_snapshot is
+            # only ever non-None here when needed==stage_index("verify")
+            # (see the resume-plan-building block above), i.e. exactly when
+            # resume_plan.restored_facts is itself collect_snapshot.facts.
+            # Never the freshly-recollected `collection_results` (Phase
+            # 4.3C correction 3's own fix, now superseded): that would mix
+            # THIS invocation's newly-fetched Sources with a PRIOR
+            # invocation's Facts, which is exactly the "mixing" this
+            # correction's own requirements prohibit -- live Source content
+            # can differ between fetches even when the fact set does not.
+            # When verify is already done (needed > stage_index("verify")),
+            # collect_snapshot is never fetched at all (not needed) and
+            # this branch has no sources to add -- Stage 2 below restores
+            # from verify_snapshot instead, which carries no separate
+            # Source list (verified Facts already denormalize source_id/
+            # source_url/source_tier onto themselves).
+            if collect_snapshot is not None:
+                bus.add_sources(collect_snapshot.sources)
             ctx.notes.append(
                 f"resumed with {len(resume_plan.restored_facts)} previously-collected fact(s)"
             )
@@ -653,13 +693,33 @@ class Pipeline:
             # Phase 4.3C correction 2: persisted here, before Evidence
             # Integrity runs, so a crash between collection and verify
             # leaves genuinely pre-Integrity facts recoverable on --resume.
-            # Previously nothing was written to `facts` until inside the
-            # Integrity pass itself (evidence_integrity_pass.py), so
-            # "collect done, verify not yet done" was not a state --resume
-            # could actually distinguish -- see orchestrator/resume.py.
             for fact in pre_integrity_facts:
                 with contextlib.suppress(Exception):
                     self.repo.save_fact(fact)
+            # Phase 4.3C correction 5: the run-scoped snapshot resume
+            # actually depends on -- see ResumePlan's own docstring in
+            # orchestrator/resume.py for why the `facts` table rows just
+            # written above (individually, for other purposes -- post-hoc
+            # inspection, existing `latest_facts`-based tooling) are NOT
+            # what a resumed run reads back.
+            self.repo.save_collect_snapshot(
+                ctx.run_id,
+                pre_integrity_facts,
+                list(bus.sources),
+                [
+                    {
+                        "collector": c.collector,
+                        "outcome": str(c.outcome),
+                        "provenance": str(c.provenance),
+                        "errors": list(c.errors),
+                        "attempted_urls": list(c.attempted_urls),
+                        "notes": list(c.notes),
+                        "zero_results": c.zero_results,
+                        "raw_fact_count_before_dedup": c.raw_fact_count_before_dedup,
+                    }
+                    for c in collection_results
+                ],
+            )
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
 
@@ -670,14 +730,28 @@ class Pipeline:
         # run_full_evidence_integrity_pass, which (correction 1) always
         # executes the agent for real whenever it is actually called.
         # Resuming after "collect" but before "verify" restores genuinely
-        # pre-Integrity facts (persisted just above) and this pass IS
-        # called on them; resuming after "verify" already completed
-        # restores already-verified facts (persisted by that earlier
-        # call's own Repository.save_fact, inside the pass) and this pass
-        # is NOT called again -- zero further EvidenceIntegrityAgent
-        # executions for those facts in this invocation.
+        # pre-Integrity facts (Phase 4.3C correction 5: from the collect
+        # snapshot, never a MIN(version) query) and this pass IS called on
+        # them; resuming after "verify" already completed restores
+        # already-verified facts (from the verify snapshot, never a
+        # MAX(version) query) and this pass is NOT called again -- zero
+        # further EvidenceIntegrityAgent executions for those facts in this
+        # invocation.
         skip_verify = resume_plan is not None and not resume_plan.should_run("verify")
-        if skip_verify:
+        if snapshot_unavailable:
+            # Phase 4.3C correction 5: fail closed. A snapshot this resume
+            # NEEDED could not be obtained (see the resume-plan-building
+            # block above and result.resume_snapshot_failures) -- there is
+            # nothing trustworthy to re-evaluate or to reuse, so this never
+            # falls back to an empty-but-otherwise-normal pass, and never
+            # silently re-collects behind --resume's own back. verified_
+            # facts stays empty; ctx.status/blocking_reasons/Action=None
+            # are handled once, uniformly, near Blind Judge below (the
+            # same place Literature's own incompleteness is handled) from
+            # result.resume_snapshot_failures.
+            verified_facts: list[Fact] = []
+            bus.facts = verified_facts
+        elif skip_verify:
             assert resume_plan is not None  # narrows for mypy; skip_verify implies this
             verified_facts = list(resume_plan.restored_facts)
             bus.facts = verified_facts
@@ -693,19 +767,11 @@ class Pipeline:
         else:
             if skip_collect:
                 assert resume_plan is not None  # narrows for mypy; skip_collect implies this
-                # Phase 4.3C correction 4: feed the PRISTINE (pre-Integrity)
-                # version of each restored fact -- never whatever
-                # partially- or fully-Integrity-processed version happened
-                # to be latest when an earlier attempt crashed mid-pass
-                # (see resume_plan.pristine_facts's own docstring). A
-                # fact_id with no recoverable pristine snapshot (already
-                # reported above, at resume-plan-build time) falls back to
-                # its own restored (latest) version instead of being
-                # dropped.
-                pristine_by_id = {f.fact_id: f for f in resume_plan.pristine_facts}
-                pre_integrity_facts = [
-                    pristine_by_id.get(f.fact_id, f) for f in resume_plan.restored_facts
-                ]
+                # Phase 4.3C correction 5: resume_plan.restored_facts IS
+                # already the collect snapshot's own pristine facts here
+                # (see the resume-plan-building block above) -- no separate
+                # pristine/latest distinction or per-fact fallback remains.
+                pre_integrity_facts = list(resume_plan.restored_facts)
             # The "full Evidence Integrity pass" -- EvidenceIntegrityAgent
             # execution, verified_facts determination, Source persistence/
             # quarantine, quarantine-cascade fact exclusion, and the Phase
@@ -740,8 +806,24 @@ class Pipeline:
                 ctx.status = RunStatus.INCOMPLETE_RESEARCH
             result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
             result.agent_records.append(pass_output.agent_run_record)
+            # Phase 4.3C correction 5: the run-scoped snapshot a LATER
+            # resume of THIS run_id (past this point) would need.
+            self.repo.save_verify_snapshot(
+                ctx.run_id, verified_facts, pass_output.quarantined_sources,
+                result.direct_acquisition_info,
+            )
 
-        checkpoint("verify", {"verified": len(verified_facts)})
+        if not snapshot_unavailable:
+            # Phase 4.3C correction 5: never checkpointed "verify" OK on
+            # the fail-closed path -- a snapshot this resume needed was
+            # missing/corrupted, so verify genuinely did NOT happen this
+            # invocation. Leaving "verify" un-checkpointed (still just
+            # "collect") means a LATER --resume of this SAME run_id is
+            # correctly judged to still need the collect snapshot (if that
+            # one is intact, this is a real recovery path) rather than
+            # perpetually re-discovering a missing VERIFY snapshot it can
+            # never produce on its own.
+            checkpoint("verify", {"verified": len(verified_facts)})
 
         # ---- Stage 2b: primary-source escalation (requirement P4) --------
         # Stage-aware budgeting (requirement: discovery must not starve later
@@ -1231,6 +1313,16 @@ class Pipeline:
             for reason in literature_blocking_reasons:
                 if reason not in result.failures:  # never register the same reason twice
                     result.failures.append(reason)
+
+        # Phase 4.3C correction 5: an unavailable resume snapshot withholds
+        # the Action the same way an incomplete Literature acquisition does
+        # -- same pattern, same placement (before verdict.research_status/
+        # run_status are computed from ctx.status below), own dedicated
+        # result field so this never depends on parsing result.failures'
+        # free text to find it again.
+        blocking_reasons.extend(result.resume_snapshot_failures)
+        if result.resume_snapshot_failures:
+            ctx.status = RunStatus.INCOMPLETE_RESEARCH
 
         if verdict is not None:
             if blocking_reasons:

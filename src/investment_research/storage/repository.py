@@ -12,6 +12,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,13 +44,17 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
     return tuple(value.split(",")) if value else ()
 
 
-def _fact_from_row(row: sqlite3.Row) -> Fact:
+def _fact_from_row(row: sqlite3.Row | dict) -> Fact:
     """Reconstructs a Fact from a raw `facts` row, every column
-    ``Fact.to_row()`` writes (Phase 4.3C correction 3/4) -- shared by
-    :meth:`Repository.facts_for_resume` and
-    :meth:`Repository.pristine_facts_for_resume`, which differ only in
-    WHICH version of each fact_id they select, never in how a selected row
-    is turned back into a ``Fact``."""
+    ``Fact.to_row()`` writes (Phase 4.3C correction 3/4) -- used by
+    :meth:`Repository.facts_for_resume` and, since ``Fact.to_row()``'s own
+    key/value shape survives a JSON round-trip unchanged (enums and ints
+    are already stringified/int-ified by ``to_row()`` itself, and a plain
+    ``dict`` supports the same ``row["key"]`` access a ``sqlite3.Row``
+    does), also by :meth:`Repository.collect_snapshot_for_resume` and
+    :meth:`Repository.verify_snapshot_for_resume` (Phase 4.3C correction
+    5) to reconstruct a Fact from its own JSON snapshot payload -- one
+    reconstruction implementation, two sources of the same row shape."""
     return Fact(
         fact_id=row["fact_id"],
         ticker=row["ticker"],
@@ -84,6 +89,120 @@ def _fact_from_row(row: sqlite3.Row) -> Fact:
         document_id=row["document_id"],
         source_authority=DocumentAuthority(row["source_authority"]),
     )
+
+
+def _source_to_snapshot_dict(source: Source) -> dict:
+    """Every ``Source`` field, losslessly -- deliberately NOT
+    ``Source.to_row()``, which (confirmed by reading it directly) omits
+    ``content_kind`` entirely; the ``sources`` table has no column for it
+    either, so ``to_row()``/the ``sources`` table cannot round-trip a
+    Source losslessly even in isolation. A resume snapshot must not
+    inherit that gap, so this is a separate, complete serialization used
+    only for :meth:`Repository.save_collect_snapshot`. Excerpt is kept in
+    full (``to_row()`` truncates to 2000 chars for the regular ``sources``
+    table row-size convention; a lossless snapshot does not truncate)."""
+    return {
+        "source_id": source.source_id,
+        "url": source.url,
+        "title": source.title,
+        "tier": str(source.tier),
+        "publisher": source.publisher,
+        "published_date": source.published_date,
+        "event_date": source.event_date,
+        "effective_date": source.effective_date,
+        "filing_date": source.filing_date,
+        "accession": source.accession,
+        "retrieved_at": source.retrieved_at,
+        "provenance": str(source.provenance),
+        "content_hash": source.content_hash,
+        "syndicated_from": source.syndicated_from,
+        "excerpt": source.excerpt,
+        "content_kind": str(source.content_kind),
+    }
+
+
+def _source_from_snapshot_dict(d: dict) -> Source:
+    return Source(
+        source_id=d["source_id"],
+        url=d["url"],
+        title=d["title"],
+        tier=SourceTier(d["tier"]),
+        publisher=d["publisher"],
+        published_date=d["published_date"],
+        event_date=d["event_date"],
+        effective_date=d["effective_date"],
+        filing_date=d["filing_date"],
+        accession=d["accession"],
+        retrieved_at=d["retrieved_at"],
+        provenance=Provenance(d["provenance"]),
+        content_hash=d["content_hash"],
+        syndicated_from=d["syndicated_from"],
+        excerpt=d["excerpt"],
+        content_kind=ContentKind(d["content_kind"]),
+    )
+
+
+def _quarantined_source_to_dict(q: QuarantinedSource) -> dict:
+    return {"source_id": q.source_id, "url": q.url, "field": q.field, "value": q.value, "error": q.error}
+
+
+def _quarantined_source_from_dict(d: dict) -> QuarantinedSource:
+    return QuarantinedSource(
+        source_id=d["source_id"], url=d["url"], field=d["field"], value=d["value"], error=d["error"],
+    )
+
+
+class ResumeSnapshotCorrupted(Exception):
+    """Phase 4.3C correction 5: raised by
+    :meth:`Repository.collect_snapshot_for_resume`/
+    :meth:`Repository.verify_snapshot_for_resume` when a snapshot row
+    exists but cannot be parsed back losslessly. Deliberately never
+    swallowed into ``None`` (which would read as "no snapshot was ever
+    saved", a materially different, less alarming condition) or into an
+    empty result (which would silently discard whatever the snapshot
+    actually held) -- ``Pipeline.run()`` catches this specifically and
+    fails closed."""
+
+
+@dataclass
+class CollectSnapshot:
+    """A run-scoped, lossless snapshot of Stage 1's own output: the
+    pre-Integrity ``Fact``s :meth:`Repository.save_collect_snapshot` was
+    given, every ``Source`` they reference, and per-collector metadata
+    (never the raw per-collector ``RawFact``/``Source`` breakdown, which
+    Stage 1 has already reduced into the two lists above by the time this
+    is saved)."""
+
+    facts: list[Fact] = field(default_factory=list)
+    sources: list[Source] = field(default_factory=list)
+    #: One dict per original CollectionResult: collector, outcome,
+    #: provenance, errors, attempted_urls, notes, zero_results,
+    #: raw_fact_count_before_dedup -- the "failure/degraded/zero-results
+    #: semantics" Phase 4.3C correction 5 requires preserved losslessly.
+    collectors: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class VerifySnapshot:
+    """A run-scoped, lossless snapshot of Stage 2's own output: the
+    post-Integrity verified ``Fact``s, the ``QuarantinedSource``s Source
+    validation rejected, and the (possibly Literature-consistency-
+    corrected) ``direct_acquisition_info`` mapping."""
+
+    verified_facts: list[Fact] = field(default_factory=list)
+    quarantined_sources: list[QuarantinedSource] = field(default_factory=list)
+    direct_acquisition_info: dict[str, Any] = field(default_factory=dict)
+
+
+_COLLECT_SNAPSHOT_STAGE = "_collect_snapshot"
+_VERIFY_SNAPSHOT_STAGE = "_verify_snapshot"
+#: Sentinel stage_index for the two synthetic stages above: never a real
+#: value from orchestrator.resume.STAGES (which only ever indexes
+#: non-negative), and orchestrator.resume.stage_index()/resume_point()
+#: only ever look at stages that are IN STAGES -- these two names never
+#: are, by construction, so this value is never read as meaningful, only
+#: stored to satisfy run_checkpoints.stage_index's NOT NULL constraint.
+_SNAPSHOT_STAGE_INDEX = -1
 
 _CONTENT_FIELDS = (
     "claim",
@@ -567,60 +686,134 @@ class Repository:
         ).fetchall()
         return [_fact_from_row(row) for row in rows]
 
-    def pristine_facts_for_resume(self, run_id: str) -> list:
-        """Rehydrate the EARLIEST version this run_id itself persisted for
-        each fact_id -- Phase 4.3C correction 4's answer to "what did
-        Stage 1 (collect) actually produce, before Evidence Integrity ever
-        touched it, for facts THIS run collected".
+    # -- run-scoped resume snapshots (Phase 4.3C correction 5) -------------
+    #
+    # Replaces Phase 4.3C correction 4's MIN(version)/MAX(version) queries
+    # against the shared `facts` table entirely. Both were proven, by
+    # direct empirical reproduction (this correction's own completion
+    # report), to silently return NOTHING for a run_id whose Stage-1 (or
+    # verified) content happened to be byte-identical to what an earlier,
+    # different run_id had already saved -- `Repository.save_fact` looks
+    # up the latest row for a fact_id GLOBALLY, never scoped by run_id,
+    # and a content-identical write is a no-op that writes no new row at
+    # all. `run_checkpoints`, by contrast, has `run_id` IN its own PRIMARY
+    # KEY (run_id, stage) -- genuinely, structurally immune to this
+    # collision -- so a full, lossless snapshot is stored there instead,
+    # via a dedicated stage name outside orchestrator.resume.STAGES (never
+    # interfering with the ordinary stage-index resume-point calculation)
+    # and its own JSON serialization (never
+    # orchestrator.resume.serialize_payload's 100_000-character
+    # truncation, which is safe for the small bookkeeping dicts every
+    # OTHER checkpoint stores but would silently corrupt a real fact/
+    # source snapshot). `sources` cannot be the snapshot's own source of
+    # truth either: confirmed by reading storage/schema.sql directly, that
+    # table has no run_id column AT ALL, and `save_source` is an
+    # unconditional `INSERT OR REPLACE` keyed only by source_id -- no
+    # versioning, no history, so a later run (or the SAME run re-collecting
+    # on --resume) silently overwrites an earlier one's row with no way to
+    # tell whose content is currently there.
+    def save_collect_snapshot(
+        self,
+        run_id: str,
+        facts: Sequence[Fact],
+        sources: Sequence[Source],
+        collectors: Sequence[dict],
+    ) -> None:
+        """Persists Stage 1's own pristine (pre-Integrity) output, in
+        full, keyed only by this run_id. Called once, right after Stage 1
+        computes its own facts/sources -- never merged with, or replaced
+        by, ANY other run_id's data."""
+        payload = {
+            "facts": [f.to_row() for f in facts],
+            "sources": [_source_to_snapshot_dict(s) for s in sources],
+            "collectors": list(collectors),
+        }
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                run_id, _COLLECT_SNAPSHOT_STAGE, _SNAPSHOT_STAGE_INDEX, "OK",
+                json.dumps(payload, default=str), len(facts), _now(),
+            ),
+        )
+        self.conn.commit()
 
-        Why MIN(version), and why it is safe for the case this exists for:
-        ``Pipeline.run()``'s Stage 1 persists every ``pre_integrity_facts``
-        entry via ``Repository.save_fact`` BEFORE Evidence Integrity runs
-        at all (Phase 4.3C correction 2), and a freshly created ``Fact``'s
-        own ``run_id`` field is stamped with the CURRENT run's run_id by
-        ``FactCollectorAgent._to_fact`` regardless of what (if anything)
-        already exists in the database. So for a fact_id this run_id
-        genuinely collects for the first time, its own Stage-1 save is
-        version 1 -- and if that SAME run's own Evidence Integrity pass
-        later changes it, the resulting new version is saved from a Fact
-        object that (via ``dataclasses.replace``, which never touches
-        ``run_id``) still carries the SAME run_id, so both versions share
-        one run_id and MIN correctly picks the earlier, pristine one.
+    def collect_snapshot_for_resume(self, run_id: str) -> CollectSnapshot | None:
+        """``None`` when no collect snapshot was ever saved for this
+        run_id (a run predating Phase 4.3C correction 5, or one that never
+        reached Stage 1's own persist step at all) -- never a guess.
+        Raises :class:`ResumeSnapshotCorrupted` when a row exists but
+        cannot be parsed back losslessly; never silently returns an empty
+        or partial snapshot."""
+        row = self.conn.execute(
+            "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+            (run_id, _COLLECT_SNAPSHOT_STAGE),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+            facts = [_fact_from_row(r) for r in payload["facts"]]
+            sources = [_source_from_snapshot_dict(r) for r in payload["sources"]]
+            collectors = list(payload["collectors"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ResumeSnapshotCorrupted(
+                f"collect snapshot for run_id={run_id!r} is corrupted: {exc}"
+            ) from exc
+        return CollectSnapshot(facts=facts, sources=sources, collectors=collectors)
 
-        Where this is NOT reliable, by construction, given the existing
-        schema (no schema change is possible here: the ``facts`` table has
-        no column marking "which pipeline stage wrote this version", only
-        ``version`` and ``run_id`` -- confirmed by reading
-        ``storage/schema.sql`` directly):
+    def save_verify_snapshot(
+        self,
+        run_id: str,
+        verified_facts: Sequence[Fact],
+        quarantined_sources: Sequence[QuarantinedSource],
+        direct_acquisition_info: dict[str, Any],
+    ) -> None:
+        """Persists Stage 2's own verified output, in full, keyed only by
+        this run_id. Called once, right after the full Evidence Integrity
+        pass computes its own verified_facts/quarantined_sources -- never
+        merged with, or replaced by, ANY other run_id's data."""
+        payload = {
+            "verified_facts": [f.to_row() for f in verified_facts],
+            "quarantined_sources": [_quarantined_source_to_dict(q) for q in quarantined_sources],
+            "direct_acquisition_info": dict(direct_acquisition_info),
+        }
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                run_id, _VERIFY_SNAPSHOT_STAGE, _SNAPSHOT_STAGE_INDEX, "OK",
+                json.dumps(payload, default=str), len(verified_facts), _now(),
+            ),
+        )
+        self.conn.commit()
 
-        * A fact whose content is BYTE-IDENTICAL to one an EARLIER,
-          different run_id already saved: ``Repository.save_fact``'s own
-          duplicate-detection (unchanged content is a no-op) means THIS
-          run's Stage-1 attempt writes no new row at all, so nothing here
-          carries this run_id for that fact_id -- it is silently absent
-          from this method's result, not wrongly included at some other
-          run's version.
-        * A run created before Phase 4.3C correction 2 (which is what
-          first made Stage 1 persist pre-Integrity facts at all, before
-          Evidence Integrity ran): no version tagged with that run_id
-          exists yet at the point of interruption either, so this method
-          returns nothing for it -- again absence, not a wrong guess.
-
-        Both cases mean incomplete (never wrong) coverage: some fact_ids
-        that a genuinely fresh collection produced may be missing from
-        this method's result. The caller (``Pipeline.run()``) is
-        responsible for detecting a coverage shortfall against
-        ``facts_for_resume``'s own fact_id set and reporting it -- this
-        method does not guess a value for what it cannot find.
-        """
-        rows = self.conn.execute(
-            """SELECT f.* FROM facts f
-               JOIN (SELECT fact_id, MIN(version) AS v FROM facts WHERE run_id = ?
-                     GROUP BY fact_id) m
-               ON f.fact_id = m.fact_id AND f.version = m.v""",
-            (run_id,),
-        ).fetchall()
-        return [_fact_from_row(row) for row in rows]
+    def verify_snapshot_for_resume(self, run_id: str) -> VerifySnapshot | None:
+        """``None`` when no verify snapshot was ever saved for this
+        run_id -- never a guess. Raises :class:`ResumeSnapshotCorrupted`
+        when a row exists but cannot be parsed back losslessly."""
+        row = self.conn.execute(
+            "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+            (run_id, _VERIFY_SNAPSHOT_STAGE),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+            verified_facts = [_fact_from_row(r) for r in payload["verified_facts"]]
+            quarantined = [_quarantined_source_from_dict(r) for r in payload["quarantined_sources"]]
+            direct_acquisition_info = dict(payload["direct_acquisition_info"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ResumeSnapshotCorrupted(
+                f"verify snapshot for run_id={run_id!r} is corrupted: {exc}"
+            ) from exc
+        return VerifySnapshot(
+            verified_facts=verified_facts,
+            quarantined_sources=quarantined,
+            direct_acquisition_info=direct_acquisition_info,
+        )
 
     def save_research_coverage(self, run_id: str, ticker: str, coverage) -> int:
         n = 0

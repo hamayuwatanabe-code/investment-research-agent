@@ -78,35 +78,57 @@ class Checkpoint:
 
 @dataclass
 class ResumePlan:
-    """What a resumed run should do."""
+    """What a resumed run should do.
+
+    Phase 4.3C correction 5: ``restored_facts`` is now ALWAYS
+    snapshot-sourced -- never a ``facts``/``sources`` table query. Reading
+    ``storage/repository.py``'s ``save_fact`` directly (never by
+    assumption) found that BOTH the ``MAX(version)`` query
+    (``Repository.facts_for_resume``) and the correction-4-introduced
+    ``MIN(version)`` one (``Repository.pristine_facts_for_resume``, now
+    removed) share one fatal defect: ``save_fact`` looks up the latest row
+    for a ``fact_id`` GLOBALLY, never scoped by ``run_id``, and treats
+    byte-identical content as a no-op that writes nothing. Empirically
+    reproduced (see this correction's own completion report): two runs
+    that happen to collect byte-identical Stage-1 content -- an entirely
+    realistic case, e.g. re-researching a company whose filings have not
+    changed since the last run -- leave the SECOND run_id with ZERO rows
+    of its own for that fact_id, so a query scoped to that run_id (MIN or
+    MAX alike) silently returns nothing, even though checkpoints correctly
+    show the stage complete. The prior fallback (silently using the OTHER
+    run's version, or an empty set) is exactly the ambiguity this
+    correction removes.
+
+    ``restored_facts`` is therefore filled ONLY from an explicit,
+    run_id-scoped snapshot (``Repository.collect_snapshot_for_resume`` or
+    ``Repository.verify_snapshot_for_resume``, chosen by ``Pipeline.run()``
+    from which stage needs resuming) that the caller already fetched
+    before calling ``build_plan`` -- never queried by this module itself.
+    When no such snapshot could be obtained, the caller passes
+    ``snapshot_missing_reason`` instead of facts, and ``restored_facts``
+    stays empty: this is NEVER interpreted as "nothing to restore" (which
+    would look identical to a genuinely empty collection) by
+    ``Pipeline.run()``, which checks ``snapshot_unavailable_reason``
+    explicitly and fails closed.
+    """
 
     run_id: str
     resume_from_stage: str
     resume_from_index: int
     restored_facts: list[Fact] = field(default_factory=list)
-    #: Phase 4.3C correction 4: the PRISTINE, pre-Integrity version of
-    #: each fact in ``restored_facts`` that this run_id's own Stage 1
-    #: (collect) actually produced -- for use instead of
-    #: ``restored_facts`` whenever ``should_run("verify")`` is True (see
-    #: ``Pipeline.run()``'s own Stage 2), so a resumed re-run of Evidence
-    #: Integrity always evaluates the ORIGINAL collect-time content, never
-    #: a partially- or fully-Integrity-processed version an interrupted
-    #: pass happened to leave behind. Populated only for the fact_ids
-    #: ``Repository.pristine_facts_for_resume`` could actually find (see
-    #: that method's own docstring for the two schema-inherent reasons it
-    #: cannot always); ``pristine_missing_fact_ids`` names the rest, and
-    #: is never silently empty-filled by this dataclass or ``build_plan``.
-    pristine_facts: list[Fact] = field(default_factory=list)
-    #: fact_ids present in (fresh, non-stale) ``restored_facts`` for which
-    #: no pristine version could be found. ``Pipeline.run()`` is
-    #: responsible for reporting this explicitly and falling back, per
-    #: fact, to that fact's own ``restored_facts`` (latest) version
-    #: instead -- this dataclass only records which fact_ids need that
-    #: fallback, it does not perform it.
-    pristine_missing_fact_ids: list[str] = field(default_factory=list)
     stale_fact_ids: list[str] = field(default_factory=list)
     completed_stages: list[str] = field(default_factory=list)
     reason: str = ""
+    #: Set (to a human-readable reason) when a snapshot was NEEDED for
+    #: this resume point but could not be obtained -- missing entirely, or
+    #: present but corrupted. ``restored_facts`` is empty whenever this is
+    #: set, and that emptiness must never be read as "genuinely collected
+    #: zero facts": the caller is responsible for treating this as a
+    #: fail-closed condition (status=INCOMPLETE_RESEARCH, Action=None, a
+    #: specific blocking reason -- never a silent, successful-looking
+    #: resume). ``None`` whenever no snapshot was needed (a fresh start)
+    #: or the needed one was found intact.
+    snapshot_unavailable_reason: str | None = None
 
     @property
     def is_fresh_start(self) -> bool:
@@ -121,6 +143,22 @@ class ResumePlan:
 
 def stage_index(stage: str) -> int:
     return STAGES.index(stage)
+
+
+def resume_point(checkpoints: Sequence[Checkpoint]) -> int:
+    """The stage index a resume would restart from, judged purely from
+    which stages are checkpointed OK -- no fact/snapshot lookup involved.
+    ``Pipeline.run()`` calls this BEFORE ``build_plan`` to know which
+    snapshot (if any) it needs to fetch: 0 means a fresh start (no
+    snapshot needed at all), 1 means "collect done, verify not done" (the
+    collect/pristine snapshot is needed), 2+ means "verify done" (the
+    verify/verified snapshot is needed). ``build_plan`` calls this too,
+    so the two never compute the index differently."""
+    completed = [c.stage for c in checkpoints if c.status == "OK"]
+    if not completed:
+        return 0
+    last_index = max(stage_index(stage) for stage in completed if stage in STAGES)
+    return min(last_index + 1, len(STAGES) - 1)
 
 
 def freshness_days(category: FactCategory) -> int:
@@ -149,24 +187,23 @@ def is_stale(fact: Fact, today: date) -> bool:
 def build_plan(
     run_id: str,
     checkpoints: Sequence[Checkpoint],
-    facts: Sequence[Fact],
     *,
-    pristine_facts: Sequence[Fact] = (),
+    snapshot_facts: Sequence[Fact] = (),
+    snapshot_missing_reason: str | None = None,
     today: date | None = None,
 ) -> ResumePlan:
     """Work out where to restart and which facts survive.
 
-    ``facts`` is the LATEST version of each fact_id this run_id has
-    persisted (``Repository.facts_for_resume``'s own contract);
-    ``pristine_facts`` (Phase 4.3C correction 4) is the EARLIEST --
-    ``Repository.pristine_facts_for_resume``'s own contract. Both are
-    filtered by the SAME staleness decision here, since Evidence
-    Integrity never rewrites a fact's dates (confirmed by reading
-    ``agents/evidence_integrity.py``'s own ``_assess`` directly: its
-    ``replace(...)`` call never touches ``event_date``/
-    ``publication_date``/``effective_date``/``filing_date``), so the two
-    versions of the same fact_id are always equally stale or equally
-    fresh.
+    ``snapshot_facts`` (Phase 4.3C correction 5) is whichever run_id-scoped
+    snapshot ``Pipeline.run()`` already fetched for this exact resume
+    point via ``resume_point`` (the collect/pristine snapshot when
+    resuming before "verify", the verify/verified snapshot when resuming
+    after it) -- this module never queries the database itself.
+    ``snapshot_missing_reason``, set instead by the caller when that fetch
+    failed (missing or corrupted), short-circuits straight to a
+    ``ResumePlan`` with ``restored_facts`` empty and
+    ``snapshot_unavailable_reason`` set -- staleness is not even
+    evaluated, since there is nothing trustworthy to evaluate it on.
     """
     today = today or datetime.now(timezone.utc).date()
     completed = [c.stage for c in checkpoints if c.status == "OK"]
@@ -182,16 +219,24 @@ def build_plan(
     last_index = max(stage_index(stage) for stage in completed if stage in STAGES)
     resume_index = min(last_index + 1, len(STAGES) - 1)
 
+    if snapshot_missing_reason is not None:
+        return ResumePlan(
+            run_id=run_id,
+            resume_from_stage=STAGES[resume_index],
+            resume_from_index=resume_index,
+            completed_stages=completed,
+            reason=f"resume snapshot unavailable: {snapshot_missing_reason}",
+            snapshot_unavailable_reason=snapshot_missing_reason,
+        )
+
     fresh: list[Fact] = []
     stale: list[str] = []
-    for fact in facts:
+    for fact in snapshot_facts:
         if is_stale(fact, today):
             stale.append(fact.fact_id)
         else:
             fresh.append(fact)
 
-    pristine_fresh: list[Fact] = []
-    pristine_missing: list[str] = []
     if stale:
         # Anything downstream of collection was computed from a fact set that no
         # longer holds, so re-collect rather than resume onto stale evidence.
@@ -205,21 +250,12 @@ def build_plan(
             f"resuming after {STAGES[last_index]!r}; "
             f"{len(fresh)} fact(s) restored, all within freshness thresholds"
         )
-        pristine_by_id = {f.fact_id: f for f in pristine_facts}
-        for fact in fresh:
-            pristine = pristine_by_id.get(fact.fact_id)
-            if pristine is not None:
-                pristine_fresh.append(pristine)
-            else:
-                pristine_missing.append(fact.fact_id)
 
     return ResumePlan(
         run_id=run_id,
         resume_from_stage=STAGES[resume_index],
         resume_from_index=resume_index,
         restored_facts=fresh,
-        pristine_facts=pristine_fresh,
-        pristine_missing_fact_ids=pristine_missing,
         stale_fact_ids=stale,
         completed_stages=completed,
         reason=reason,

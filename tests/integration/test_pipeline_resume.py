@@ -151,10 +151,16 @@ from investment_research.agents.evidence_integrity import EvidenceIntegrityAgent
 from investment_research.collectors.base import CollectionResult
 from investment_research.collectors.search import NullSearchProvider
 from investment_research.orchestrator.pipeline import Pipeline
-from investment_research.schemas.enums import UNKNOWN, FactCategory, SourceTier, VerifiedStatus
+from investment_research.schemas.enums import (
+    UNKNOWN,
+    FactCategory,
+    RunStatus,
+    SourceTier,
+    VerifiedStatus,
+)
 from investment_research.schemas.fact import Fact, RawFact, Source
 from investment_research.storage.db import open_db
-from investment_research.storage.repository import Repository
+from investment_research.storage.repository import Repository, ResumeSnapshotCorrupted
 
 pytestmark = pytest.mark.integration
 
@@ -283,6 +289,26 @@ def _integrity_agent_run_rows(repo: Repository, run_id: str) -> list:
         "WHERE run_id = ? AND agent_id LIKE 'evidence_integrity%' ORDER BY agent_id",
         (run_id,),
     ).fetchall()
+
+
+def _completed_pipeline_stages(repo: Repository, run_id: str) -> set:
+    """The real orchestrator.resume.STAGES a run_id has OK-checkpointed --
+    excludes Phase 4.3C correction 5's own synthetic snapshot "stages"
+    (``_collect_snapshot``/``_verify_snapshot``), which live in the same
+    run_checkpoints table (by design -- that table's PRIMARY KEY includes
+    run_id, genuinely unlike `facts`/`sources`) but are never real pipeline
+    stages and are deliberately excluded from orchestrator.resume.
+    resume_point's own stage-index computation too."""
+    from investment_research.orchestrator.resume import STAGES
+
+    return {c.stage for c in repo.checkpoints(run_id) if c.status == "OK" and c.stage in STAGES}
+
+
+def _snapshot_stage_names(repo: Repository, run_id: str) -> set:
+    return {
+        c.stage for c in repo.checkpoints(run_id)
+        if c.status == "OK" and c.stage in ("_collect_snapshot", "_verify_snapshot")
+    }
 
 
 def _crash_point_a_before_pass_starts(monkeypatch) -> None:
@@ -585,7 +611,7 @@ def test_resume_before_verify_reruns_integrity_once_on_restored_stage1_facts(rep
     # "collect" alone is checkpointed; Stage-1 facts are already persisted
     # (Correction 2's own change -- previously nothing was written until
     # inside the pass), and they are genuinely pre-Integrity.
-    completed_stages = {c.stage for c in repo.checkpoints(run_id) if c.status == "OK"}
+    completed_stages = _completed_pipeline_stages(repo, run_id)
     assert completed_stages == {"collect"}
     pre_crash_facts = repo.facts_for_resume(run_id)
     assert len(pre_crash_facts) == 2
@@ -626,7 +652,7 @@ def test_resume_after_verify_complete_does_not_rerun_integrity(repo, monkeypatch
         with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
 
-    completed_stages = {c.stage for c in repo.checkpoints(run_id) if c.status == "OK"}
+    completed_stages = _completed_pipeline_stages(repo, run_id)
     assert completed_stages == {"collect", "verify"}
     verified_before_resume = repo.facts_for_resume(run_id)
     assert len(verified_before_resume) == 2
@@ -793,51 +819,70 @@ def test_two_persisted_versions_exist_with_the_expected_meaning_after_resume(rep
     assert v2["superseded_by"] is None  # the current/latest row
 
 
-def test_pristine_and_latest_resume_queries_are_separate_contracts(repo, monkeypatch):
-    """Phase 4.3C correction 4: Repository.pristine_facts_for_resume
-    (EARLIEST version this run_id persisted) and Repository.
-    facts_for_resume (LATEST) are two DELIBERATELY separate methods, not
-    one method with a mode flag -- the existing `facts` table schema has
-    no column marking which pipeline stage wrote a given version, only
-    `version` and `run_id` (confirmed by reading storage/schema.sql
-    directly), so the only reliable signal is MIN vs MAX version among the
-    rows this run_id itself wrote. This test proves the two queries
-    genuinely diverge once Evidence Integrity has touched a fact, using
-    crash point C's own mixed-version state (one fact already at its
-    post-Integrity v2, the other still at its pristine v1)."""
+def test_collect_and_verify_snapshots_are_separate_contracts(repo, monkeypatch):
+    """Phase 4.3C correction 5: Repository.collect_snapshot_for_resume
+    (Stage 1's own pristine output) and Repository.verify_snapshot_for_
+    resume (Stage 2's own verified output) are two run-scoped snapshots in
+    run_checkpoints, not a MIN/MAX(version) query against the shared
+    `facts` table (removed -- both were proven vulnerable to cross-run
+    content collision). This proves the two snapshots genuinely diverge
+    once Evidence Integrity has touched a fact, and that BOTH are
+    immediately correct even mid-crash (crash point C: one fact already
+    fully verified and re-saved to the facts table, the other still only
+    at its Stage-1 baseline there -- the COLLECT SNAPSHOT itself is
+    unaffected by any of that, since it was written once, atomically, at
+    the end of Stage 1, before Evidence Integrity ever started)."""
     pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
-    run_id = "resume-f-pristine-contract"
+    run_id = "resume-f-snapshot-contract"
     with monkeypatch.context() as m:
         _crash_point_c_after_partial_fact_save(m, after_n=1)
         with pytest.raises(_SimulatedCrash, match="crash point C"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
 
-    pristine = {f.fact_id: f for f in repo.pristine_facts_for_resume(run_id)}
-    latest = {f.fact_id: f for f in repo.facts_for_resume(run_id)}
-    assert set(pristine) == set(latest)
+    collect_snapshot = repo.collect_snapshot_for_resume(run_id)
+    assert collect_snapshot is not None
+    assert repo.verify_snapshot_for_resume(run_id) is None  # verify never completed
+
+    pristine = {f.fact_id: f for f in collect_snapshot.facts}
     assert len(pristine) == 2
-    # Every pristine entry is genuinely pre-Integrity...
     assert all(f.verified_status == VerifiedStatus.NOT_VERIFIED for f in pristine.values())
-    assert all(f.evidence_class.value in ("COMPANY_CLAIM", "UNVERIFIED_CLAIM")
-               for f in pristine.values())
-    assert all(int(f.version) == 1 for f in pristine.values())
-    # ...while latest genuinely reflects the mix left by the partial crash:
-    # at least one fact already advanced past pristine.
-    assert any(int(f.version) > 1 for f in latest.values())
+    assert all(
+        f.evidence_class.value in ("COMPANY_CLAIM", "UNVERIFIED_CLAIM")
+        for f in pristine.values()
+    )
+    assert {s.source_id for s in collect_snapshot.sources} == {"src_company", "src_indep"}
+    assert len(collect_snapshot.collectors) == 1
+    assert collect_snapshot.collectors[0]["collector"] == "resume_test_collector"
+
+    # The `facts` table itself, meanwhile, genuinely reflects the mix left
+    # by the partial crash -- proving the collect snapshot is NOT simply
+    # reading that table back (it is immune to it).
+    facts_table_latest = {f.fact_id: f for f in repo.facts_for_resume(run_id)}
+    assert any(int(f.version) > 1 for f in facts_table_latest.values())
+
+    # Complete the resume; a verify snapshot now exists too, and it
+    # diverges from the collect snapshot exactly where Integrity changed
+    # something.
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+    verify_snapshot = repo.verify_snapshot_for_resume(run_id)
+    assert verify_snapshot is not None
+    verified = {f.fact_id: f for f in verify_snapshot.verified_facts}
     assert any(
-        latest[fid].verified_status != pristine[fid].verified_status for fid in pristine
+        verified[fid].verified_status != pristine[fid].verified_status for fid in pristine
     )
 
 
-def test_pristine_facts_for_resume_returns_nothing_for_a_run_with_no_collect_checkpoint():
-    """Phase 4.3C correction 4's own requirement: for a run_id that never
+def test_collect_snapshot_for_resume_returns_none_for_a_run_with_no_snapshot():
+    """Phase 4.3C correction 5's own requirement: for a run_id that never
     reached Stage 1's persist step at all (e.g. an old-format run from
-    before Phase 4.3C correction 2 first made Stage 1 persist pre-
-    Integrity facts, or simply a run_id nothing was ever collected for),
-    pristine_facts_for_resume must return an EMPTY list -- never guess,
-    never fall back to some other version. Absence, not a wrong answer."""
+    before this correction first introduced snapshots, or simply a run_id
+    nothing was ever collected for), both snapshot methods must return
+    ``None`` -- never guess, never fall back to some other run's or some
+    other version's content. Absence, not a wrong answer."""
     repo = _new_repo()
-    assert repo.pristine_facts_for_resume("never-existed") == []
+    assert repo.collect_snapshot_for_resume("never-existed") is None
+    assert repo.verify_snapshot_for_resume("never-existed") is None
 
 
 def test_production_never_queries_the_db_facts_table_mid_run():
@@ -946,7 +991,7 @@ def test_crash_point_a_collect_checkpoint_only_resumes_to_full_equivalence(monke
         _crash_point_a_before_pass_starts(m)
         with pytest.raises(RuntimeError, match="crash point A"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
-    completed = {c.stage for c in repo.checkpoints(run_id) if c.status == "OK"}
+    completed = _completed_pipeline_stages(repo, run_id)
     assert completed == {"collect"}
     assert _integrity_agent_run_rows(repo, run_id) == []  # no record at all yet
 
@@ -967,7 +1012,7 @@ def test_crash_point_b_after_source_save_resumes_to_full_equivalence(monkeypatch
         _crash_point_b_after_source_save(m)
         with pytest.raises(RuntimeError, match="crash point B"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
-    completed = {c.stage for c in repo.checkpoints(run_id) if c.status == "OK"}
+    completed = _completed_pipeline_stages(repo, run_id)
     assert completed == {"collect"}
     # Sources ARE already persisted for real at this crash point.
     assert repo.conn.execute("SELECT COUNT(*) c FROM sources").fetchone()["c"] == 2
@@ -994,7 +1039,7 @@ def test_crash_point_c_after_partial_fact_save_resumes_to_full_equivalence(monke
         _crash_point_c_after_partial_fact_save(m, after_n=1)
         with pytest.raises(_SimulatedCrash, match="crash point C"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
-    completed = {c.stage for c in repo.checkpoints(run_id) if c.status == "OK"}
+    completed = _completed_pipeline_stages(repo, run_id)
     assert completed == {"collect"}
     # A genuine mix: one fact already has its post-Integrity version
     # persisted, the DB otherwise still holds only the Stage-1 baseline.
@@ -1098,3 +1143,185 @@ def test_partial_agent_run_record_is_replaced_not_duplicated_on_resume(monkeypat
     assert final_rows[0]["status"] == control_record["status"]
     assert final_rows[0]["fact_count"] == control_record["fact_count"]
     assert len(resumed.bus.facts) == len(full.bus.facts)
+
+
+# =============================================================================
+# J. Cross-run content-collision immunity (Phase 4.3C correction 5)
+# =============================================================================
+def test_byte_identical_content_across_two_run_ids_stays_fully_isolated(monkeypatch):
+    """Phase 4.3C correction 5's own empirical reproduction, now proving
+    the fix: two DIFFERENT run_ids that happen to collect byte-identical
+    Stage-1 content (a realistic case -- re-researching a company whose
+    filings have not changed since the last run) must not collide. Before
+    this correction, Repository.save_fact's global (never run_id-scoped)
+    duplicate detection meant the SECOND run_id's own Stage-1 save was a
+    no-op that wrote no row at all for that fact_id -- so a MIN- or
+    MAX-version query scoped to that run_id (Correction 4's
+    pristine_facts_for_resume, or facts_for_resume) silently returned
+    NOTHING, even though checkpoints correctly showed the stage complete
+    (empirically reproduced this way; see this correction's own
+    completion report). The collect/verify snapshots this correction
+    introduces are immune BY CONSTRUCTION (run_checkpoints' own PRIMARY
+    KEY includes run_id), which this test proves directly."""
+    repo = _new_repo()
+
+    # run A: crashes right after "collect" -- stays at its pristine v1,
+    # NOT_VERIFIED, in the shared `facts` table.
+    pipeline_a = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    with monkeypatch.context() as m:
+        _crash_point_a_before_pass_starts(m)
+        with pytest.raises(RuntimeError):
+            pipeline_a.run(**_run_kwargs(), run_id="run-A")
+
+    # run B: the SAME byte-identical Stage-1 content, ALSO crashes right
+    # after "collect".
+    pipeline_b = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    with monkeypatch.context() as m:
+        _crash_point_a_before_pass_starts(m)
+        with pytest.raises(RuntimeError):
+            pipeline_b.run(**_run_kwargs(), run_id="run-B")
+
+    # Confirmed collision, in the RAW facts table: only ONE row per
+    # fact_id exists at all, tagged run-A -- run B's own Stage-1 save was
+    # a genuine no-op.
+    rows = repo.conn.execute("SELECT fact_id, run_id FROM facts ORDER BY fact_id").fetchall()
+    assert {r["run_id"] for r in rows} == {"run-A"}
+    # The OLD (now-removed) mechanism would have found nothing for run-B here.
+    assert repo.facts_for_resume("run-B") == []
+
+    # But the collect SNAPSHOT -- run_checkpoints-scoped, not facts-table-
+    # scoped -- is genuinely, separately present for BOTH run_ids.
+    snap_a = repo.collect_snapshot_for_resume("run-A")
+    snap_b = repo.collect_snapshot_for_resume("run-B")
+    assert snap_a is not None
+    assert snap_b is not None
+    assert len(snap_a.facts) == 2
+    assert len(snap_b.facts) == 2
+    assert {f.fact_id for f in snap_a.facts} == {f.fact_id for f in snap_b.facts}
+
+    # And resuming run B genuinely recovers its own 2 facts -- never zero,
+    # never run A's.
+    fresh_pipeline_b = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed_b = fresh_pipeline_b.run(**_run_kwargs(), run_id="run-B", resume=True)
+    assert len(resumed_b.bus.facts) == 2
+    assert resumed_b.resume_plan is not None
+    assert resumed_b.resume_plan.snapshot_unavailable_reason is None
+
+
+# =============================================================================
+# K. Fail-closed snapshot unavailability (Phase 4.3C correction 5)
+# =============================================================================
+def test_missing_collect_snapshot_fails_closed(repo, monkeypatch):
+    """A run_id whose "collect" checkpoint exists but whose collect
+    snapshot does not (e.g. deleted, or a run predating this correction)
+    must fail closed on resume: status=INCOMPLETE_RESEARCH, Action=None,
+    a specific blocking reason -- never a silently "successful" resume
+    with the wrong (or zero) facts passed off as a real result. No
+    additional HTTP/collector call is made either: this branch never
+    re-collects behind --resume's own back."""
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    run_id = "resume-k-missing-collect"
+    with monkeypatch.context() as m:
+        _crash_point_a_before_pass_starts(m)
+        with pytest.raises(RuntimeError):
+            pipeline.run(**_run_kwargs(), run_id=run_id)
+
+    # Simulate the snapshot having been lost (deleted row) while the
+    # "collect" stage checkpoint itself remains -- the scenario this fix
+    # must handle, not just the case where nothing was ever collected.
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = '_collect_snapshot'",
+        (run_id,),
+    )
+    repo.conn.commit()
+    assert repo.collect_snapshot_for_resume(run_id) is None
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is not None
+    assert resumed.context.status == RunStatus.INCOMPLETE_RESEARCH
+    assert resumed.verdict is not None
+    assert resumed.verdict.action is None
+    assert resumed.verdict.blocked is True
+    assert any(
+        "collect snapshot" in reason.lower()
+        for reason in resumed.verdict.blocking_verification_required
+    )
+    assert any("RESUME SNAPSHOT UNAVAILABLE" in f for f in resumed.failures)
+    # Fails closed, not "succeeds with nothing": no facts are fabricated
+    # or borrowed from anywhere else.
+    assert resumed.bus.facts == []
+    # No Evidence Integrity execution either -- there was nothing
+    # trustworthy to feed it.
+    assert _integrity_agent_run_rows(repo, run_id) == []
+    # "verify" is never checkpointed OK on this path -- a later --resume
+    # of this same run_id, once the underlying issue is fixed, is still
+    # correctly judged to need the (still-missing) collect snapshot.
+    assert "verify" not in _completed_pipeline_stages(repo, run_id)
+
+
+def test_corrupted_collect_snapshot_fails_closed(repo, monkeypatch):
+    """A collect snapshot row that exists but cannot be parsed back
+    (corrupted JSON) must ALSO fail closed -- never silently treated as
+    "nothing collected" (a materially different, falsely reassuring
+    condition) and never partially trusted."""
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    run_id = "resume-k-corrupted-collect"
+    with monkeypatch.context() as m:
+        _crash_point_a_before_pass_starts(m)
+        with pytest.raises(RuntimeError):
+            pipeline.run(**_run_kwargs(), run_id=run_id)
+
+    repo.conn.execute(
+        "UPDATE run_checkpoints SET payload = ? WHERE run_id = ? AND stage = '_collect_snapshot'",
+        ("{not valid json", run_id),
+    )
+    repo.conn.commit()
+    with pytest.raises(ResumeSnapshotCorrupted):
+        repo.collect_snapshot_for_resume(run_id)
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is not None
+    assert "corrupted" in resumed.resume_plan.snapshot_unavailable_reason.lower()
+    assert resumed.context.status == RunStatus.INCOMPLETE_RESEARCH
+    assert resumed.verdict is not None
+    assert resumed.verdict.action is None
+    assert resumed.bus.facts == []
+    assert _integrity_agent_run_rows(repo, run_id) == []
+
+
+def test_missing_verify_snapshot_after_verify_complete_fails_closed(monkeypatch):
+    """The same fail-closed guarantee for the OTHER resume point: verify
+    checkpointed complete, but the verify snapshot itself missing."""
+    repo = _new_repo()
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    run_id = "resume-k-missing-verify"
+    with monkeypatch.context() as m:
+        _crash_after_verify_checkpoint(m)
+        with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
+            pipeline.run(**_run_kwargs(), run_id=run_id)
+
+    assert _completed_pipeline_stages(repo, run_id) == {"collect", "verify"}
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = '_verify_snapshot'",
+        (run_id,),
+    )
+    repo.conn.commit()
+    assert repo.verify_snapshot_for_resume(run_id) is None
+
+    calls = _count_agent_runs(monkeypatch)
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert len(calls) == 0  # Evidence Integrity never runs on this path either
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is not None
+    assert resumed.context.status == RunStatus.INCOMPLETE_RESEARCH
+    assert resumed.verdict is not None
+    assert resumed.verdict.action is None
+    assert resumed.bus.facts == []
