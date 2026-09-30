@@ -36,12 +36,17 @@ from __future__ import annotations
 from datetime import date
 
 import investment_research.orchestrator.pipeline as pipeline_module
+from investment_research.agents.base import inputs_hash
 from investment_research.collectors.base import CollectionResult
 from investment_research.collectors.search import NullSearchProvider
 from investment_research.orchestrator.isolation import Channel, IsolationGuard
 from investment_research.orchestrator.pipeline import Pipeline
 from investment_research.schemas.enums import FactCategory, Provenance, SourceTier
 from investment_research.schemas.fact import RawFact, Source, make_source_id
+from investment_research.scoring.program_resolution import (
+    canonical_program_resolution,
+    canonical_program_resolution_fingerprint,
+)
 
 TODAY = date(2026, 9, 6)
 TICKER = "PROGRES"
@@ -294,3 +299,169 @@ def test_resumed_run_computes_the_resolution_once_and_delivers_it(repo, monkeypa
     blind_judge_inputs = by_agent.get("blind_judge", [])
     assert blind_judge_inputs
     assert all(ai.program_resolution is None for ai in blind_judge_inputs)
+
+
+# =============================================================================
+# Phase 4.3D correction 1: ProgramResolution-aware AgentRunRecord fingerprint
+# =============================================================================
+def _agent_run_record(result, agent_id: str):
+    matches = [r for r in result.agent_records if r.agent_id == agent_id]
+    assert matches, f"no AgentRunRecord for {agent_id!r}"
+    return matches[-1]  # the deterministic pass, when both an LLM and a fallback ran
+
+
+# --- D: AgentRunRecord --------------------------------------------------------
+def test_saved_inputs_hash_matches_the_canonical_input_science_and_kill_share(repo, monkeypatch):
+    captured = _capture_projections(monkeypatch)
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    result = pipeline.run(TICKER, NAME, [_collection(_resolvable_facts())], price=2.0)
+
+    by_agent: dict[str, list] = {}
+    for agent_id, agent_input in captured:
+        by_agent.setdefault(agent_id, []).append(agent_input)
+
+    science_input = by_agent["science"][-1]
+    kill_input = by_agent["kill_agent"][-1]
+    assert science_input.program_resolution is not None
+    assert kill_input.program_resolution is not None
+    # Both agents' central resolution is the SAME value (identity, not just
+    # equal content) -- Test B's own guarantee, re-asserted here as the
+    # premise Test D's hash comparison depends on.
+    assert science_input.program_resolution is kill_input.program_resolution
+    assert canonical_program_resolution(science_input.program_resolution) == (
+        canonical_program_resolution(kill_input.program_resolution)
+    )
+
+    science_record = _agent_run_record(result, "science")
+    kill_record = _agent_run_record(result, "kill_agent")
+    # The SAVED inputs_hash equals inputs_hash() recomputed, independently,
+    # from the actual AgentInput IsolationGuard.project() built for that
+    # call -- proving the persisted audit value genuinely reflects the
+    # central resolution, not a stale or partial view of it.
+    assert science_record.inputs_hash == inputs_hash(science_input)
+    assert kill_record.inputs_hash == inputs_hash(kill_input)
+    # Science and Kill see different facts/channels (their own isolation
+    # policies differ), so their overall hashes need not, and generally do
+    # not, match each other -- only the ProgramResolution component they
+    # share is required to be identical, already proven above.
+    assert science_record.inputs_hash != kill_record.inputs_hash
+
+
+# --- E: resume / audit --------------------------------------------------------
+CURRENT_TRIAL_2 = "NCT40000008"
+
+
+def _clinical_resume_kwargs_2() -> dict:
+    """A second, DIFFERENT fixture (different trial id) for cross-run
+    fingerprint-sensitivity comparison."""
+    current_source = _source(f"fixture://ctgov/{CURRENT_TRIAL_2}", "2026-06-01")
+    company_source = _source("fixture://ir/PROGRES2/pr", "2026-06-01")
+    raw_facts = [
+        _raw(f"{CURRENT_TRIAL_2} overall status is RECRUITING", current_source),
+        _raw(
+            f"{NAME} describes {CURRENT_TRIAL_2} as its current lead registrational programme",
+            company_source,
+            company_claim=True,
+        ),
+    ]
+    return {
+        "ticker": TICKER,
+        "company_name": NAME,
+        "collection_results": [_collection(raw_facts)],
+        "price": 2.0,
+    }
+
+
+def test_resumed_run_fingerprint_matches_an_equivalent_fresh_run_never_a_stale_one(
+    repo, monkeypatch
+):
+    """A resumed run's Science AgentRunRecord.inputs_hash must equal a
+    completely fresh (never-crashed) run's over IDENTICAL fixture content --
+    same central resolution, same facts, same fingerprint, regardless of
+    which code path (resume vs. single-shot) produced it. And it must
+    differ from a run over a fixture that resolves to a DIFFERENT trial, so
+    a stale AgentRunRecord (from before content changed) is never mistaken
+    for describing the same effective input as a fresh one."""
+    import investment_research.storage.repository as repository_module
+    from investment_research.storage.db import open_db
+    from investment_research.storage.repository import Repository
+
+    original_save_checkpoint = repository_module.Repository.save_checkpoint
+
+    def _crash_after_verify(self, checkpoint):
+        if checkpoint.stage not in ("collect", "verify"):
+            raise RuntimeError("simulated crash after verify checkpoint")
+        return original_save_checkpoint(self, checkpoint)
+
+    import pytest
+
+    run_id = "central-resolution-resume-fingerprint"
+    with monkeypatch.context() as m:
+        m.setattr(repository_module.Repository, "save_checkpoint", _crash_after_verify)
+        pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+        with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
+            pipeline.run(**_clinical_resume_kwargs(), run_id=run_id)
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_clinical_resume_kwargs(), run_id=run_id, resume=True)
+    resumed_science_hash = _agent_run_record(resumed, "science").inputs_hash
+
+    # A brand-new, never-crashed, never-resumed run over the identical
+    # fixture content, in a separate repository (so nothing about run_id or
+    # database state can be the reason two hashes happen to match).
+    control_repo = Repository(open_db(":memory:"))
+    control_pipeline = Pipeline(control_repo, NullSearchProvider(), today=TODAY)
+    control = control_pipeline.run(
+        **_clinical_resume_kwargs(), run_id="central-resolution-control"
+    )
+    control_science_hash = _agent_run_record(control, "science").inputs_hash
+    assert resumed_science_hash == control_science_hash, (
+        "resume must not change the fingerprint for identical effective content"
+    )
+
+    # A run over fixture content that resolves to a DIFFERENT trial must
+    # produce a genuinely different fingerprint -- never collapsed onto the
+    # same hash as the two runs above.
+    other_repo = Repository(open_db(":memory:"))
+    other_pipeline = Pipeline(other_repo, NullSearchProvider(), today=TODAY)
+    other = other_pipeline.run(**_clinical_resume_kwargs_2(), run_id="central-resolution-other")
+    other_science_hash = _agent_run_record(other, "science").inputs_hash
+    assert other_science_hash != resumed_science_hash, (
+        "a different central resolution must not be mistaken for the same input"
+    )
+
+
+# --- F: no-leakage at the fingerprint level ------------------------------------
+def test_blind_judge_fingerprint_input_carries_no_program_resolution_content(repo, monkeypatch):
+    captured = _capture_projections(monkeypatch)
+    pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    result = pipeline.run(TICKER, NAME, [_collection(_resolvable_facts())], price=2.0)
+
+    by_agent: dict[str, list] = {}
+    for agent_id, agent_input in captured:
+        by_agent.setdefault(agent_id, []).append(agent_input)
+
+    for forbidden in ("blind_judge", "bull_agent", "bear_agent", "regulatory"):
+        for agent_input in by_agent.get(forbidden, []):
+            assert agent_input.program_resolution is None
+
+    judge_record = _agent_run_record(result, "blind_judge")
+    # Recomputed independently, from the actual (program_resolution=None)
+    # input Blind Judge received -- matches the stored value.
+    judge_input = by_agent["blind_judge"][-1]
+    assert judge_record.inputs_hash == inputs_hash(judge_input)
+    # The structural guarantee this correction actually needs: the
+    # ProgramResolution OBJECT never reaches this agent's input (so
+    # inputs_hash's fingerprint contribution for it is always the fixed
+    # empty string -- see test_program_resolution_fingerprint.py's own
+    # direct proof of that). NOT tested here: whether any TEXT that happens
+    # to overlap with the resolver's own rationale phrasing appears
+    # anywhere in judge_input -- ScienceAgent legitimately publishes
+    # program_resolved/program_relevance_unresolved/
+    # program_resolution_rationale on its OWN Channel.SCIENCE evaluation
+    # (Phase 4.3D), and blind_judge's policy has always permitted reading
+    # Channel.SCIENCE; that is Science's own finding travelling through an
+    # explicitly allowed channel, not a leak of the central object this
+    # correction concerns itself with.
+    assert judge_input.program_resolution is None
+    assert canonical_program_resolution_fingerprint(judge_input.program_resolution) == ""

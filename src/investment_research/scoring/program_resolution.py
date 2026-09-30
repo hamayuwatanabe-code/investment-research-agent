@@ -22,9 +22,11 @@ level disqualification must not depend on a model's mood.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory
 from ..schemas.fact import Fact
@@ -72,6 +74,71 @@ class ProgramResolution:
     relevance_unresolved: bool = True
     rationale: str = ""
     candidates: tuple[ProgramCandidate, ...] = field(default_factory=tuple)
+
+
+def canonical_program_resolution(resolution: ProgramResolution) -> dict[str, Any]:
+    """A complete, JSON-safe, order-stable view of every semantic field on
+    this ``ProgramResolution`` and its ``candidates`` (Phase 4.3D correction
+    1).
+
+    This is the ONE place that view is built -- both
+    :func:`canonical_program_resolution_fingerprint` (used by
+    ``agents.base.inputs_hash``) and any future caller needing the full
+    semantic content read it from here, never a partial or ad hoc
+    reconstruction. It is deliberately broader than ``agents.llm_agents``'s
+    own ``_program_resolution_projection`` (the LLMScienceAgent prompt's
+    limited, model-facing view of trial_id/relevance_unresolved/rationale/
+    candidates{trial_id,status,phase}) -- that one stays narrow on purpose,
+    for what a model needs to see; this one must be complete, for what
+    "did the resolution actually change" needs to detect.
+
+    Never depends on dataclass ``repr()``, memory identity, ``hash()``, or
+    set/dict iteration order: every field is read explicitly by name, dict
+    keys are the fixed literals below (a plain Python dict already preserves
+    insertion order, and callers that serialize this with ``json.dumps`` may
+    also pass ``sort_keys=True`` for a second, independent guarantee), and
+    ``fact_ids`` -- the one field whose members carry no order-dependent
+    meaning of their own (which facts mention this trial, not a ranking) --
+    is explicitly sorted rather than left in whatever incidental order
+    ``resolve_current_program`` happened to build it in. ``candidates``
+    itself is NOT reordered: its tuple order is ``resolve_current_program``'s
+    own deterministic build order, which two calls over the same facts always
+    reproduce identically -- reordering it would erase that reproducibility
+    guarantee instead of protecting it.
+    """
+    return {
+        "trial_id": resolution.trial_id,
+        "status": resolution.status,
+        "phase": resolution.phase,
+        "relevance_unresolved": resolution.relevance_unresolved,
+        "rationale": resolution.rationale,
+        "candidates": [
+            {
+                "trial_id": c.trial_id,
+                "status": c.status,
+                "phase": c.phase,
+                "has_lead_marker": c.has_lead_marker,
+                "most_recent_date": c.most_recent_date,
+                "fact_ids": sorted(c.fact_ids),
+            }
+            for c in resolution.candidates
+        ],
+    }
+
+
+def canonical_program_resolution_fingerprint(resolution: ProgramResolution | None) -> str:
+    """The canonical JSON text of ``resolution``, or ``""`` when there is
+    none -- exactly what ``agents.base.inputs_hash`` folds into an agent's
+    input fingerprint. ``sort_keys=True`` is a second, independent guarantee
+    of stable key order on top of ``canonical_program_resolution``'s own
+    (already insertion-ordered) dict, so this string is reproducible
+    regardless of how that dict was constructed.
+    """
+    if resolution is None:
+        return ""
+    return json.dumps(
+        canonical_program_resolution(resolution), sort_keys=True, ensure_ascii=False
+    )
 
 
 def resolve_current_program(facts: Sequence[Fact]) -> ProgramResolution:

@@ -97,11 +97,16 @@ def test_default_project_call_with_no_resolution_argument_leaves_it_none():
     assert agent_input.program_resolution is None
 
 
-def test_inputs_hash_is_unaffected_by_program_resolution():
-    """The AgentRunRecord.inputs_hash contract (agent_id/ticker/fact_ids/
-    channels only) must stay stable whether or not a ProgramResolution is
-    attached -- a new field must never change what two otherwise-identical
-    inputs hash to."""
+def test_inputs_hash_now_reflects_program_resolution_for_a_permitted_agent():
+    """Superseded by Phase 4.3D correction 1: inputs_hash used to ignore
+    AgentInput.program_resolution entirely (it simply was not one of the
+    fields the function read), so a Science/Kill run over a DIFFERENT
+    central resolution left an identical, misleading audit fingerprint.
+    Presence-or-absence must now change the hash for a permitted agent; the
+    fingerprint's actual content-sensitivity (different trial_id / different
+    candidate fields) is covered by tests/unit/
+    test_program_resolution_fingerprint.py, next to the canonical
+    projection this hash is built from."""
     resolution = _resolution()
     base = AgentInput(
         agent_id="science", run_id="r1", ticker="TESTCO", company_name="Test Co", facts=()
@@ -114,4 +119,24 @@ def test_inputs_hash_is_unaffected_by_program_resolution():
         facts=(),
         program_resolution=resolution,
     )
-    assert inputs_hash(base) == inputs_hash(with_resolution)
+    assert inputs_hash(base) != inputs_hash(with_resolution)
+
+
+def test_inputs_hash_stays_unaffected_for_a_forbidden_agent():
+    """The flip side of the above: since IsolationGuard.project() never
+    attaches program_resolution to a forbidden agent_id in the first place
+    (see the tests above), that agent's inputs_hash cannot move regardless
+    of which central resolution a run computed -- the field it would be
+    folded from is always None for it, by construction, not by convention."""
+    base = AgentInput(
+        agent_id="blind_judge", run_id="r1", ticker=None, company_name=None, facts=()
+    )
+    still_none = AgentInput(
+        agent_id="blind_judge",
+        run_id="r1",
+        ticker=None,
+        company_name=None,
+        facts=(),
+        program_resolution=None,  # exactly what project() would produce for this agent_id
+    )
+    assert inputs_hash(base) == inputs_hash(still_none)

@@ -21,6 +21,7 @@ from typing import Any
 
 from ..orchestrator.isolation import derive_fingerprints
 from ..schemas.agent_io import AgentInput, AgentOutput, Evaluation
+from ..scoring.program_resolution import canonical_program_resolution_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -84,12 +85,33 @@ class Agent(ABC):
 
 
 def inputs_hash(data: AgentInput) -> str:
+    """Content fingerprint of what this agent actually received.
+
+    Computed on the POST-projection ``AgentInput`` -- the very object
+    ``IsolationGuard.project()`` returned and ``Agent.execute()`` ran on
+    (see ``Pipeline._run_agent``'s own ordering) -- never a pre-projection
+    view, so this already reflects whatever isolation denied.
+
+    Phase 4.3D correction 1: ``data.program_resolution`` is folded in via
+    its own canonical, JSON-safe fingerprint (never Python's default
+    ``repr()``/``hash()``, both of which can vary with object identity or
+    across process runs). For the agents IsolationGuard.project() actually
+    attaches it to (science, kill_agent), a change to the resolution's
+    meaning -- selected trial, relevance, rationale, or any candidate's
+    fields -- changes this hash. For every other agent the field is always
+    ``None`` regardless of which central resolution was computed this run,
+    so ``canonical_program_resolution_fingerprint(None)`` is the same fixed
+    empty string every time: switching which resolution the run produced
+    can never move a forbidden agent's hash, because the value it is folded
+    from never reaches that agent's input in the first place.
+    """
     payload = "|".join(
         [
             data.agent_id,
             str(data.ticker),
             *sorted(f.fact_id for f in data.facts),
             *sorted(data.channels),
+            canonical_program_resolution_fingerprint(data.program_resolution),
         ]
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
