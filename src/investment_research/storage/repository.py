@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from ..schemas.evaluation import (
 )
 from ..schemas.fact import Contradiction, Fact, Source
 from ..schemas.validation import QuarantinedSource, SchemaError, validate_fact, validate_source
+from ..scoring.identifier_validation import validate_strict_nct_id, validate_strict_pmid
 from ..scoring.program_evidence import (
     CompanyIdentityEvidence,
     LiteratureCandidateEvidence,
@@ -157,11 +159,162 @@ def _quarantined_source_from_dict(d: dict) -> QuarantinedSource:
     )
 
 
+class _SnapshotFieldError(ValueError):
+    """Phase 4.3F correction 2 Finding 5: raised by the strict field
+    validators below on an EXPLICIT type/format/enum/identifier failure --
+    a ``ValueError`` subclass, so it is already caught by the same
+    ``except (..., ValueError)`` clause :meth:`Repository.
+    collect_snapshot_for_resume` uses to raise ``ResumeSnapshotCorrupted``
+    for the INCIDENTAL cases (a missing key raising ``KeyError``, an
+    outright wrong-shaped value raising ``TypeError``). One exception
+    hierarchy covers both."""
+
+
+def _snap_str(d: dict, key: str) -> str:
+    """A required string field -- never an int/bool/list/dict/None
+    silently accepted where a string was expected."""
+    value = d[key]
+    if not isinstance(value, str):
+        raise _SnapshotFieldError(f"{key!r} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _snap_str_list(d: dict, key: str) -> tuple[str, ...]:
+    """A JSON array of strings, as a tuple -- NEVER a bare string (which a
+    bare ``tuple(value)`` would silently explode into one character per
+    element) and never any other non-list value."""
+    value = d[key]
+    if not isinstance(value, list):
+        raise _SnapshotFieldError(f"{key!r} must be a list, got {type(value).__name__}")
+    for item in value:
+        if not isinstance(item, str):
+            raise _SnapshotFieldError(f"{key!r} entries must all be strings")
+    return tuple(value)
+
+
+def _snap_cik(d: dict, key: str) -> int | None:
+    """``int`` or ``None`` only -- ``bool`` is explicitly rejected (Python
+    treats ``bool`` as an ``int`` subclass, so an un-guarded ``isinstance
+    (value, int)`` check alone would silently accept ``True``/``False`` as
+    CIK 1/0)."""
+    value = d[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _SnapshotFieldError(f"{key!r} must be an int or null, got {type(value).__name__}")
+    return value
+
+
+def _snap_source_tier(d: dict, key: str) -> SourceTier:
+    value = _snap_str(d, key)
+    try:
+        return SourceTier(value)
+    except ValueError as exc:
+        raise _SnapshotFieldError(f"{key!r} is not a valid SourceTier: {value!r}") from exc
+
+
+def _snap_nct_id(d: dict, key: str) -> str:
+    """Strict-valid NCT id only -- reuses ``scoring.identifier_validation.
+    validate_strict_nct_id`` (the single source of truth for this format,
+    per Phase 4.3F correction 1's own "never duplicate this regex"
+    precedent), never a locally re-implemented pattern. The canonical
+    (upper-cased, stripped) form is what is stored, mirroring the
+    collector's own candidate-construction gate."""
+    value = _snap_str(d, key)
+    canonical = validate_strict_nct_id(value)
+    if canonical is None:
+        raise _SnapshotFieldError(f"{key!r} is not a strict-valid NCT id: {value!r}")
+    return canonical
+
+
+def _snap_nct_id_list(d: dict, key: str) -> tuple[str, ...]:
+    values = _snap_str_list(d, key)
+    canonical_ids: list[str] = []
+    for value in values:
+        canonical = validate_strict_nct_id(value)
+        if canonical is None:
+            raise _SnapshotFieldError(f"{key!r} entry is not a strict-valid NCT id: {value!r}")
+        canonical_ids.append(canonical)
+    return tuple(canonical_ids)
+
+
+def _snap_pmid(d: dict, key: str) -> str:
+    """Strict-valid PMID only -- reuses ``scoring.identifier_validation.
+    validate_strict_pmid``, the same single source of truth as
+    ``_snap_nct_id`` above."""
+    value = _snap_str(d, key)
+    canonical = validate_strict_pmid(value)
+    if canonical is None:
+        raise _SnapshotFieldError(f"{key!r} is not a strict-valid PMID: {value!r}")
+    return canonical
+
+
+#: Mirrors ``scoring.program_evidence._FACT_ID_RE`` exactly (``fact_`` +
+#: 20 lowercase hex characters) -- duplicated, not imported (that name is
+#: module-private there), following this codebase's own established
+#: precedent for small format regexes shared across layers (see
+#: ``scoring/identifier_validation.py``'s own module docstring on
+#: ``NCT_ID_RE``/``PMID_RE``).
+_SNAPSHOT_FACT_ID_RE = re.compile(r"^fact_[0-9a-f]{20}$")
+
+
+def _snap_fact_ids(d: dict, key: str) -> tuple[str, ...]:
+    """``supporting_fact_ids`` in its FORMAT-valid form only (``fact_`` +
+    20 hex characters) -- this is a structural snapshot-decode check, not
+    the referential one ``scoring.program_evidence.
+    validate_program_candidate_evidence`` performs separately against an
+    actual verified-facts context; that stays a later caller's job."""
+    ids = _snap_str_list(d, key)
+    for fact_id in ids:
+        if not _SNAPSHOT_FACT_ID_RE.match(fact_id):
+            raise _SnapshotFieldError(f"{key!r} entry is not a well-formed fact id: {fact_id!r}")
+    return ids
+
+
+def _snap_collection(payload: dict, key: str) -> list:
+    """One of the three Phase 4.3F structured-evidence collections inside
+    a collect-snapshot payload: a JSON array, or absent entirely (a
+    snapshot saved before Phase 4.3F -- an empty list, never corrupted
+    merely for lacking a key that did not exist yet when it was written).
+    Present but NOT a list (a dict, a string, a number, ``null``) is
+    corrupted -- Phase 4.3F correction 2 Finding 5: a bare string here
+    would otherwise iterate character-by-character below, and a dict
+    would iterate its keys -- neither is ever silently accepted as "zero
+    or more records"."""
+    if key not in payload:
+        return []
+    value = payload[key]
+    if not isinstance(value, list):
+        raise _SnapshotFieldError(f"{key!r} must be a JSON array, got {type(value).__name__}")
+    return value
+
+
+def _snap_record(value: object) -> dict:
+    """One element of a structured-evidence collection: must itself be a
+    JSON object -- never a bare string/number/list/``null`` masquerading
+    as a record. Phase 4.3F correction 2 Finding 5: even one non-dict
+    element makes the WHOLE collection (and so the whole snapshot)
+    corrupted -- never silently skipped while keeping the others."""
+    if not isinstance(value, dict):
+        raise _SnapshotFieldError(
+            f"structured-evidence record must be a JSON object, got {type(value).__name__}"
+        )
+    return value
+
+
 # -- Phase 4.3F: structured primary-source evidence, snapshotted losslessly
 # alongside Stage 1's own Facts/Sources -- see CollectSnapshot's own
 # docstring. Every field of every type in scoring/program_evidence.py is
 # covered explicitly; none of these three types is re-derived, guessed, or
 # partially reconstructed on read-back.
+#
+# Phase 4.3F correction 2 Finding 5: every ``_..._from_dict`` below uses
+# the strict ``_snap_*`` validators above, never a bare ``d["key"]``/
+# ``tuple(d["key"])`` -- a value that is present but the WRONG shape (a
+# string where a list was expected, a bool where an int-or-None was, an
+# invalid enum member, a non-strict-valid identifier) is now an EXPLICIT
+# ``_SnapshotFieldError`` (a ``ValueError``), not a value silently
+# accepted or a failure that merely happens to raise incidentally.
 def _company_identity_evidence_to_dict(evidence: CompanyIdentityEvidence) -> dict:
     return {
         "ticker": evidence.ticker,
@@ -177,14 +330,14 @@ def _company_identity_evidence_to_dict(evidence: CompanyIdentityEvidence) -> dic
 
 def _company_identity_evidence_from_dict(d: dict) -> CompanyIdentityEvidence:
     return CompanyIdentityEvidence(
-        ticker=d["ticker"],
-        cik=d["cik"],
-        sec_official_name=d["sec_official_name"],
-        explicitly_verified_aliases=tuple(d["explicitly_verified_aliases"]),
-        source_id=d["source_id"],
-        source_tier=SourceTier(d["source_tier"]),
-        retrieved_at=d["retrieved_at"],
-        content_hash=d["content_hash"],
+        ticker=_snap_str(d, "ticker"),
+        cik=_snap_cik(d, "cik"),
+        sec_official_name=_snap_str(d, "sec_official_name"),
+        explicitly_verified_aliases=_snap_str_list(d, "explicitly_verified_aliases"),
+        source_id=_snap_str(d, "source_id"),
+        source_tier=_snap_source_tier(d, "source_tier"),
+        retrieved_at=_snap_str(d, "retrieved_at"),
+        content_hash=_snap_str(d, "content_hash"),
     )
 
 
@@ -210,21 +363,21 @@ def _program_candidate_evidence_to_dict(evidence: ProgramCandidateEvidence) -> d
 
 def _program_candidate_evidence_from_dict(d: dict) -> ProgramCandidateEvidence:
     return ProgramCandidateEvidence(
-        nct_id=d["nct_id"],
-        lead_sponsor=d["lead_sponsor"],
-        collaborators=tuple(d["collaborators"]),
-        interventions=tuple(d["interventions"]),
-        conditions=tuple(d["conditions"]),
-        overall_status=d["overall_status"],
-        phases=tuple(d["phases"]),
-        primary_completion_date=d["primary_completion_date"],
-        completion_date=d["completion_date"],
-        first_posted_date=d["first_posted_date"],
-        source_id=d["source_id"],
-        source_tier=SourceTier(d["source_tier"]),
-        retrieved_at=d["retrieved_at"],
-        content_hash=d["content_hash"],
-        supporting_fact_ids=tuple(d["supporting_fact_ids"]),
+        nct_id=_snap_nct_id(d, "nct_id"),
+        lead_sponsor=_snap_str(d, "lead_sponsor"),
+        collaborators=_snap_str_list(d, "collaborators"),
+        interventions=_snap_str_list(d, "interventions"),
+        conditions=_snap_str_list(d, "conditions"),
+        overall_status=_snap_str(d, "overall_status"),
+        phases=_snap_str_list(d, "phases"),
+        primary_completion_date=_snap_str(d, "primary_completion_date"),
+        completion_date=_snap_str(d, "completion_date"),
+        first_posted_date=_snap_str(d, "first_posted_date"),
+        source_id=_snap_str(d, "source_id"),
+        source_tier=_snap_source_tier(d, "source_tier"),
+        retrieved_at=_snap_str(d, "retrieved_at"),
+        content_hash=_snap_str(d, "content_hash"),
+        supporting_fact_ids=_snap_fact_ids(d, "supporting_fact_ids"),
     )
 
 
@@ -241,12 +394,12 @@ def _literature_candidate_evidence_to_dict(evidence: LiteratureCandidateEvidence
 
 def _literature_candidate_evidence_from_dict(d: dict) -> LiteratureCandidateEvidence:
     return LiteratureCandidateEvidence(
-        pmid=d["pmid"],
-        nct_ids=tuple(d["nct_ids"]),
-        source_id=d["source_id"],
-        source_tier=SourceTier(d["source_tier"]),
-        retrieved_at=d["retrieved_at"],
-        content_hash=d["content_hash"],
+        pmid=_snap_pmid(d, "pmid"),
+        nct_ids=_snap_nct_id_list(d, "nct_ids"),
+        source_id=_snap_str(d, "source_id"),
+        source_tier=_snap_source_tier(d, "source_tier"),
+        retrieved_at=_snap_str(d, "retrieved_at"),
+        content_hash=_snap_str(d, "content_hash"),
     )
 
 
@@ -891,23 +1044,31 @@ class Repository:
             facts = [_fact_from_row(r) for r in payload["facts"]]
             sources = [_source_from_snapshot_dict(r) for r in payload["sources"]]
             collectors = list(payload["collectors"])
-            # Phase 4.3F: .get(..., []) -- never .get()'s KeyError-on-index
-            # form -- because a snapshot saved BEFORE this phase (a run
-            # that predates these keys entirely) is a genuinely valid,
+            # Phase 4.3F: a snapshot saved BEFORE this phase (a run that
+            # predates these keys entirely) is a genuinely valid,
             # un-corrupted snapshot that simply has nothing structured to
             # restore, never a corrupted one merely for lacking a key that
-            # did not exist yet when it was written.
+            # did not exist yet when it was written -- _snap_collection
+            # returns [] for a genuinely absent key. Phase 4.3F correction
+            # 2 Finding 5: a key that IS present but not a JSON array
+            # (_snap_collection), or an element of it that is not itself a
+            # JSON object (_snap_record), or a record whose own fields
+            # fail their strict per-type/format/enum/identifier check
+            # (the ``_..._from_dict`` functions, via the ``_snap_*``
+            # validators) -- ANY of these makes the WHOLE snapshot
+            # corrupted, never a partial record silently dropped while
+            # the rest of the collection is kept.
             company_identity_evidence = [
-                _company_identity_evidence_from_dict(r)
-                for r in payload.get("company_identity_evidence", [])
+                _company_identity_evidence_from_dict(_snap_record(r))
+                for r in _snap_collection(payload, "company_identity_evidence")
             ]
             program_candidate_evidence = [
-                _program_candidate_evidence_from_dict(r)
-                for r in payload.get("program_candidate_evidence", [])
+                _program_candidate_evidence_from_dict(_snap_record(r))
+                for r in _snap_collection(payload, "program_candidate_evidence")
             ]
             literature_candidate_evidence = [
-                _literature_candidate_evidence_from_dict(r)
-                for r in payload.get("literature_candidate_evidence", [])
+                _literature_candidate_evidence_from_dict(_snap_record(r))
+                for r in _snap_collection(payload, "literature_candidate_evidence")
             ]
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ResumeSnapshotCorrupted(

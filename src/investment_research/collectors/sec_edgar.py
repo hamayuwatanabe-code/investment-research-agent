@@ -37,14 +37,20 @@ COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.js
 FILING_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{document}"
 
 
-def normalize_cik(value: int | str) -> int | None:
+def normalize_cik(value: int | str | None) -> int | None:
     """The single source of truth for validating/normalizing a caller-
     supplied CIK to its canonical ``int`` form. Accepts a bare int, a
     decimal string, or a zero-padded decimal string (e.g. ``"0000320193"``)
     -- returns ``None`` for anything that is not a positive integer CIK
     (never guessed, never silently truncated, never accepts a negative or
-    zero value or non-digit characters).
+    zero value, non-digit characters, ``None``, or any other type --
+    Phase 4.3F correction 2 widened the accepted type to ``| None`` so a
+    caller reading an untyped JSON field, e.g. ``dict.get("cik_str")``,
+    can pass its result straight through without a separate ``is None``
+    guard at the call site).
     """
+    if value is None:
+        return None
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -136,10 +142,41 @@ class SecEdgarCollector:
             return None, UNKNOWN, FetchOutcome.ERROR, source
         wanted = ticker.upper()
         for entry in payload.values():
-            if isinstance(entry, dict) and str(entry.get("ticker", "")).upper() == wanted:
-                return (
-                    int(entry["cik_str"]), str(entry.get("title", UNKNOWN)), FetchOutcome.OK, source,
+            # Phase 4.3F correction 2 Finding 4: an entry of the wrong type
+            # (not a dict) is skipped, never indexed into -- this already
+            # cannot raise, but is kept explicit rather than relying on
+            # short-circuit evaluation alone.
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("ticker", "")).upper() != wanted:
+                continue
+            # Phase 4.3F correction 2 Finding 4: normalize_cik() -- the
+            # SAME single source of truth this module already exposes for
+            # validating a caller-supplied CIK -- is reused here too,
+            # never a raw int(entry["cik_str"]). A missing cik_str, one
+            # that cannot be converted, or one that is a bool (accepted by
+            # a bare int() call but never a real CIK) is never guessed or
+            # coerced: this entry is treated as not a usable match, and
+            # the scan continues rather than raising, in case a later
+            # entry in the SAME payload happens to be well-formed.
+            cik = normalize_cik(entry.get("cik_str"))
+            if cik is None:
+                log.warning(
+                    "sec_edgar: ticker map entry for %r has an unusable cik_str "
+                    "(missing, non-numeric, or boolean); skipped, never guessed",
+                    wanted,
                 )
+                continue
+            # Phase 4.3F correction 2 Finding 4: an official title that is
+            # missing, blank/whitespace-only, or already UNKNOWN is never
+            # fabricated from anything else (the user-supplied
+            # company_name included) -- reported as UNKNOWN like any other
+            # missing field in this system.
+            raw_title = entry.get("title")
+            resolved_name = str(raw_title).strip() if raw_title else ""
+            if not resolved_name:
+                resolved_name = UNKNOWN
+            return cik, resolved_name, FetchOutcome.OK, source
         return None, UNKNOWN, FetchOutcome.NOT_FOUND, source
 
     def resolve_cik(self, ticker: str) -> tuple[int | None, str, FetchOutcome]:
@@ -167,17 +204,32 @@ class SecEdgarCollector:
         # well-formed payload). Registered into out.sources like every
         # other Source this collector touches, so a future caller building
         # an EvidenceValidationContext from bus.sources finds it there.
+        #
+        # Phase 4.3F correction 2 Finding 4: a resolved_name of UNKNOWN
+        # (the matching ticker-map entry had no usable official title --
+        # see _fetch_and_resolve_cik above) means this record is
+        # incomplete, and an incomplete record never becomes structured
+        # CompanyIdentityEvidence -- never substituted with the
+        # user-supplied company_name either. The CIK itself is still
+        # valid, so out.sources/the note above are unaffected; only the
+        # OPTIONAL structured identity evidence is withheld.
         if ticker_map_source is not None:
             out.sources.append(ticker_map_source)
-            out.company_identity_evidence = build_company_identity_evidence(
-                ticker,
-                cik,
-                resolved_name,
-                source_id=ticker_map_source.source_id,
-                source_tier=ticker_map_source.tier,
-                retrieved_at=ticker_map_source.retrieved_at,
-                content_hash=ticker_map_source.content_hash,
-            )
+            if resolved_name != UNKNOWN:
+                out.company_identity_evidence = build_company_identity_evidence(
+                    ticker,
+                    cik,
+                    resolved_name,
+                    source_id=ticker_map_source.source_id,
+                    source_tier=ticker_map_source.tier,
+                    retrieved_at=ticker_map_source.retrieved_at,
+                    content_hash=ticker_map_source.content_hash,
+                )
+            else:
+                out.notes.append(
+                    "SEC ticker-map entry had no usable official title; "
+                    "CompanyIdentityEvidence withheld for this run"
+                )
 
         url = SUBMISSIONS_URL.format(cik=cik)
         out.attempted_urls.append(url)

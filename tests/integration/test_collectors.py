@@ -123,29 +123,53 @@ STUDIES = {
     ]
 }
 
-def _single_study(nct_id: str) -> dict:
+def _single_study(
+    nct_id: str,
+    *,
+    sponsor: str | None = "Test Company Holdings Inc",
+    organization: str | None = None,
+    collaborators: list[str] | None = None,
+    status: str = "RECRUITING",
+) -> dict:
     """A minimal single-study payload, shaped like ``STUDIES``'s own entry,
-    varying only the ``nctId`` -- for Phase 4.3F correction 1's strict NCT
-    ID validation gate tests."""
+    varying the ``nctId``/sponsor/organization/collaborators/status -- for
+    Phase 4.3F correction 1/2's collector-level gate tests.
+
+    ``sponsor=None`` omits ``sponsorCollaboratorsModule.leadSponsor``
+    entirely (``parse_study()`` then reads it back as ``UNKNOWN``);
+    ``sponsor=""`` sets an explicit empty name."""
+    sponsor_module: dict = {}
+    if sponsor is not None:
+        sponsor_module["leadSponsor"] = {"name": sponsor}
+    if collaborators:
+        sponsor_module["collaborators"] = [{"name": c} for c in collaborators]
+    ident: dict = {"nctId": nct_id, "briefTitle": "An Edge-Case Study"}
+    if organization is not None:
+        ident["organization"] = {"fullName": organization}
     return {
         "studies": [
             {
                 "protocolSection": {
-                    "identificationModule": {"nctId": nct_id, "briefTitle": "An Edge-Case Study"},
+                    "identificationModule": ident,
                     "statusModule": {
-                        "overallStatus": "RECRUITING",
+                        "overallStatus": status,
                         "primaryCompletionDateStruct": {"date": "2026-11-30", "type": "ESTIMATED"},
                         "lastUpdatePostDateStruct": {"date": "2026-04-02"},
                         "startDateStruct": {"date": "2025-06-01"},
                     },
-                    "sponsorCollaboratorsModule": {
-                        "leadSponsor": {"name": "Test Company Holdings Inc"}
-                    },
+                    "sponsorCollaboratorsModule": sponsor_module,
                     "designModule": {"phases": ["PHASE2"]},
                 }
             }
         ]
     }
+
+
+def _studies_payload(*studies_payloads: dict) -> dict:
+    """Combine multiple ``_single_study``-shaped single-entry payloads into
+    one multi-study payload -- Phase 4.3F correction 2 Finding 3's
+    duplicate-NCT-id tests."""
+    return {"studies": [p["studies"][0] for p in studies_payloads]}
 
 
 #: Non-empty but strictly-invalid (7 digits, not 8) NCT id -- Phase 4.3F
@@ -157,6 +181,48 @@ STUDIES_INVALID_NCT = _single_study("NCT1234567")
 #: 4.3F correction 1 Finding B: the resulting candidate's nct_id must be the
 #: validator's canonical (upper-cased, stripped) form.
 STUDIES_LOWERCASE_NCT = _single_study(" nct01234567 ")
+
+#: Lead sponsor missing (UNKNOWN) even though organization/collaborator ARE
+#: present -- Phase 4.3F correction 2 Finding 2: must never be substituted
+#: for lead_sponsor, so no candidate is produced.
+STUDIES_MISSING_SPONSOR = _single_study(
+    "NCT55555555",
+    sponsor=None,
+    organization="Some Research Organization",
+    collaborators=["Some Collaborator University"],
+)
+
+#: Two study records for the SAME NCT id whose structured content agrees in
+#: full -- Phase 4.3F correction 2 Finding 3: must dedup to one candidate.
+STUDIES_DUPLICATE_IDENTICAL = _studies_payload(
+    _single_study("NCT77777777"),
+    _single_study("NCT77777777"),
+)
+
+#: Two study records for the SAME NCT id whose overall_status disagrees --
+#: Phase 4.3F correction 2 Finding 3: must yield zero candidates for this
+#: NCT id (never first-wins/last-wins).
+STUDIES_DUPLICATE_CONFLICTING = _studies_payload(
+    _single_study("NCT88888888", status="RECRUITING"),
+    _single_study("NCT88888888", status="COMPLETED"),
+)
+
+#: A ticker map with malformed records mixed in with well-formed ones --
+#: Phase 4.3F correction 2 Finding 4. Entry "0" is a non-dict entry placed
+#: FIRST so every lookup below scans past it. "NOCIK"/"BADCIK"/"BOOLCIK"
+#: have an unusable cik_str (missing, non-numeric, bool); "NOTITLE"/
+#: "UNKNOWNTITLE" have a valid cik_str but no usable official title;
+#: "GOODCIK" is well-formed, to prove the malformed entries never break
+#: resolution of a later, valid one.
+TICKER_MAP_MALFORMED = {
+    "0": "not-a-dict-entry",
+    "1": {"ticker": "NOCIK", "title": "Missing Cik Str Inc"},
+    "2": {"cik_str": "not-a-number", "ticker": "BADCIK", "title": "Bad Cik Str Inc"},
+    "3": {"cik_str": True, "ticker": "BOOLCIK", "title": "Bool Cik Str Inc"},
+    "4": {"cik_str": 1595097, "ticker": "NOTITLE", "title": ""},
+    "5": {"cik_str": 1234567, "ticker": "UNKNOWNTITLE", "title": "UNKNOWN"},
+    "6": {"cik_str": 9999999, "ticker": "GOODCIK", "title": "Good Cik Inc"},
+}
 
 COMPANY_FACTS = {
     "facts": {
@@ -182,6 +248,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         routes = {
             "/files/company_tickers.json": TICKER_MAP,
+            "/files/company_tickers_malformed.json": TICKER_MAP_MALFORMED,
             "/submissions/CIK0001595097.json": SUBMISSIONS,
             "/api/v2/studies": STUDIES,
             "/api/xbrl/companyfacts/CIK0001595097.json": COMPANY_FACTS,
@@ -189,6 +256,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/v2/studies_empty": STUDIES_EMPTY,
             "/api/v2/studies_invalid_nct": STUDIES_INVALID_NCT,
             "/api/v2/studies_lowercase_nct": STUDIES_LOWERCASE_NCT,
+            "/api/v2/studies_missing_sponsor": STUDIES_MISSING_SPONSOR,
+            "/api/v2/studies_duplicate_identical": STUDIES_DUPLICATE_IDENTICAL,
+            "/api/v2/studies_duplicate_conflicting": STUDIES_DUPLICATE_CONFLICTING,
         }
         if path in routes:
             body = json.dumps(routes[path]).encode()
@@ -319,6 +389,119 @@ def test_resolve_cik_return_signature_is_unchanged_by_the_richer_collect_path(
     assert outcome is FetchOutcome.OK
 
 
+def _malformed_ticker_map(patched_endpoints, monkeypatch):
+    monkeypatch.setattr(
+        sec_edgar, "TICKER_MAP_URL", f"{patched_endpoints}/files/company_tickers_malformed.json"
+    )
+
+
+def test_missing_cik_str_does_not_raise(patched_endpoints, monkeypatch, client):
+    """Phase 4.3F correction 2 Finding 4: a matching ticker-map entry with
+    no cik_str at all is skipped, never raises, and never guesses a CIK."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("NOCIK")
+    assert cik is None
+    assert name == UNKNOWN
+    assert outcome is FetchOutcome.NOT_FOUND
+
+
+def test_non_numeric_cik_str_does_not_raise(patched_endpoints, monkeypatch, client):
+    """A cik_str that cannot be converted to an int is skipped, never
+    raises ValueError."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("BADCIK")
+    assert cik is None
+    assert name == UNKNOWN
+    assert outcome is FetchOutcome.NOT_FOUND
+
+
+def test_bool_cik_str_is_never_treated_as_a_valid_cik(patched_endpoints, monkeypatch, client):
+    """A cik_str of ``True`` would silently become 1 under a bare int()
+    call -- normalize_cik() rejects bools explicitly, so this must never
+    resolve to a (wrong) valid-looking CIK."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("BOOLCIK")
+    assert cik is None
+    assert name == UNKNOWN
+    assert outcome is FetchOutcome.NOT_FOUND
+
+
+def test_empty_title_resolves_cik_but_name_stays_unknown(patched_endpoints, monkeypatch, client):
+    """A valid cik_str with an empty official title still resolves the
+    CIK (it IS valid) but the name is reported as UNKNOWN -- never left as
+    an empty string, never guessed."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("NOTITLE")
+    assert cik == 1595097
+    assert name == UNKNOWN
+    assert outcome is FetchOutcome.OK
+
+
+def test_explicit_unknown_title_stays_unknown(patched_endpoints, monkeypatch, client):
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("UNKNOWNTITLE")
+    assert cik == 1234567
+    assert name == UNKNOWN
+    assert outcome is FetchOutcome.OK
+
+
+def test_malformed_entries_do_not_break_resolution_of_a_later_well_formed_one(
+    patched_endpoints, monkeypatch, client
+):
+    """A non-dict entry and several malformed dict entries appear BEFORE
+    the well-formed "GOODCIK" entry in the payload -- the scan must pass
+    over all of them without raising and still resolve the good one."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("GOODCIK")
+    assert cik == 9999999
+    assert name == "Good Cik Inc"
+    assert outcome is FetchOutcome.OK
+
+
+def test_malformed_cik_and_missing_title_never_raise_and_never_populate_identity_evidence(
+    patched_endpoints, monkeypatch, client
+):
+    """Phase 4.3F correction 2 Finding 4's own required coverage: neither a
+    malformed cik_str nor a missing/empty/UNKNOWN official title ever
+    raises an exception through the full collect() path, and neither ever
+    produces a CompanyIdentityEvidence record."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    collector = SecEdgarCollector(client)
+
+    malformed_cik = collector.collect("BADCIK", "User Supplied Name Inc")
+    assert malformed_cik.company_identity_evidence is None
+    assert malformed_cik.outcome is FetchOutcome.NOT_FOUND
+
+    missing_title = collector.collect("NOTITLE", "User Supplied Name Inc")
+    assert missing_title.company_identity_evidence is None
+    assert any("official title" in note for note in missing_title.notes)
+
+
+def test_sec_collect_request_count_is_unaffected_by_malformed_entries(
+    patched_endpoints, monkeypatch, client
+):
+    """Phase 4.3F correction 2 Finding 4: validating cik_str/title more
+    strictly adds no additional HTTP request -- still exactly one
+    ticker-map fetch and one submissions fetch, the same as a well-formed
+    entry."""
+    _malformed_ticker_map(patched_endpoints, monkeypatch)
+    result = SecEdgarCollector(client).collect("NOTITLE", "User Supplied Name Inc")
+    assert len(result.attempted_urls) == 2
+
+
+def test_clinicaltrials_collect_request_count_is_unaffected_by_dedup_and_gates(
+    patched_endpoints, monkeypatch, client
+):
+    """Phase 4.3F correction 2 Findings 2/3: sponsor-gating and duplicate-
+    NCT dedup/conflict resolution are pure post-processing of the SAME
+    single already-fetched payload -- never an additional request."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_duplicate_conflicting"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert len(result.attempted_urls) == 1
+
+
 def test_collect_populates_program_candidate_evidence(patched_endpoints, client):
     result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
     assert len(result.program_candidate_evidence) == 1
@@ -410,6 +593,71 @@ def test_lowercase_whitespace_nct_id_is_canonicalized_not_rejected(
 
     assert len(result.program_candidate_evidence) == 1
     assert result.program_candidate_evidence[0].nct_id == "NCT01234567"
+
+
+def test_missing_sponsor_skips_only_the_structured_candidate(patched_endpoints, monkeypatch, client):
+    """Phase 4.3F correction 2 Finding 2: a strict-valid NCT id with no lead
+    sponsor never produces a ProgramCandidateEvidence -- but RawFacts and
+    the collector's own outcome are unaffected, and a note is recorded."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_missing_sponsor"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert result.program_candidate_evidence == ()
+    assert result.outcome is FetchOutcome.OK
+    assert result.raw_facts
+    assert any("lead sponsor" in note for note in result.notes)
+
+
+def test_missing_sponsor_is_never_substituted_from_organization_or_collaborator(
+    patched_endpoints, monkeypatch, client
+):
+    """Even when organization and collaborator names ARE present in the
+    payload, neither is ever used as a stand-in for a missing lead
+    sponsor."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_missing_sponsor"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert result.program_candidate_evidence == ()
+
+
+def test_identical_duplicate_nct_dedups_to_one_candidate(patched_endpoints, monkeypatch, client):
+    """Phase 4.3F correction 2 Finding 3: two study records for the same
+    NCT id with agreeing structured content collapse to exactly one
+    candidate, never two."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_duplicate_identical"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert len(result.program_candidate_evidence) == 1
+    assert result.program_candidate_evidence[0].nct_id == "NCT77777777"
+    # RawFacts are unaffected by the dedup -- one full set of facts per
+    # study record (two records here), even though they collapse to one
+    # candidate.
+    facts_per_study = sum(1 for f in result.raw_facts if "NCT77777777" in f.claim) // 2
+    assert facts_per_study > 0
+    assert sum(1 for f in result.raw_facts if "NCT77777777" in f.claim) == 2 * facts_per_study
+
+
+def test_conflicting_duplicate_nct_yields_zero_candidates(patched_endpoints, monkeypatch, client):
+    """Phase 4.3F correction 2 Finding 3: two study records for the same
+    NCT id with CONFLICTING structured content (here, overall_status)
+    yield zero candidates for that NCT id -- never an arbitrary
+    first-wins/last-wins pick -- and a note is recorded. RawFacts for both
+    study records are still built."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_duplicate_conflicting"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert result.program_candidate_evidence == ()
+    assert result.outcome is FetchOutcome.OK
+    assert any("NCT88888888" in note and "conflicting" in note for note in result.notes)
+    assert sum(1 for f in result.raw_facts if "NCT88888888" in f.claim) > 0
 
 
 def test_xbrl_metric_takes_the_latest_period(patched_endpoints, client):

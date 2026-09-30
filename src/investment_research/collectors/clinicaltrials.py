@@ -74,7 +74,13 @@ class ClinicalTrialsCollector:
             out.notes.append(f"no registered studies found for sponsor {company_name!r}")
             return out
 
-        candidates: list[ProgramCandidateEvidence] = []
+        # Phase 4.3F correction 2 Finding 3: candidates are grouped by their
+        # canonical NCT id, never appended straight to the output list, so
+        # that duplicate study records for the SAME NCT id within this one
+        # payload can be deduplicated (identical content) or withheld
+        # (conflicting content) once every study has been examined -- see
+        # the dedup/conflict resolution loop below.
+        candidates_by_nct: dict[str, list[ProgramCandidateEvidence]] = {}
         for study in studies:
             parsed = parse_study(study)
             if not parsed.get("nct_id"):
@@ -114,6 +120,22 @@ class ClinicalTrialsCollector:
                     f"evidence for this study (raw value: {str(parsed.get('nct_id'))[:80]!r})"
                 )
                 continue
+            # Phase 4.3F correction 2 Finding 2: lead_sponsor is REQUIRED
+            # for structured candidate evidence -- never substituted from
+            # company_name (the search query, not necessarily what CT.gov
+            # itself names as sponsor), organization, or a collaborator
+            # (a collaborator is explicitly not the sponsor). A study
+            # missing it only loses the optional candidate; RawFacts and
+            # collector outcome/status/Action are unaffected, same as the
+            # NCT-id gate immediately above.
+            sponsor = parsed.get("sponsor")
+            if not sponsor or sponsor == UNKNOWN:
+                out.notes.append(
+                    f"{canonical_nct_id}: lead sponsor missing/UNKNOWN; skipping "
+                    "structured candidate evidence for this study (never "
+                    "substituted from company_name/organization/collaborators)"
+                )
+                continue
             # Phase 4.3F: the structured sponsor/collaborator/intervention/
             # condition metadata parse_study() already extracted, carried
             # losslessly onto this collector's typed output -- never
@@ -127,18 +149,73 @@ class ClinicalTrialsCollector:
             # the EXACT deterministic formula FactCollectorAgent._to_fact()
             # later uses for Fact.fact_id, so these ids already match the
             # eventual verified Facts without any re-derivation.
-            candidates.append(
-                build_program_candidate_evidence_from_parsed_study(
-                    {**parsed, "nct_id": canonical_nct_id},
-                    source_id=source.source_id,
-                    source_tier=source.tier,
-                    retrieved_at=source.retrieved_at,
-                    content_hash=source.content_hash,
-                    supporting_fact_ids=tuple(rf.fact_id() for rf in study_facts),
-                )
+            candidate = build_program_candidate_evidence_from_parsed_study(
+                {**parsed, "nct_id": canonical_nct_id},
+                source_id=source.source_id,
+                source_tier=source.tier,
+                retrieved_at=source.retrieved_at,
+                content_hash=source.content_hash,
+                supporting_fact_ids=tuple(rf.fact_id() for rf in study_facts),
             )
+            candidates_by_nct.setdefault(canonical_nct_id, []).append(candidate)
+
+        candidates: list[ProgramCandidateEvidence] = []
+        for nct_id, group in candidates_by_nct.items():
+            if len(group) == 1 or _duplicate_content_matches(group):
+                # A single record, or several duplicate records whose
+                # sponsor/collaborator/intervention/condition/status/phase/
+                # date content all agree -- one candidate. Which of the
+                # (content-identical) duplicates is kept is immaterial,
+                # since their domain content is the same by construction
+                # of this branch.
+                candidates.append(group[0])
+            else:
+                # Phase 4.3F correction 2 Finding 3: the SAME NCT id
+                # appeared more than once in this payload with CONFLICTING
+                # structured content -- never resolved by first-wins,
+                # last-wins, or any other arbitrary pick. No structured
+                # candidate evidence is emitted for this NCT id at all;
+                # RawFacts for every one of these studies were already
+                # built above and are unaffected.
+                out.notes.append(
+                    f"{nct_id}: {len(group)} duplicate study records in this "
+                    "payload have conflicting structured content "
+                    "(sponsor/intervention/condition/status/phase/date); no "
+                    "structured candidate evidence emitted for this NCT id"
+                )
         out.program_candidate_evidence = tuple(candidates)
         return out
+
+
+#: The domain-content fields compared to decide whether two
+#: ``ProgramCandidateEvidence`` records for the SAME NCT id are duplicates
+#: of each other (identical) or genuinely conflicting -- deliberately
+#: excludes ``source_id``/``retrieved_at``/``content_hash``/
+#: ``supporting_fact_ids``, which are per-study-record bookkeeping, not
+#: the structured trial content itself.
+_CANDIDATE_CONTENT_FIELDS: tuple[str, ...] = (
+    "lead_sponsor",
+    "collaborators",
+    "interventions",
+    "conditions",
+    "overall_status",
+    "phases",
+    "primary_completion_date",
+    "completion_date",
+    "first_posted_date",
+)
+
+
+def _duplicate_content_matches(group: list[ProgramCandidateEvidence]) -> bool:
+    """Whether every candidate in ``group`` (all sharing one NCT id) has
+    the identical domain content -- see ``_CANDIDATE_CONTENT_FIELDS``.
+    ``False`` for even one disagreeing field, however many records agree;
+    this is a strict all-or-nothing check, never a majority vote."""
+    first = tuple(getattr(group[0], field) for field in _CANDIDATE_CONTENT_FIELDS)
+    return all(
+        tuple(getattr(candidate, field) for field in _CANDIDATE_CONTENT_FIELDS) == first
+        for candidate in group[1:]
+    )
 
 
 def _date_struct(module: dict[str, Any], key: str) -> tuple[str, str]:

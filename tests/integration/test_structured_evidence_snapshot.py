@@ -28,7 +28,7 @@ from investment_research.scoring.program_evidence import (
     ProgramCandidateEvidence,
 )
 from investment_research.storage.db import open_db
-from investment_research.storage.repository import Repository
+from investment_research.storage.repository import Repository, ResumeSnapshotCorrupted
 
 pytestmark = pytest.mark.integration
 
@@ -254,19 +254,7 @@ def test_resumed_run_restores_structured_evidence_from_the_collect_snapshot(monk
     )
 
 
-def test_resume_past_verify_restores_structured_evidence_from_the_collect_snapshot(
-    monkeypatch,
-):
-    """Phase 4.3F correction 1: when resuming past 'verify', the collect
-    snapshot's own structured-evidence lists (company_identity_evidence /
-    program_candidate_evidence / literature_candidate_evidence) and the
-    Sources they reference are now ALSO recovered, on a best-effort basis
-    -- see Pipeline.run()'s own comment on this exact point. A run whose
-    collect snapshot was actually recorded no longer silently loses this
-    lossless Phase 4.3F output merely because it resumed past verify."""
-    run_id = "structev-c2"
-    repo = _new_repo()
-
+def _crash_after_verify_run(repo, run_id, monkeypatch):
     original_save_checkpoint = repository_module.Repository.save_checkpoint
 
     def _crash_after_verify(self, checkpoint):
@@ -280,10 +268,26 @@ def test_resume_past_verify_restores_structured_evidence_from_the_collect_snapsh
         with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
             pipeline.run(**_run_kwargs(), run_id=run_id)
 
+
+def test_resume_past_verify_restores_structured_evidence_from_the_collect_snapshot(
+    monkeypatch,
+):
+    """Phase 4.3F correction 2: when resuming past 'verify', the collect
+    snapshot's own structured-evidence lists (company_identity_evidence /
+    program_candidate_evidence / literature_candidate_evidence) and the
+    Sources they reference are REQUIRED and restored -- see Pipeline.run()'s
+    own comment on this exact point. A run whose collect snapshot was
+    actually recorded no longer silently loses this lossless Phase 4.3F
+    output merely because it resumed past verify."""
+    run_id = "structev-c2"
+    repo = _new_repo()
+    _crash_after_verify_run(repo, run_id, monkeypatch)
+
     fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
     resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
 
     assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is None
     _assert_matches_fixture(
         resumed.company_identity_evidence,
         resumed.program_candidate_evidence,
@@ -291,28 +295,63 @@ def test_resume_past_verify_restores_structured_evidence_from_the_collect_snapsh
     )
 
 
-def test_resume_past_verify_survives_a_missing_collect_snapshot(monkeypatch):
-    """Finding A's fix is deliberately best-effort/non-blocking: if the
-    collect snapshot cannot be recovered when resuming past verify (here,
-    simulated by deleting its row outright after the crash), the resume
-    itself must still succeed -- Action/status/facts are governed solely by
-    verify_snapshot -- and only the structured-evidence lists fall back to
-    empty, exactly as a collector that built none already does."""
+def test_resume_past_verify_sources_and_evidence_match_a_fresh_run(monkeypatch):
+    """Phase 4.3F correction 2's own required coverage: Sources and all
+    three structured-evidence kinds on a run resumed past verify are
+    IDENTICAL to what an uninterrupted fresh run of the same input
+    produces -- never a subset, never re-derived."""
+    control_repo = _new_repo()
+    control_pipeline = Pipeline(control_repo, NullSearchProvider(), today=TODAY)
+    control = control_pipeline.run(**_run_kwargs(), run_id="structev-c2-control")
+
+    repo = _new_repo()
+    run_id = "structev-c2-match"
+    _crash_after_verify_run(repo, run_id, monkeypatch)
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is None
+    assert {s.source_id for s in resumed.bus.sources} == {s.source_id for s in control.bus.sources}
+    assert resumed.company_identity_evidence == control.company_identity_evidence
+    assert resumed.program_candidate_evidence == control.program_candidate_evidence
+    assert resumed.literature_candidate_evidence == control.literature_candidate_evidence
+
+
+def test_resume_past_verify_facts_come_from_the_verify_snapshot(monkeypatch):
+    """Facts on a run resumed past verify are the VERIFIED set (from
+    verify_snapshot.verified_facts) -- never the pre-Integrity set the
+    collect snapshot also carries, even though correction 2 now fetches
+    both snapshots at this resume point."""
+    run_id = "structev-c2-facts"
+    repo = _new_repo()
+    _crash_after_verify_run(repo, run_id, monkeypatch)
+
+    verify_snapshot = repo.verify_snapshot_for_resume(run_id)
+    assert verify_snapshot is not None
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert {f.fact_id for f in resumed.bus.facts} == {
+        f.fact_id for f in verify_snapshot.verified_facts
+    }
+
+
+def test_resume_past_verify_with_missing_collect_snapshot_fails_closed(monkeypatch):
+    """Phase 4.3F correction 2 Finding 1: a CollectSnapshot that is missing
+    when resuming past verify is now REQUIRED, not best-effort -- it is the
+    only source of Sources and structured evidence at this resume point, so
+    its absence must fail the whole resume closed (INCOMPLETE_RESEARCH,
+    Action=None), exactly like a missing verify snapshot already does --
+    never silently continue with empty structured evidence."""
+    from investment_research.schemas.enums import RunStatus
+
     run_id = "structev-c3"
     repo = _new_repo()
-
-    original_save_checkpoint = repository_module.Repository.save_checkpoint
-
-    def _crash_after_verify(self, checkpoint):
-        if checkpoint.stage not in ("collect", "verify"):
-            raise RuntimeError("simulated crash after verify checkpoint")
-        return original_save_checkpoint(self, checkpoint)
-
-    with monkeypatch.context() as m:
-        m.setattr(repository_module.Repository, "save_checkpoint", _crash_after_verify)
-        pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
-        with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
-            pipeline.run(**_run_kwargs(), run_id=run_id)
+    _crash_after_verify_run(repo, run_id, monkeypatch)
 
     repo.conn.execute(
         "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = '_collect_snapshot'",
@@ -324,7 +363,45 @@ def test_resume_past_verify_survives_a_missing_collect_snapshot(monkeypatch):
     resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
 
     assert resumed.resume_plan is not None
-    assert resumed.resume_plan.snapshot_unavailable_reason is None
+    assert resumed.resume_plan.snapshot_unavailable_reason is not None
+    assert "collect snapshot" in resumed.resume_plan.snapshot_unavailable_reason.lower()
+    assert resumed.context.status == RunStatus.INCOMPLETE_RESEARCH
+    assert resumed.verdict is not None
+    assert resumed.verdict.action is None
+    assert resumed.bus.facts == []
+    assert resumed.company_identity_evidence == []
+    assert resumed.program_candidate_evidence == []
+    assert resumed.literature_candidate_evidence == []
+
+
+def test_resume_past_verify_with_corrupted_collect_snapshot_fails_closed(monkeypatch):
+    """The corrupted-row counterpart of the missing-snapshot test above: a
+    collect snapshot row that exists but cannot be parsed back must ALSO
+    fail closed, never be silently treated as "nothing collected"."""
+    from investment_research.schemas.enums import RunStatus
+
+    run_id = "structev-c4"
+    repo = _new_repo()
+    _crash_after_verify_run(repo, run_id, monkeypatch)
+
+    repo.conn.execute(
+        "UPDATE run_checkpoints SET payload = ? WHERE run_id = ? AND stage = '_collect_snapshot'",
+        ("{not valid json", run_id),
+    )
+    repo.conn.commit()
+    with pytest.raises(ResumeSnapshotCorrupted):
+        repo.collect_snapshot_for_resume(run_id)
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is not None
+    assert "corrupted" in resumed.resume_plan.snapshot_unavailable_reason.lower()
+    assert resumed.context.status == RunStatus.INCOMPLETE_RESEARCH
+    assert resumed.verdict is not None
+    assert resumed.verdict.action is None
+    assert resumed.bus.facts == []
     assert resumed.company_identity_evidence == []
     assert resumed.program_candidate_evidence == []
     assert resumed.literature_candidate_evidence == []
