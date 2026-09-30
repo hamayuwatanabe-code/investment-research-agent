@@ -62,6 +62,11 @@ from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.decision_gate_consistency import enforce_complete_only_action, sync_verdict_channel
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
+from ..scoring.program_evidence import (
+    CompanyIdentityEvidence,
+    LiteratureCandidateEvidence,
+    ProgramCandidateEvidence,
+)
 from ..scoring.program_resolution import ProgramResolution, resolve_current_program
 from ..scoring.scenarios import build_scenarios
 from ..scoring.scores import build_scorecard
@@ -218,6 +223,17 @@ class ResearchResult:
     #: the same way an incomplete Literature acquisition already does,
     #: never silently completing as if nothing were missing.
     resume_snapshot_failures: list[str] = field(default_factory=list)
+    #: Phase 4.3F: structured, typed primary-source identity/candidate
+    #: metadata (scoring/program_evidence.py), flattened across every
+    #: CollectionResult this run had -- populated from a fresh collect or
+    #: restored from the collect snapshot on resume (see Stage 1 below),
+    #: mirroring quarantined_sources'/escalation's own "visible on the
+    #: result object for audit" pattern. This phase does NOT validate,
+    #: resolve, or deliver any of this to an Agent, and it plays no role in
+    #: Action gating -- purely a lossless, typed carrier.
+    company_identity_evidence: list[CompanyIdentityEvidence] = field(default_factory=list)
+    program_candidate_evidence: list[ProgramCandidateEvidence] = field(default_factory=list)
+    literature_candidate_evidence: list[LiteratureCandidateEvidence] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -675,6 +691,17 @@ class Pipeline:
             # source_url/source_tier onto themselves).
             if collect_snapshot is not None:
                 bus.add_sources(collect_snapshot.sources)
+                # Phase 4.3F: restored from the SAME snapshot the Facts/
+                # Sources above came from -- never recomputed from THIS
+                # invocation's (possibly absent) collection_results, for
+                # the identical reason Sources aren't: a resumed run must
+                # never mix a prior invocation's structured evidence with
+                # anything this invocation happens to have collected fresh.
+                result.company_identity_evidence = list(collect_snapshot.company_identity_evidence)
+                result.program_candidate_evidence = list(collect_snapshot.program_candidate_evidence)
+                result.literature_candidate_evidence = list(
+                    collect_snapshot.literature_candidate_evidence
+                )
             ctx.notes.append(
                 f"resumed with {len(resume_plan.restored_facts)} previously-collected fact(s)"
             )
@@ -699,6 +726,20 @@ class Pipeline:
             for fact in pre_integrity_facts:
                 with contextlib.suppress(Exception):
                     self.repo.save_fact(fact)
+            # Phase 4.3F: flattened across every CollectionResult this run
+            # had, exactly like bus.sources already is -- never re-derived
+            # later from anything else (a claim string, a note).
+            result.company_identity_evidence = [
+                c.company_identity_evidence
+                for c in collection_results
+                if c.company_identity_evidence is not None
+            ]
+            result.program_candidate_evidence = [
+                e for c in collection_results for e in c.program_candidate_evidence
+            ]
+            result.literature_candidate_evidence = [
+                e for c in collection_results for e in c.literature_candidate_evidence
+            ]
             # Phase 4.3C correction 5: the run-scoped snapshot resume
             # actually depends on -- see ResumePlan's own docstring in
             # orchestrator/resume.py for why the `facts` table rows just
@@ -722,6 +763,9 @@ class Pipeline:
                     }
                     for c in collection_results
                 ],
+                company_identity_evidence=result.company_identity_evidence,
+                program_candidate_evidence=result.program_candidate_evidence,
+                literature_candidate_evidence=result.literature_candidate_evidence,
             )
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})

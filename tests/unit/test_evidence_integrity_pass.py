@@ -639,9 +639,18 @@ def test_new_module_never_references_program_identity_modules():
         assert name not in text
 
 
-def test_pipeline_still_never_references_program_identity_modules():
+def test_pipeline_still_never_references_the_resolver_modules():
+    """Narrowed by Phase 4.3F (see tests/unit/
+    test_program_identity_offline_isolation.py's own module docstring for
+    the full reasoning): ``program_evidence`` -- the frozen evidence TYPES
+    -- is now a deliberate, required pipeline.py dependency (structured
+    Production collector output, snapshotted losslessly), so it is no
+    longer checked here. The resolver/validation half --
+    ``identifier_validation``/``program_identity_resolution`` -- must still
+    never reach pipeline.py; Program Identity Resolution execution stays
+    explicitly out of scope."""
     text = (REPO_SRC / "orchestrator" / "pipeline.py").read_text(encoding="utf-8")
-    for name in _FORBIDDEN_MODULE_NAMES:
+    for name in ("identifier_validation", "program_identity_resolution"):
         assert name not in text
 
 

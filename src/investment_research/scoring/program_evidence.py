@@ -599,6 +599,44 @@ def build_program_candidate_evidence_from_parsed_study(
     )
 
 
+def build_company_identity_evidence(
+    ticker: str,
+    cik: int | None,
+    resolved_name: str,
+    *,
+    source_id: str,
+    source_tier: SourceTier,
+    retrieved_at: str,
+    content_hash: str = UNKNOWN,
+) -> CompanyIdentityEvidence:
+    """Pure constructor mirroring ``collectors.sec_edgar.SecEdgarCollector.
+    resolve_cik()``'s own ``(cik, resolved_name, outcome)`` return shape
+    exactly (Phase 4.3F requirement 3) -- reads only its own arguments,
+    never a network call, never a re-parse of a notes string or anything
+    else a caller already turned this data into.
+
+    ``source_id``/``source_tier``/``retrieved_at``/``content_hash`` are
+    supplied by the caller (from the SAME real ``Source`` object a caller
+    would also place into an ``EvidenceValidationContext``), so a
+    correctly-constructed record here already satisfies
+    ``validate_company_identity_evidence``'s referential check by
+    construction -- mirrors ``build_program_candidate_evidence_from_
+    parsed_study``'s own contract exactly. ``explicitly_verified_aliases``
+    is never populated here: this phase builds no alias evidence (see
+    ``CompanyIdentityEvidence``'s own docstring on why that type is
+    deferred), and this constructor invents none of its own.
+    """
+    return CompanyIdentityEvidence(
+        ticker=ticker,
+        cik=cik,
+        sec_official_name=resolved_name,
+        source_id=source_id,
+        source_tier=source_tier,
+        retrieved_at=retrieved_at,
+        content_hash=content_hash,
+    )
+
+
 __all__ = [
     "CompanyIdentityEvidence",
     "EMPTY_VALIDATION_CONTEXT",
@@ -607,6 +645,7 @@ __all__ = [
     "EvidenceValidationResult",
     "LiteratureCandidateEvidence",
     "ProgramCandidateEvidence",
+    "build_company_identity_evidence",
     "build_program_candidate_evidence_from_parsed_study",
     "validate_company_identity_evidence",
     "validate_literature_candidate_evidence",

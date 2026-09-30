@@ -14,6 +14,10 @@ from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory, FetchOutcome, Provenance, SourceTier
 from ..schemas.fact import RawFact, Source, make_source_id
+from ..scoring.program_evidence import (
+    ProgramCandidateEvidence,
+    build_program_candidate_evidence_from_parsed_study,
+)
 from .base import CollectionResult
 from .http import HttpClient
 
@@ -69,6 +73,7 @@ class ClinicalTrialsCollector:
             out.notes.append(f"no registered studies found for sponsor {company_name!r}")
             return out
 
+        candidates: list[ProgramCandidateEvidence] = []
         for study in studies:
             parsed = parse_study(study)
             if not parsed.get("nct_id"):
@@ -85,7 +90,29 @@ class ClinicalTrialsCollector:
                 provenance=Provenance.LIVE,
             )
             out.sources.append(source)
-            out.raw_facts.extend(raw_facts_from_study(ticker, parsed, source, collector=self.name))
+            study_facts = raw_facts_from_study(ticker, parsed, source, collector=self.name)
+            out.raw_facts.extend(study_facts)
+            # Phase 4.3F: the structured sponsor/collaborator/intervention/
+            # condition metadata parse_study() already extracted, carried
+            # losslessly onto this collector's typed output -- never
+            # re-derived later by re-parsing a Fact.claim string. Built
+            # from the SAME `parsed` dict and `source` already used above,
+            # never a second fetch or a re-parse.
+            # supporting_fact_ids uses RawFact.fact_id() directly: this is
+            # the EXACT deterministic formula FactCollectorAgent._to_fact()
+            # later uses for Fact.fact_id, so these ids already match the
+            # eventual verified Facts without any re-derivation.
+            candidates.append(
+                build_program_candidate_evidence_from_parsed_study(
+                    parsed,
+                    source_id=source.source_id,
+                    source_tier=source.tier,
+                    retrieved_at=source.retrieved_at,
+                    content_hash=source.content_hash,
+                    supporting_fact_ids=tuple(rf.fact_id() for rf in study_facts),
+                )
+            )
+        out.program_candidate_evidence = tuple(candidates)
         return out
 
 

@@ -36,6 +36,11 @@ from ..schemas.evaluation import (
 )
 from ..schemas.fact import Contradiction, Fact, Source
 from ..schemas.validation import QuarantinedSource, SchemaError, validate_fact, validate_source
+from ..scoring.program_evidence import (
+    CompanyIdentityEvidence,
+    LiteratureCandidateEvidence,
+    ProgramCandidateEvidence,
+)
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +157,99 @@ def _quarantined_source_from_dict(d: dict) -> QuarantinedSource:
     )
 
 
+# -- Phase 4.3F: structured primary-source evidence, snapshotted losslessly
+# alongside Stage 1's own Facts/Sources -- see CollectSnapshot's own
+# docstring. Every field of every type in scoring/program_evidence.py is
+# covered explicitly; none of these three types is re-derived, guessed, or
+# partially reconstructed on read-back.
+def _company_identity_evidence_to_dict(evidence: CompanyIdentityEvidence) -> dict:
+    return {
+        "ticker": evidence.ticker,
+        "cik": evidence.cik,
+        "sec_official_name": evidence.sec_official_name,
+        "explicitly_verified_aliases": list(evidence.explicitly_verified_aliases),
+        "source_id": evidence.source_id,
+        "source_tier": str(evidence.source_tier),
+        "retrieved_at": evidence.retrieved_at,
+        "content_hash": evidence.content_hash,
+    }
+
+
+def _company_identity_evidence_from_dict(d: dict) -> CompanyIdentityEvidence:
+    return CompanyIdentityEvidence(
+        ticker=d["ticker"],
+        cik=d["cik"],
+        sec_official_name=d["sec_official_name"],
+        explicitly_verified_aliases=tuple(d["explicitly_verified_aliases"]),
+        source_id=d["source_id"],
+        source_tier=SourceTier(d["source_tier"]),
+        retrieved_at=d["retrieved_at"],
+        content_hash=d["content_hash"],
+    )
+
+
+def _program_candidate_evidence_to_dict(evidence: ProgramCandidateEvidence) -> dict:
+    return {
+        "nct_id": evidence.nct_id,
+        "lead_sponsor": evidence.lead_sponsor,
+        "collaborators": list(evidence.collaborators),
+        "interventions": list(evidence.interventions),
+        "conditions": list(evidence.conditions),
+        "overall_status": evidence.overall_status,
+        "phases": list(evidence.phases),
+        "primary_completion_date": evidence.primary_completion_date,
+        "completion_date": evidence.completion_date,
+        "first_posted_date": evidence.first_posted_date,
+        "source_id": evidence.source_id,
+        "source_tier": str(evidence.source_tier),
+        "retrieved_at": evidence.retrieved_at,
+        "content_hash": evidence.content_hash,
+        "supporting_fact_ids": list(evidence.supporting_fact_ids),
+    }
+
+
+def _program_candidate_evidence_from_dict(d: dict) -> ProgramCandidateEvidence:
+    return ProgramCandidateEvidence(
+        nct_id=d["nct_id"],
+        lead_sponsor=d["lead_sponsor"],
+        collaborators=tuple(d["collaborators"]),
+        interventions=tuple(d["interventions"]),
+        conditions=tuple(d["conditions"]),
+        overall_status=d["overall_status"],
+        phases=tuple(d["phases"]),
+        primary_completion_date=d["primary_completion_date"],
+        completion_date=d["completion_date"],
+        first_posted_date=d["first_posted_date"],
+        source_id=d["source_id"],
+        source_tier=SourceTier(d["source_tier"]),
+        retrieved_at=d["retrieved_at"],
+        content_hash=d["content_hash"],
+        supporting_fact_ids=tuple(d["supporting_fact_ids"]),
+    )
+
+
+def _literature_candidate_evidence_to_dict(evidence: LiteratureCandidateEvidence) -> dict:
+    return {
+        "pmid": evidence.pmid,
+        "nct_ids": list(evidence.nct_ids),
+        "source_id": evidence.source_id,
+        "source_tier": str(evidence.source_tier),
+        "retrieved_at": evidence.retrieved_at,
+        "content_hash": evidence.content_hash,
+    }
+
+
+def _literature_candidate_evidence_from_dict(d: dict) -> LiteratureCandidateEvidence:
+    return LiteratureCandidateEvidence(
+        pmid=d["pmid"],
+        nct_ids=tuple(d["nct_ids"]),
+        source_id=d["source_id"],
+        source_tier=SourceTier(d["source_tier"]),
+        retrieved_at=d["retrieved_at"],
+        content_hash=d["content_hash"],
+    )
+
+
 class ResumeSnapshotCorrupted(Exception):
     """Phase 4.3C correction 5: raised by
     :meth:`Repository.collect_snapshot_for_resume`/
@@ -171,7 +269,19 @@ class CollectSnapshot:
     given, every ``Source`` they reference, and per-collector metadata
     (never the raw per-collector ``RawFact``/``Source`` breakdown, which
     Stage 1 has already reduced into the two lists above by the time this
-    is saved)."""
+    is saved).
+
+    Phase 4.3F: also carries the structured, typed primary-source evidence
+    (``scoring/program_evidence.py``) any collector this run built --
+    flattened across every ``CollectionResult``, exactly like ``facts``/
+    ``sources`` already are, rather than left nested inside the opaque
+    ``collectors`` diagnostic dicts below (which are never reconstructed
+    into typed objects on read-back). A resumed run that restores this
+    snapshot gets these back as real, usable ``CompanyIdentityEvidence``/
+    ``ProgramCandidateEvidence``/``LiteratureCandidateEvidence`` objects,
+    not opaque dicts -- this phase does not yet validate or resolve them,
+    but a later phase that does must never have to re-derive them from a
+    diagnostic string."""
 
     facts: list[Fact] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
@@ -180,6 +290,11 @@ class CollectSnapshot:
     #: raw_fact_count_before_dedup -- the "failure/degraded/zero-results
     #: semantics" Phase 4.3C correction 5 requires preserved losslessly.
     collectors: list[dict] = field(default_factory=list)
+    #: Phase 4.3F: flattened across every CollectionResult this run had,
+    #: exactly like facts/sources above.
+    company_identity_evidence: list[CompanyIdentityEvidence] = field(default_factory=list)
+    program_candidate_evidence: list[ProgramCandidateEvidence] = field(default_factory=list)
+    literature_candidate_evidence: list[LiteratureCandidateEvidence] = field(default_factory=list)
 
 
 @dataclass
@@ -718,13 +833,32 @@ class Repository:
         facts: Sequence[Fact],
         sources: Sequence[Source],
         collectors: Sequence[dict],
+        *,
+        company_identity_evidence: Sequence[CompanyIdentityEvidence] = (),
+        program_candidate_evidence: Sequence[ProgramCandidateEvidence] = (),
+        literature_candidate_evidence: Sequence[LiteratureCandidateEvidence] = (),
     ) -> None:
         """Persists Stage 1's own pristine (pre-Integrity) output, in
         full, keyed only by this run_id. Called once, right after Stage 1
         computes its own facts/sources -- never merged with, or replaced
-        by, ANY other run_id's data."""
+        by, ANY other run_id's data.
+
+        Phase 4.3F: the three structured-evidence sequences default to
+        empty so this stays callable exactly as before for any run that
+        built none -- unchanged behavior, unchanged snapshot shape, for
+        every collector that does not populate them.
+        """
         payload = {
             "facts": [f.to_row() for f in facts],
+            "company_identity_evidence": [
+                _company_identity_evidence_to_dict(e) for e in company_identity_evidence
+            ],
+            "program_candidate_evidence": [
+                _program_candidate_evidence_to_dict(e) for e in program_candidate_evidence
+            ],
+            "literature_candidate_evidence": [
+                _literature_candidate_evidence_to_dict(e) for e in literature_candidate_evidence
+            ],
             "sources": [_source_to_snapshot_dict(s) for s in sources],
             "collectors": list(collectors),
         }
@@ -757,11 +891,36 @@ class Repository:
             facts = [_fact_from_row(r) for r in payload["facts"]]
             sources = [_source_from_snapshot_dict(r) for r in payload["sources"]]
             collectors = list(payload["collectors"])
+            # Phase 4.3F: .get(..., []) -- never .get()'s KeyError-on-index
+            # form -- because a snapshot saved BEFORE this phase (a run
+            # that predates these keys entirely) is a genuinely valid,
+            # un-corrupted snapshot that simply has nothing structured to
+            # restore, never a corrupted one merely for lacking a key that
+            # did not exist yet when it was written.
+            company_identity_evidence = [
+                _company_identity_evidence_from_dict(r)
+                for r in payload.get("company_identity_evidence", [])
+            ]
+            program_candidate_evidence = [
+                _program_candidate_evidence_from_dict(r)
+                for r in payload.get("program_candidate_evidence", [])
+            ]
+            literature_candidate_evidence = [
+                _literature_candidate_evidence_from_dict(r)
+                for r in payload.get("literature_candidate_evidence", [])
+            ]
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ResumeSnapshotCorrupted(
                 f"collect snapshot for run_id={run_id!r} is corrupted: {exc}"
             ) from exc
-        return CollectSnapshot(facts=facts, sources=sources, collectors=collectors)
+        return CollectSnapshot(
+            facts=facts,
+            sources=sources,
+            collectors=collectors,
+            company_identity_evidence=company_identity_evidence,
+            program_candidate_evidence=program_candidate_evidence,
+            literature_candidate_evidence=literature_candidate_evidence,
+        )
 
     def save_verify_snapshot(
         self,

@@ -19,6 +19,7 @@ from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory, FetchOutcome, Provenance, SourceTier
 from ..schemas.fact import RawFact, Source, make_source_id
+from ..scoring.program_evidence import build_company_identity_evidence
 from .base import CollectionResult
 from .http import HttpClient
 
@@ -106,23 +107,49 @@ class SecEdgarCollector:
         self.max_filings = max_filings
 
     # -- ticker -> CIK -----------------------------------------------------
-    def resolve_cik(self, ticker: str) -> tuple[int | None, str, FetchOutcome]:
+    def _fetch_and_resolve_cik(
+        self, ticker: str
+    ) -> tuple[int | None, str, FetchOutcome, Source | None]:
+        """Fetches ``company_tickers.json`` exactly once and resolves
+        ``ticker -> (cik, resolved_name, outcome)``, plus a ``Source`` for
+        the fetch itself (Phase 4.3F) -- ``None`` only when the fetch
+        failed entirely (``outcome != OK``), matching every other
+        collector's convention of never fabricating a Source for a request
+        that never produced a body. :meth:`resolve_cik` and :meth:`collect`
+        both call this ONE method so the ticker map is never fetched twice
+        for the same ``collect()`` call.
+        """
         result = self.http.get(TICKER_MAP_URL)
         if not result.ok:
-            return None, UNKNOWN, result.outcome
+            return None, UNKNOWN, result.outcome, None
+        source = Source(
+            source_id=make_source_id(TICKER_MAP_URL, "SEC company_tickers.json"),
+            url=TICKER_MAP_URL,
+            title="SEC company_tickers.json",
+            tier=SourceTier.TIER_1,
+            publisher="SEC EDGAR",
+            provenance=Provenance.LIVE,
+            content_hash=result.content_hash(),
+        )
         payload = result.json()
         if not isinstance(payload, dict):
-            return None, UNKNOWN, FetchOutcome.ERROR
+            return None, UNKNOWN, FetchOutcome.ERROR, source
         wanted = ticker.upper()
         for entry in payload.values():
             if isinstance(entry, dict) and str(entry.get("ticker", "")).upper() == wanted:
-                return int(entry["cik_str"]), str(entry.get("title", UNKNOWN)), FetchOutcome.OK
-        return None, UNKNOWN, FetchOutcome.NOT_FOUND
+                return (
+                    int(entry["cik_str"]), str(entry.get("title", UNKNOWN)), FetchOutcome.OK, source,
+                )
+        return None, UNKNOWN, FetchOutcome.NOT_FOUND, source
+
+    def resolve_cik(self, ticker: str) -> tuple[int | None, str, FetchOutcome]:
+        cik, resolved_name, outcome, _source = self._fetch_and_resolve_cik(ticker)
+        return cik, resolved_name, outcome
 
     # -- collection --------------------------------------------------------
     def collect(self, ticker: str, company_name: str = UNKNOWN) -> CollectionResult:
         out = CollectionResult(collector=self.name)
-        cik, resolved_name, outcome = self.resolve_cik(ticker)
+        cik, resolved_name, outcome, ticker_map_source = self._fetch_and_resolve_cik(ticker)
         out.attempted_urls.append(TICKER_MAP_URL)
         if cik is None:
             out.outcome = outcome
@@ -133,6 +160,24 @@ class SecEdgarCollector:
             return out
         if resolved_name != UNKNOWN:
             out.notes.append(f"resolved_company_name={resolved_name}")
+        # Phase 4.3F: the structured counterpart to the note above -- built
+        # ONLY when the ticker-map fetch that resolved this cik actually
+        # produced a Source (always true when cik is not None, since a
+        # sponsor match can only be found in a successfully-fetched,
+        # well-formed payload). Registered into out.sources like every
+        # other Source this collector touches, so a future caller building
+        # an EvidenceValidationContext from bus.sources finds it there.
+        if ticker_map_source is not None:
+            out.sources.append(ticker_map_source)
+            out.company_identity_evidence = build_company_identity_evidence(
+                ticker,
+                cik,
+                resolved_name,
+                source_id=ticker_map_source.source_id,
+                source_tier=ticker_map_source.tier,
+                retrieved_at=ticker_map_source.retrieved_at,
+                content_hash=ticker_map_source.content_hash,
+            )
 
         url = SUBMISSIONS_URL.format(cik=cik)
         out.attempted_urls.append(url)

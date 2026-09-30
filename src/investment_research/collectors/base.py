@@ -12,6 +12,11 @@ from typing import Protocol
 
 from ..schemas.enums import FetchOutcome, Provenance
 from ..schemas.fact import RawFact, Source
+from ..scoring.program_evidence import (
+    CompanyIdentityEvidence,
+    LiteratureCandidateEvidence,
+    ProgramCandidateEvidence,
+)
 
 
 @dataclass
@@ -41,6 +46,18 @@ class CollectionResult:
     #: together let a caller see the dedup step actually bounded output,
     #: rather than inferring it from a single number.
     raw_fact_count_before_dedup: int = 0
+    #: Phase 4.3F: structured, one-a-collector primary-source identity
+    #: metadata (Phase 4.3B's ``scoring/program_evidence.py`` types) --
+    #: never a Fact, never re-derived by re-parsing a claim string or a
+    #: diagnostic note. ``None``/``()`` for every collector that does not
+    #: build one (the overwhelming majority, unchanged). This phase only
+    #: carries this data losslessly on the collector's own typed output; it
+    #: is not yet validated, resolved, delivered to any Agent, or used to
+    #: gate anything -- see ``scoring/program_identity_resolution.py``'s
+    #: own module docstring for the (separate, later-phase) consumer.
+    company_identity_evidence: CompanyIdentityEvidence | None = None
+    program_candidate_evidence: tuple[ProgramCandidateEvidence, ...] = ()
+    literature_candidate_evidence: tuple[LiteratureCandidateEvidence, ...] = ()
 
     @property
     def ok(self) -> bool:

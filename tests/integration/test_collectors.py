@@ -19,6 +19,12 @@ from investment_research.collectors.fda import FdaCollector
 from investment_research.collectors.http import HttpClient
 from investment_research.collectors.sec_edgar import SecEdgarCollector, extract_xbrl_metric
 from investment_research.schemas.enums import UNKNOWN, FactCategory, FetchOutcome, SourceTier
+from investment_research.scoring.program_evidence import (
+    EvidenceValidationContext,
+    EvidenceValidationOutcome,
+    validate_company_identity_evidence,
+    validate_program_candidate_evidence,
+)
 
 DRUGSFDA_WITH_RESULTS = {
     "results": [
@@ -223,6 +229,109 @@ def test_collector_failure_is_reported_not_swallowed(client, monkeypatch):
     assert result.degraded
     assert result.errors
     assert result.raw_facts == []
+
+
+# --- Phase 4.3F: structured evidence on CollectionResult -------------------
+def test_collect_populates_company_identity_evidence(patched_endpoints, client):
+    result = SecEdgarCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    evidence = result.company_identity_evidence
+    assert evidence is not None
+    assert evidence.ticker == "TESTCO"
+    assert evidence.cik == 1595097
+    assert evidence.sec_official_name == "Test Company Holdings Inc"
+    assert evidence.source_tier is SourceTier.TIER_1
+    assert evidence.content_hash != UNKNOWN
+
+
+def test_company_identity_evidence_source_is_registered_and_validates(patched_endpoints, client):
+    """The ticker-map Source this evidence references is actually present
+    in result.sources (never a dangling reference), and the evidence
+    validates cleanly against a context built from exactly that list --
+    proving source_tier/content_hash/retrieved_at genuinely match, not
+    merely happen to be present."""
+    result = SecEdgarCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    evidence = result.company_identity_evidence
+    assert evidence is not None
+    assert evidence.source_id in {s.source_id for s in result.sources}
+    context = EvidenceValidationContext(sources_by_id={s.source_id: s for s in result.sources})
+    outcome = validate_company_identity_evidence(evidence, context)
+    assert outcome.outcome == EvidenceValidationOutcome.VALID
+
+
+def test_unresolved_ticker_never_populates_company_identity_evidence(patched_endpoints, client):
+    result = SecEdgarCollector(client).collect("NOSUCH", "Nobody Inc")
+    assert result.company_identity_evidence is None
+
+
+def test_collector_failure_never_populates_company_identity_evidence(client, monkeypatch):
+    monkeypatch.setattr(sec_edgar, "TICKER_MAP_URL", "http://127.0.0.1:1/nothing")
+    result = SecEdgarCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert result.company_identity_evidence is None
+
+
+def test_resolve_cik_return_signature_is_unchanged_by_the_richer_collect_path(
+    patched_endpoints, client
+):
+    """Phase 4.3F refactored collect()'s internals but must not change
+    resolve_cik()'s own public 3-tuple contract -- existing callers unpack
+    exactly (cik, name, outcome)."""
+    cik, name, outcome = SecEdgarCollector(client).resolve_cik("TESTCO")
+    assert cik == 1595097
+    assert name == "Test Company Holdings Inc"
+    assert outcome is FetchOutcome.OK
+
+
+def test_collect_populates_program_candidate_evidence(patched_endpoints, client):
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    assert len(result.program_candidate_evidence) == 1
+    evidence = result.program_candidate_evidence[0]
+    assert evidence.nct_id == "NCT01234567"
+    assert evidence.lead_sponsor == "Test Company Holdings Inc"
+    assert evidence.overall_status == "RECRUITING"
+    assert evidence.phases == ("PHASE2",)
+    assert evidence.source_tier is SourceTier.TIER_1
+
+
+def test_program_candidate_evidence_source_and_facts_are_registered_and_validate(
+    patched_endpoints, client
+):
+    """The candidate's source_id resolves in result.sources, its
+    supporting_fact_ids resolve to the SAME fact_id RawFact.fact_id()
+    computes (the exact formula FactCollectorAgent later uses for
+    Fact.fact_id), and the whole record validates cleanly against a
+    context built from real Fact objects at those exact ids."""
+    from investment_research.schemas.enums import EvidenceClass, Materiality, VerifiedStatus
+    from investment_research.schemas.fact import Fact
+
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+    evidence = result.program_candidate_evidence[0]
+    assert evidence.source_id in {s.source_id for s in result.sources}
+    assert evidence.supporting_fact_ids
+    assert set(evidence.supporting_fact_ids) == {rf.fact_id() for rf in result.raw_facts}
+
+    verified_facts = {
+        rf.fact_id(): Fact(
+            fact_id=rf.fact_id(), ticker=rf.ticker, category=rf.category, claim=rf.claim,
+            evidence_class=EvidenceClass.VERIFIED_FACT, source_id=rf.source.source_id,
+            source_url=rf.source.url, source_title=rf.source.title, source_tier=rf.source.tier,
+            verified_status=VerifiedStatus.VERIFIED, materiality=Materiality.MEDIUM,
+        )
+        for rf in result.raw_facts
+    }
+    context = EvidenceValidationContext(
+        sources_by_id={s.source_id: s for s in result.sources},
+        verified_facts_by_id=verified_facts,
+    )
+    outcome = validate_program_candidate_evidence(evidence, context)
+    assert outcome.outcome == EvidenceValidationOutcome.VALID
+
+
+def test_no_studies_found_yields_empty_program_candidate_evidence(
+    patched_endpoints, monkeypatch, client
+):
+    monkeypatch.setattr(clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_empty")
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Nobody Sponsors This Inc")
+    assert result.program_candidate_evidence == ()
 
 
 def test_xbrl_metric_takes_the_latest_period(patched_endpoints, client):

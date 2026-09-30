@@ -32,6 +32,7 @@ from investment_research.scoring.program_evidence import (
     EvidenceValidationOutcome,
     LiteratureCandidateEvidence,
     ProgramCandidateEvidence,
+    build_company_identity_evidence,
     build_program_candidate_evidence_from_parsed_study,
     validate_company_identity_evidence,
     validate_literature_candidate_evidence,
@@ -444,3 +445,50 @@ def test_build_from_parsed_study_missing_optional_fields_stays_unknown():
     )
     assert evidence.lead_sponsor == "UNKNOWN"
     assert evidence.collaborators == ()
+
+
+# =============================================================================
+# build_company_identity_evidence (Phase 4.3F)
+# =============================================================================
+def test_build_company_identity_evidence_reads_only_its_own_arguments():
+    evidence = build_company_identity_evidence(
+        "DEMOBIO", 1595097, "Demo Biotherapeutics Inc",
+        source_id="src_sec_map", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
+        content_hash="tickerhash",
+    )
+    assert evidence.ticker == "DEMOBIO"
+    assert evidence.cik == 1595097
+    assert evidence.sec_official_name == "Demo Biotherapeutics Inc"
+    assert evidence.source_id == "src_sec_map"
+    assert evidence.source_tier is SourceTier.TIER_1
+    assert evidence.retrieved_at == RETRIEVED_AT
+    assert evidence.content_hash == "tickerhash"
+    # Never populated by this constructor (module docstring / Correction 1):
+    # alias-based CONFIRMED is disabled and this phase builds no alias
+    # evidence of its own.
+    assert evidence.explicitly_verified_aliases == ()
+
+
+def test_build_company_identity_evidence_output_passes_referential_validation_when_source_matches():
+    """Mirrors build_program_candidate_evidence_from_parsed_study's own
+    contract test: a caller who passes the SAME Source's own tier/
+    retrieved_at/content_hash gets a record that validates cleanly by
+    construction."""
+    source = _source(source_id="src_sec_map", content_hash="realhash")
+    evidence = build_company_identity_evidence(
+        "DEMOBIO", 1595097, "Demo Biotherapeutics Inc",
+        source_id=source.source_id, source_tier=source.tier, retrieved_at=source.retrieved_at,
+        content_hash=source.content_hash,
+    )
+    context = _context(sources=[source])
+    result = validate_company_identity_evidence(evidence, context)
+    assert result.outcome == EvidenceValidationOutcome.VALID
+
+
+def test_build_company_identity_evidence_with_no_cik_stays_unresolved():
+    evidence = build_company_identity_evidence(
+        "DEMOBIO", None, "UNKNOWN",
+        source_id="src_sec_map", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
+    )
+    assert evidence.cik is None
+    assert evidence.sec_official_name == "UNKNOWN"
