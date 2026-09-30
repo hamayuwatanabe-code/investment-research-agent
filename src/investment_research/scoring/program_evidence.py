@@ -258,10 +258,12 @@ class ProgramCandidateEvidence:
     field -- never a ``dict[str, str]`` -- so a future caller can never
     misattribute one date's meaning to a different field.
 
-    ``first_posted_date`` is always ``UNKNOWN`` when built by
-    ``build_program_candidate_evidence_from_parsed_study`` today:
-    ``collectors.clinicaltrials.parse_study()`` does not currently read
-    CT.gov API v2's ``statusModule.studyFirstPostDateStruct`` field.
+    ``first_posted_date`` (Phase 4.3F correction 1): read from CT.gov API
+    v2's ``statusModule.studyFirstPostDateStruct`` field, via
+    ``collectors.clinicaltrials.parse_study()``'s own ``first_posted_date``
+    key -- the same verbatim-passthrough convention every other date field
+    here already follows (never padded, guessed, or completed). ``UNKNOWN``
+    only when CT.gov itself omitted the field.
 
     ---------------------------------------------------------------------
     ``supporting_fact_ids`` -- Phase 4.3B Correction 1, requirement 3
@@ -588,9 +590,7 @@ def build_program_candidate_evidence_from_parsed_study(
         phases=_tuple_of_str(parsed.get("phases")),
         primary_completion_date=str(parsed.get("primary_completion") or UNKNOWN),
         completion_date=str(parsed.get("completion_date") or UNKNOWN),
-        # See the class docstring: parse_study() does not currently read
-        # studyFirstPostDateStruct, so this is never populated here.
-        first_posted_date=UNKNOWN,
+        first_posted_date=str(parsed.get("first_posted_date") or UNKNOWN),
         source_id=source_id,
         source_tier=source_tier,
         retrieved_at=retrieved_at,

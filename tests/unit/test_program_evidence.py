@@ -430,12 +430,29 @@ def test_build_from_parsed_study_output_passes_referential_validation_when_sourc
     assert result.outcome == EvidenceValidationOutcome.VALID
 
 
-def test_build_from_parsed_study_never_populates_first_posted_date():
+def test_build_from_parsed_study_first_posted_date_stays_unknown_when_absent():
+    """``_real_shaped_parsed_study()`` has no ``first_posted_date`` key --
+    ``.get()`` correctly falls back to UNKNOWN, exactly like every other
+    optional date field here, never guessed or backfilled."""
     evidence = build_program_candidate_evidence_from_parsed_study(
         _real_shaped_parsed_study(),
         source_id="src_ct_1", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
     )
     assert evidence.first_posted_date == "UNKNOWN"
+
+
+def test_build_from_parsed_study_reads_first_posted_date_when_present():
+    """Phase 4.3F correction 1: parse_study() now reads CT.gov's
+    ``statusModule.studyFirstPostDateStruct`` into ``first_posted_date`` --
+    the builder must pass that value through verbatim, the same
+    read-only-what-parse_study-gave-us convention every other date field
+    here already follows."""
+    parsed = {**_real_shaped_parsed_study(), "first_posted_date": "2024-02-01"}
+    evidence = build_program_candidate_evidence_from_parsed_study(
+        parsed,
+        source_id="src_ct_1", source_tier=SourceTier.TIER_1, retrieved_at=RETRIEVED_AT,
+    )
+    assert evidence.first_posted_date == "2024-02-01"
 
 
 def test_build_from_parsed_study_missing_optional_fields_stays_unknown():

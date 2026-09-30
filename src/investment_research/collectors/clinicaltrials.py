@@ -14,6 +14,7 @@ from typing import Any
 
 from ..schemas.enums import UNKNOWN, FactCategory, FetchOutcome, Provenance, SourceTier
 from ..schemas.fact import RawFact, Source, make_source_id
+from ..scoring.identifier_validation import validate_strict_nct_id
 from ..scoring.program_evidence import (
     ProgramCandidateEvidence,
     build_program_candidate_evidence_from_parsed_study,
@@ -92,19 +93,43 @@ class ClinicalTrialsCollector:
             out.sources.append(source)
             study_facts = raw_facts_from_study(ticker, parsed, source, collector=self.name)
             out.raw_facts.extend(study_facts)
+            # Phase 4.3F correction 1: validate_strict_nct_id() -- the
+            # SAME validator scoring/program_evidence.py's own
+            # validate_program_candidate_evidence() would apply anyway --
+            # is the gate for whether a ProgramCandidateEvidence is built
+            # at all, never a duplicated regex. A non-empty but
+            # non-strict-valid NCT ID (the empty case is already handled
+            # by the `continue` above, which skips the whole study) never
+            # produces structured candidate evidence, and is never
+            # guessed/corrected into a valid one -- but this is a gate on
+            # the OPTIONAL structured evidence only: RawFact generation
+            # and this collector's own outcome/degraded semantics are
+            # completely unaffected (the Facts above were already built,
+            # unconditionally, from the same unvalidated parsed dict, and
+            # stay exactly as they were before this correction).
+            canonical_nct_id = validate_strict_nct_id(parsed.get("nct_id"))
+            if canonical_nct_id is None:
+                out.notes.append(
+                    "NCT ID failed strict validation; skipping structured candidate "
+                    f"evidence for this study (raw value: {str(parsed.get('nct_id'))[:80]!r})"
+                )
+                continue
             # Phase 4.3F: the structured sponsor/collaborator/intervention/
             # condition metadata parse_study() already extracted, carried
             # losslessly onto this collector's typed output -- never
             # re-derived later by re-parsing a Fact.claim string. Built
             # from the SAME `parsed` dict and `source` already used above,
-            # never a second fetch or a re-parse.
+            # never a second fetch or a re-parse. The candidate's own
+            # nct_id is always the VALIDATOR's canonical return value
+            # (never the raw parsed["nct_id"]), so it is always exactly
+            # ``NCT`` + 8 digits.
             # supporting_fact_ids uses RawFact.fact_id() directly: this is
             # the EXACT deterministic formula FactCollectorAgent._to_fact()
             # later uses for Fact.fact_id, so these ids already match the
             # eventual verified Facts without any re-derivation.
             candidates.append(
                 build_program_candidate_evidence_from_parsed_study(
-                    parsed,
+                    {**parsed, "nct_id": canonical_nct_id},
                     source_id=source.source_id,
                     source_tier=source.tier,
                     retrieved_at=source.retrieved_at,
@@ -162,6 +187,10 @@ def parse_study(study: dict[str, Any]) -> dict[str, Any]:
     primary_completion, primary_completion_type = _date_struct(status, "primaryCompletionDateStruct")
     completion_date, completion_date_type = _date_struct(status, "completionDateStruct")
     last_update_post, last_update_post_type = _date_struct(status, "lastUpdatePostDateStruct")
+    # Phase 4.3F correction 1: previously never read at all -- see
+    # ProgramCandidateEvidence's own (now-corrected) docstring in
+    # scoring/program_evidence.py.
+    first_posted_date, first_posted_date_type = _date_struct(status, "studyFirstPostDateStruct")
 
     responsible_party = sponsor.get("responsibleParty") or {}
     collaborators = sponsor.get("collaborators") or []
@@ -226,6 +255,8 @@ def parse_study(study: dict[str, Any]) -> dict[str, Any]:
         "completion_date_type": completion_date_type,
         "last_update_post": last_update_post,
         "last_update_post_type": last_update_post_type,
+        "first_posted_date": first_posted_date,
+        "first_posted_date_type": first_posted_date_type,
         "last_update_submit": status.get("lastUpdateSubmitDate", UNKNOWN),
         "study_first_submit_date": status.get("studyFirstSubmitDate", UNKNOWN),
         # Backward-compatible alias -- pre-existing callers read "last_update".

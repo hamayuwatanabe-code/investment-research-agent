@@ -91,6 +91,7 @@ STUDIES = {
                     "primaryCompletionDateStruct": {"date": "2026-11-30", "type": "ESTIMATED"},
                     "lastUpdatePostDateStruct": {"date": "2026-04-02"},
                     "startDateStruct": {"date": "2025-06-01"},
+                    "studyFirstPostDateStruct": {"date": "2025-05-15", "type": "ACTUAL"},
                 },
                 "sponsorCollaboratorsModule": {
                     "leadSponsor": {"name": "Test Company Holdings Inc"}
@@ -122,6 +123,41 @@ STUDIES = {
     ]
 }
 
+def _single_study(nct_id: str) -> dict:
+    """A minimal single-study payload, shaped like ``STUDIES``'s own entry,
+    varying only the ``nctId`` -- for Phase 4.3F correction 1's strict NCT
+    ID validation gate tests."""
+    return {
+        "studies": [
+            {
+                "protocolSection": {
+                    "identificationModule": {"nctId": nct_id, "briefTitle": "An Edge-Case Study"},
+                    "statusModule": {
+                        "overallStatus": "RECRUITING",
+                        "primaryCompletionDateStruct": {"date": "2026-11-30", "type": "ESTIMATED"},
+                        "lastUpdatePostDateStruct": {"date": "2026-04-02"},
+                        "startDateStruct": {"date": "2025-06-01"},
+                    },
+                    "sponsorCollaboratorsModule": {
+                        "leadSponsor": {"name": "Test Company Holdings Inc"}
+                    },
+                    "designModule": {"phases": ["PHASE2"]},
+                }
+            }
+        ]
+    }
+
+
+#: Non-empty but strictly-invalid (7 digits, not 8) NCT id -- Phase 4.3F
+#: correction 1 Finding B: must skip structured candidate evidence, never
+#: skip the study's RawFacts.
+STUDIES_INVALID_NCT = _single_study("NCT1234567")
+
+#: Strict-valid but non-canonically-cased/whitespace-padded NCT id -- Phase
+#: 4.3F correction 1 Finding B: the resulting candidate's nct_id must be the
+#: validator's canonical (upper-cased, stripped) form.
+STUDIES_LOWERCASE_NCT = _single_study(" nct01234567 ")
+
 COMPANY_FACTS = {
     "facts": {
         "us-gaap": {
@@ -151,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/xbrl/companyfacts/CIK0001595097.json": COMPANY_FACTS,
             "/drug/drugsfda_with_results.json": DRUGSFDA_WITH_RESULTS,
             "/api/v2/studies_empty": STUDIES_EMPTY,
+            "/api/v2/studies_invalid_nct": STUDIES_INVALID_NCT,
+            "/api/v2/studies_lowercase_nct": STUDIES_LOWERCASE_NCT,
         }
         if path in routes:
             body = json.dumps(routes[path]).encode()
@@ -290,6 +328,9 @@ def test_collect_populates_program_candidate_evidence(patched_endpoints, client)
     assert evidence.overall_status == "RECRUITING"
     assert evidence.phases == ("PHASE2",)
     assert evidence.source_tier is SourceTier.TIER_1
+    # Phase 4.3F correction 1 Finding C: studyFirstPostDateStruct now flows
+    # through end-to-end, never left at UNKNOWN when CT.gov provided it.
+    assert evidence.first_posted_date == "2025-05-15"
 
 
 def test_program_candidate_evidence_source_and_facts_are_registered_and_validate(
@@ -334,6 +375,43 @@ def test_no_studies_found_yields_empty_program_candidate_evidence(
     assert result.program_candidate_evidence == ()
 
 
+def test_strictly_invalid_nct_id_skips_only_the_structured_candidate(
+    patched_endpoints, monkeypatch, client
+):
+    """Phase 4.3F correction 1 Finding B: a non-empty but strictly-invalid
+    NCT id (here, 7 digits, not 8) must never produce a
+    ProgramCandidateEvidence -- but the study's RawFacts are still built
+    normally, and the collector's own outcome is unaffected. Optional
+    structured evidence being unavailable is never grounds to change
+    Action/status."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_invalid_nct"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert result.program_candidate_evidence == ()
+    assert result.outcome is FetchOutcome.OK
+    assert result.raw_facts
+    assert any("NCT1234567" in f.claim for f in result.raw_facts)
+    assert any("strict validation" in note for note in result.notes)
+
+
+def test_lowercase_whitespace_nct_id_is_canonicalized_not_rejected(
+    patched_endpoints, monkeypatch, client
+):
+    """Phase 4.3F correction 1 Finding B: a strict-valid NCT id that is not
+    already in canonical form (here, lowercase with surrounding whitespace)
+    still produces a candidate, whose nct_id is always the validator's
+    canonical NCT+8-digit form -- never the raw, un-normalized value."""
+    monkeypatch.setattr(
+        clinicaltrials, "STUDIES_URL", f"{patched_endpoints}/api/v2/studies_lowercase_nct"
+    )
+    result = ClinicalTrialsCollector(client).collect("TESTCO", "Test Company Holdings Inc")
+
+    assert len(result.program_candidate_evidence) == 1
+    assert result.program_candidate_evidence[0].nct_id == "NCT01234567"
+
+
 def test_xbrl_metric_takes_the_latest_period(patched_endpoints, client):
     cik, _, _ = SecEdgarCollector(client).resolve_cik("TESTCO")
     facts, outcome = SecEdgarCollector(client).company_facts(cik)
@@ -362,6 +440,9 @@ def test_study_parsing_extracts_design_not_just_existence():
     assert parsed["primary_endpoint"].startswith("Change from baseline")
     assert parsed["primary_completion"] == "2026-11-30"
     assert parsed["primary_completion_type"] == "ESTIMATED"
+    # Phase 4.3F correction 1 Finding C: studyFirstPostDateStruct.
+    assert parsed["first_posted_date"] == "2025-05-15"
+    assert parsed["first_posted_date_type"] == "ACTUAL"
 
 
 def test_trial_collection_emits_endpoint_and_design_facts(patched_endpoints, client):

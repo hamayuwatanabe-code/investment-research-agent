@@ -592,6 +592,24 @@ class Pipeline:
                         )
                     else:
                         snapshot_facts = verify_snapshot.verified_facts
+                # Phase 4.3F correction 1: the collect snapshot's own
+                # structured evidence (company_identity_evidence/
+                # program_candidate_evidence/literature_candidate_evidence)
+                # and the Sources it references are ALSO recoverable at
+                # this resume point -- Facts/the fail-closed contract above
+                # depend exclusively on verify_snapshot, never on this, so
+                # this second fetch is deliberately best-effort: a missing
+                # or corrupted collect snapshot here must never fail the
+                # whole resume (never folded into snapshot_missing_reason).
+                # A run whose collect snapshot genuinely cannot be
+                # recovered simply keeps its structured-evidence lists
+                # empty on the resumed result, exactly as a run whose
+                # collector built none already does -- optional data
+                # unavailable is never grounds to withhold Action/status.
+                try:
+                    collect_snapshot = self.repo.collect_snapshot_for_resume(ctx.run_id)
+                except ResumeSnapshotCorrupted:
+                    collect_snapshot = None
             # needed == 0 (a fresh start): no snapshot is needed at all.
 
             resume_plan = build_resume_plan(
@@ -673,30 +691,41 @@ class Pipeline:
             )
             bus.add_facts(resume_plan.restored_facts)
             # Phase 4.3C correction 5: Source objects come from THIS SAME
-            # snapshot the facts themselves came from -- collect_snapshot is
-            # only ever non-None here when needed==stage_index("verify")
-            # (see the resume-plan-building block above), i.e. exactly when
-            # resume_plan.restored_facts is itself collect_snapshot.facts.
-            # Never the freshly-recollected `collection_results` (Phase
-            # 4.3C correction 3's own fix, now superseded): that would mix
-            # THIS invocation's newly-fetched Sources with a PRIOR
-            # invocation's Facts, which is exactly the "mixing" this
-            # correction's own requirements prohibit -- live Source content
-            # can differ between fetches even when the fact set does not.
-            # When verify is already done (needed > stage_index("verify")),
-            # collect_snapshot is never fetched at all (not needed) and
-            # this branch has no sources to add -- Stage 2 below restores
-            # from verify_snapshot instead, which carries no separate
-            # Source list (verified Facts already denormalize source_id/
-            # source_url/source_tier onto themselves).
+            # snapshot the facts themselves came from when
+            # needed==stage_index("verify") (i.e. resume_plan.restored_
+            # facts is itself collect_snapshot.facts) -- never the
+            # freshly-recollected `collection_results` (Phase 4.3C
+            # correction 3's own fix, now superseded): that would mix THIS
+            # invocation's newly-fetched Sources with a PRIOR invocation's
+            # Facts, which is exactly the "mixing" this correction's own
+            # requirements prohibit -- live Source content can differ
+            # between fetches even when the fact set does not.
+            #
+            # Phase 4.3F correction 1: when resuming PAST "verify" instead
+            # (needed > stage_index("verify")), resume_plan.restored_facts
+            # comes from verify_snapshot, never from collect_snapshot -- but
+            # collect_snapshot may STILL be non-None here (the resume-plan-
+            # building block above now fetches it best-effort in that case
+            # too), carrying the run's structured evidence and the Sources
+            # it references, which were being silently dropped before this
+            # correction. Adding those Sources into bus.sources here is
+            # exactly as safe as a FRESH (non-resumed) run already is:
+            # bus.sources is populated straight from collection_results at
+            # Stage 1 there too, pre-quarantine, un-filtered by Stage 2 --
+            # quarantine exclusion has always been the responsibility of a
+            # caller consulting result.quarantined_sources separately
+            # (confirmed by program_evidence.EvidenceValidationContext's own
+            # documented caller contract), never something bus.sources
+            # itself guarantees. This branch introduces no new exposure
+            # beyond what a fresh run already has.
             if collect_snapshot is not None:
                 bus.add_sources(collect_snapshot.sources)
-                # Phase 4.3F: restored from the SAME snapshot the Facts/
-                # Sources above came from -- never recomputed from THIS
-                # invocation's (possibly absent) collection_results, for
-                # the identical reason Sources aren't: a resumed run must
-                # never mix a prior invocation's structured evidence with
-                # anything this invocation happens to have collected fresh.
+                # Restored from the SAME snapshot the Facts/Sources above
+                # came from -- never recomputed from THIS invocation's
+                # (possibly absent) collection_results, for the identical
+                # reason Sources aren't: a resumed run must never mix a
+                # prior invocation's structured evidence with anything this
+                # invocation happens to have collected fresh.
                 result.company_identity_evidence = list(collect_snapshot.company_identity_evidence)
                 result.program_candidate_evidence = list(collect_snapshot.program_candidate_evidence)
                 result.literature_candidate_evidence = list(

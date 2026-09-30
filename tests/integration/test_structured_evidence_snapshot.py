@@ -254,14 +254,16 @@ def test_resumed_run_restores_structured_evidence_from_the_collect_snapshot(monk
     )
 
 
-def test_resume_past_verify_never_restores_structured_evidence_from_a_never_fetched_collect_snapshot(
+def test_resume_past_verify_restores_structured_evidence_from_the_collect_snapshot(
     monkeypatch,
 ):
-    """When resuming past 'verify' (the collect snapshot is never fetched
-    at all -- see Pipeline.run()'s own comment on this exact point for
-    bus.sources), the structured-evidence lists stay empty on the resumed
-    result, exactly like bus.sources does -- never silently populated from
-    a snapshot this resume point never asked for."""
+    """Phase 4.3F correction 1: when resuming past 'verify', the collect
+    snapshot's own structured-evidence lists (company_identity_evidence /
+    program_candidate_evidence / literature_candidate_evidence) and the
+    Sources they reference are now ALSO recovered, on a best-effort basis
+    -- see Pipeline.run()'s own comment on this exact point. A run whose
+    collect snapshot was actually recorded no longer silently loses this
+    lossless Phase 4.3F output merely because it resumed past verify."""
     run_id = "structev-c2"
     repo = _new_repo()
 
@@ -282,6 +284,47 @@ def test_resume_past_verify_never_restores_structured_evidence_from_a_never_fetc
     resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
 
     assert resumed.resume_plan is not None
+    _assert_matches_fixture(
+        resumed.company_identity_evidence,
+        resumed.program_candidate_evidence,
+        resumed.literature_candidate_evidence,
+    )
+
+
+def test_resume_past_verify_survives_a_missing_collect_snapshot(monkeypatch):
+    """Finding A's fix is deliberately best-effort/non-blocking: if the
+    collect snapshot cannot be recovered when resuming past verify (here,
+    simulated by deleting its row outright after the crash), the resume
+    itself must still succeed -- Action/status/facts are governed solely by
+    verify_snapshot -- and only the structured-evidence lists fall back to
+    empty, exactly as a collector that built none already does."""
+    run_id = "structev-c3"
+    repo = _new_repo()
+
+    original_save_checkpoint = repository_module.Repository.save_checkpoint
+
+    def _crash_after_verify(self, checkpoint):
+        if checkpoint.stage not in ("collect", "verify"):
+            raise RuntimeError("simulated crash after verify checkpoint")
+        return original_save_checkpoint(self, checkpoint)
+
+    with monkeypatch.context() as m:
+        m.setattr(repository_module.Repository, "save_checkpoint", _crash_after_verify)
+        pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+        with pytest.raises(RuntimeError, match="simulated crash after verify checkpoint"):
+            pipeline.run(**_run_kwargs(), run_id=run_id)
+
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = '_collect_snapshot'",
+        (run_id,),
+    )
+    repo.conn.commit()
+
+    fresh_pipeline = Pipeline(repo, NullSearchProvider(), today=TODAY)
+    resumed = fresh_pipeline.run(**_run_kwargs(), run_id=run_id, resume=True)
+
+    assert resumed.resume_plan is not None
+    assert resumed.resume_plan.snapshot_unavailable_reason is None
     assert resumed.company_identity_evidence == []
     assert resumed.program_candidate_evidence == []
     assert resumed.literature_candidate_evidence == []
