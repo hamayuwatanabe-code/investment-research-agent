@@ -23,6 +23,7 @@ Four things are tested here:
 from __future__ import annotations
 
 import types
+from datetime import datetime, timedelta, timezone
 
 from investment_research.collectors.documents import Document
 from investment_research.research.anthropic_web import AnthropicWebResearchProvider
@@ -40,6 +41,31 @@ from investment_research.schemas.enums import (
 from investment_research.schemas.fact import Source, UnresolvedQuestion, make_source_id
 
 TODAY_RETRIEVED_AT = "2026-09-08T00:00:00+00:00"
+
+#: Phase 4.3F correction 3: AnthropicWebResearchProvider.fetch() stamps
+#: Document.retrieved_at from the REAL wall clock (never from the fake
+#: LLM response's own embedded "retrieved_at" marker -- see this file's
+#: module docstring, point 1). A test asserting that value against a
+#: hardcoded year-month literal is a time bomb: it only ever passed
+#: because the machine's real clock happened to still read that month when
+#: the test was written, and breaks on every later month with no change
+#: to the actual behavior being tested. This helper instead brackets the
+#: real fetch call with two real timestamps taken immediately before/after
+#: it, and asserts retrieved_at parses to a point inside that window
+#: (with a small tolerance for the single synchronous call in between) --
+#: still a genuine proof that retrieved_at is real fetch-time, just never
+#: tied to which actual month/year the suite happens to run in.
+_CLOCK_TOLERANCE = timedelta(seconds=2)
+
+
+def _assert_retrieved_at_is_the_real_fetch_time(document, before: datetime, after: datetime) -> None:
+    retrieved = datetime.fromisoformat(document.retrieved_at)
+    assert before - _CLOCK_TOLERANCE <= retrieved <= after + _CLOCK_TOLERANCE, (
+        f"retrieved_at {document.retrieved_at!r} does not fall within the actual "
+        f"fetch() call window [{before.isoformat()}, {after.isoformat()}] "
+        f"(+/- {_CLOCK_TOLERANCE})"
+    )
+
 
 _QUESTION = UnresolvedQuestion(
     question="Does the regulator consider the primary endpoint adequate to establish "
@@ -100,7 +126,9 @@ def test_case1_historical_statutory_filing_keeps_its_may_dates_not_september():
     )
     provider = AnthropicWebResearchProvider(llm)
 
+    before_fetch = datetime.now(timezone.utc)
     document = provider.fetch(known_source.url, known=known_source)
+    after_fetch = datetime.now(timezone.utc)
 
     assert document is not None
     # Retained May metadata -- never invented, never overwritten.
@@ -108,8 +136,8 @@ def test_case1_historical_statutory_filing_keeps_its_may_dates_not_september():
     assert document.event_date == "2026-05-08"
     assert document.filing_date == "2026-05-08"
     assert document.accession == "0001234567-26-000123"
-    # retrieved_at is real (September) and kept SEPARATE from those dates.
-    assert document.retrieved_at.startswith("2026-09")
+    # retrieved_at is the real fetch time and kept SEPARATE from those dates.
+    _assert_retrieved_at_is_the_real_fetch_time(document, before_fetch, after_fetch)
     assert document.published_date != document.retrieved_at
     assert document.event_date != document.retrieved_at
     assert document.authority is DocumentAuthority.STATUTORY_FILING
@@ -149,12 +177,14 @@ def test_case2_regulator_issued_document_keeps_its_own_date_and_is_independent()
     )
     provider = AnthropicWebResearchProvider(llm)
 
+    before_fetch = datetime.now(timezone.utc)
     document = provider.fetch(known_source.url, known=known_source)
+    after_fetch = datetime.now(timezone.utc)
 
     assert document is not None
     assert document.published_date == "2026-04-15"
     assert document.event_date == "2026-04-15"
-    assert document.retrieved_at.startswith("2026-09")
+    _assert_retrieved_at_is_the_real_fetch_time(document, before_fetch, after_fetch)
     assert document.authority is DocumentAuthority.REGULATOR
 
     fact = _fact_from_answered_question(
@@ -216,14 +246,16 @@ def test_case4_search_hit_with_no_known_date_stays_unknown_not_retrieval_date():
     )
     provider = AnthropicWebResearchProvider(llm)
 
+    before_fetch = datetime.now(timezone.utc)
     document = provider.fetch(hit.url, known=hit)
+    after_fetch = datetime.now(timezone.utc)
 
     assert document is not None
     assert document.published_date == UNKNOWN
     assert document.event_date == UNKNOWN
     assert document.filing_date == UNKNOWN
     assert document.published_date != document.retrieved_at
-    assert document.retrieved_at.startswith("2026-09")
+    _assert_retrieved_at_is_the_real_fetch_time(document, before_fetch, after_fetch)
 
 
 # --- fetch() with no known seed at all -------------------------------------
