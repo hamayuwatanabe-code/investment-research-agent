@@ -156,6 +156,17 @@ class AdaptiveLiteratureStepResult:
     #: New Chunks to append to Pipeline.chunks -- empty for every outcome
     #: except COMPLETE/INCOMPLETE.
     new_chunks: tuple[Chunk, ...]
+    #: New Sources (literature-originated) the caller must merge into
+    #: ``EvidenceBus.sources`` (via ``bus.add_sources(...)``, which dedups
+    #: by ``source_id``) -- empty for every outcome except COMPLETE/
+    #: INCOMPLETE/a restore that found one. Mirrors Stage 1's own existing
+    #: contract exactly: a quarantined Source is still included here (never
+    #: pre-filtered) -- quarantine exclusion is tracked separately via
+    #: ``quarantined_sources`` below, and no Fact resting only on a
+    #: quarantined Source ever survives into ``verified_facts`` (Evidence
+    #: Integrity's own item 6), so a quarantined Source reaching
+    #: ``bus.sources`` is never usable as evidence despite being present.
+    new_sources: tuple[Source, ...]
     #: Newly quarantined Sources this step's own Integrity pass found --
     #: the caller extends (never replaces) result.quarantined_sources.
     quarantined_sources: tuple[QuarantinedSource, ...]
@@ -183,6 +194,7 @@ def _not_attempted(
         outcome=outcome,
         verified_facts=tuple(verified_facts),
         new_chunks=(),
+        new_sources=(),
         quarantined_sources=(),
         agent_records=(),
         failures=(),
@@ -200,6 +212,7 @@ def _blocked(
         outcome=outcome,
         verified_facts=tuple(verified_facts),
         new_chunks=(),
+        new_sources=(),
         quarantined_sources=(),
         agent_records=(),
         failures=(reason,),
@@ -321,6 +334,7 @@ def _finalize_with_integrity(
         outcome=outcome,
         verified_facts=tuple(pass_output.verified_facts),
         new_chunks=tuple(chunks),
+        new_sources=tuple(new_sources),
         quarantined_sources=tuple(pass_output.quarantined_sources),
         agent_records=(*extra_agent_records, pass_output.agent_run_record),
         failures=(*extra_failures, *pass_output.failures),
@@ -390,6 +404,32 @@ def run_adaptive_literature_step(
         )
 
     if verify_snapshot is not None:
+        # verify_snapshot's own Integrity pass was run FROM a collect
+        # snapshot's pre-Integrity facts/sources/chunks (every one of this
+        # module's OWN save paths writes the collect snapshot strictly
+        # BEFORE the verify snapshot -- see save_adaptive_collect_snapshot
+        # call sites below). A verify snapshot with no collect snapshot
+        # is therefore never a "clean" state to restore from: it is
+        # missing exactly the Sources/Chunks the restored Facts are
+        # supposed to be backed by. Never trusted implicitly -- checked
+        # explicitly, the same defensive-in-depth precedent
+        # build_adaptive_acquisition_plan's own independent NCT re-check
+        # already sets for this module. Distinguished from
+        # SNAPSHOT_CORRUPTED (a row that exists but fails to parse,
+        # handled above): this is a row that is cleanly ABSENT, which is
+        # just as untrustworthy here, and fails closed identically --
+        # never re-fetched, never re-Integrity'd, never silently restored
+        # with empty Sources/Chunks standing in for missing ones.
+        if collect_snapshot is None:
+            return _blocked(
+                AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE,
+                verified_facts,
+                f"an adaptive literature verify snapshot exists for run_id={run_id!r} but its "
+                "dependency, the collect snapshot, is missing (cleanly absent, not corrupted) "
+                "-- the Sources/Chunks the restored Facts would be backed by cannot be "
+                "recovered; failing closed rather than restoring an incomplete evidence set "
+                "as if it were complete",
+            )
         # State F: Integrity already completed in a prior invocation --
         # restore directly, re-fetch nothing, re-run nothing. The ORIGINAL
         # execution_status category is preserved rather than re-derived
@@ -407,7 +447,8 @@ def run_adaptive_literature_step(
         return AdaptiveLiteratureStepResult(
             outcome=outcome,
             verified_facts=tuple(verify_snapshot.verified_facts),
-            new_chunks=tuple(collect_snapshot.chunks) if collect_snapshot is not None else (),
+            new_chunks=tuple(collect_snapshot.chunks),
+            new_sources=tuple(collect_snapshot.sources),
             quarantined_sources=tuple(verify_snapshot.quarantined_sources),
             agent_records=(),
             failures=tuple(verify_snapshot.blocking_reasons),

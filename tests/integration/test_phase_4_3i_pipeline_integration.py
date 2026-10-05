@@ -178,10 +178,23 @@ def test_complete_fetch_extends_facts_and_chunks_end_to_end():
     assert result.traceability is not None
     # TraceabilityIndex was built from the SAME (post-adaptive) chunk set.
     assert len(result.chunks) >= 1
-    fact_ids_with_literature_source = {
-        f.fact_id for f in result.bus.facts if "pubmed" in (f.source_url or "")
-    }
-    assert fact_ids_with_literature_source  # literature-derived facts reached verified_facts
+    literature_facts = [f for f in result.bus.facts if "pubmed" in (f.source_url or "")]
+    assert literature_facts  # literature-derived facts reached verified_facts
+
+    # Phase 4.3I correction 1: the literature Fact's own Source must have
+    # reached bus.sources, not just the Fact/Chunk. build_index() can only
+    # resolve a Fact's real content_kind by looking the Source up in the
+    # `sources` sequence it is given -- an absent Source silently reads
+    # back as UNKNOWN, which is the concrete, user-visible symptom this
+    # correction fixes.
+    literature_source_ids = {f.source_id for f in literature_facts}
+    bus_source_ids = {s.source_id for s in result.bus.sources}
+    assert literature_source_ids <= bus_source_ids
+
+    for fact in literature_facts:
+        link = result.traceability.links.get(fact.fact_id)
+        assert link is not None
+        assert link.content_kind != "UNKNOWN"
 
 
 # =============================================================================
@@ -246,6 +259,15 @@ def test_fresh_and_resumed_runs_produce_equivalent_facts_chunks_and_traceability
     resumed_fact_ids = {f.fact_id for f in resumed.bus.facts}
     assert resumed_fact_ids == control_fact_ids
 
+    # Sources: fresh run and resume reach the SAME bus.sources set,
+    # including the literature-originated ones (Phase 4.3I correction 1).
+    control_source_ids = {s.source_id for s in control.bus.sources}
+    resumed_source_ids = {s.source_id for s in resumed.bus.sources}
+    assert resumed_source_ids == control_source_ids
+    literature_source_ids = {f.source_id for f in control.bus.facts if "pubmed" in (f.source_url or "")}
+    assert literature_source_ids
+    assert literature_source_ids <= resumed_source_ids
+
     control_chunk_ids = {c.chunk_id for c in control.chunks}
     resumed_chunk_ids = {c.chunk_id for c in resumed.chunks}
     assert resumed_chunk_ids == control_chunk_ids
@@ -303,6 +325,86 @@ def test_explicit_override_is_untouched_by_adaptive_runner_injection():
     assert result.adaptive_literature_diagnostics["outcome"] == "NOT_ATTEMPTED_NON_READY"
     assert result.direct_acquisition_info.get("feature_enabled") is True
     assert result.direct_acquisition_info.get("pmid") == "12345678"
+
+
+# =============================================================================
+# 7. VerifySnapshot present but its CollectSnapshot dependency is cleanly
+#    missing: fails closed end-to-end (Phase 4.3I correction 2)
+# =============================================================================
+def test_verify_snapshot_without_collect_snapshot_fails_closed_end_to_end(monkeypatch):
+    repo = _new_repo()
+    run_id = "p43i-missing-collect-dependency"
+    _crash_on_escalate_checkpoint(
+        repo, run_id, _confirmed_scenario_collection_results(), _success_fake_http(), _ENV, monkeypatch,
+    )
+    assert repo.adaptive_verify_snapshot_for_resume(run_id) is not None
+    assert repo.adaptive_collect_snapshot_for_resume(run_id) is not None
+
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (run_id, "_adaptive_collect_snapshot"),
+    )
+    repo.conn.commit()
+    assert repo.adaptive_collect_snapshot_for_resume(run_id) is None
+
+    resumed_pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY,
+        adaptive_http_client=_PoisonHttpClient(), adaptive_env=_ENV,
+    )
+    resumed = resumed_pipeline.run(
+        ticker=TICKER, company_name=COMPANY, collection_results=[], run_id=run_id, resume=True,
+    )
+
+    assert resumed.adaptive_literature_diagnostics["outcome"] == "AMBIGUOUS_RESUME_STATE"
+    assert resumed.adaptive_literature_blocking_reasons != []
+    assert resumed.context.status.value == "INCOMPLETE_RESEARCH"
+    if resumed.verdict is not None:
+        assert resumed.verdict.action is None
+    # Never silently restored with empty Chunks/Sources standing in.
+    literature_chunks = [c for c in resumed.chunks if "pubmed" in c.document.url]
+    assert literature_chunks == []
+
+
+# =============================================================================
+# 8. A genuinely empty second-Integrity result must never leave the prior,
+#    now-unbacked verified_facts in bus.facts/Domain Agents/the verdict
+#    (Phase 4.3I correction 3)
+# =============================================================================
+def test_empty_adaptive_integrity_result_never_leaves_stale_facts(monkeypatch):
+    import investment_research.orchestrator.adaptive_literature_step as step_module
+    from investment_research.orchestrator.evidence_integrity_pass import IntegrityPassKind
+
+    real_run_pass = step_module.run_full_evidence_integrity_pass
+
+    def _empty_on_adaptive(pass_input, repo):
+        output = real_run_pass(pass_input, repo)
+        if pass_input.pass_kind is IntegrityPassKind.ADAPTIVE:
+            import dataclasses
+
+            return dataclasses.replace(output, verified_facts=())
+        return output
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _empty_on_adaptive)
+
+    repo = _new_repo()
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY,
+        adaptive_http_client=_success_fake_http(), adaptive_env=_ENV,
+    )
+    result = pipeline.run(
+        ticker=TICKER, company_name=COMPANY,
+        collection_results=_confirmed_scenario_collection_results(),
+        run_id="p43i-empty-adaptive-result",
+    )
+
+    # The pre-adaptive fact (from _confirmed_scenario_collection_results())
+    # must NOT survive in bus.facts once the ADAPTIVE pass's own
+    # confirmed, authoritative result is empty -- never the stale,
+    # now-unconfirmed pre-adaptive verified_facts.
+    assert result.bus.facts == []
+    assert result.chunks  # the fetch itself still ran and produced Chunks
+    if result.verdict is not None:
+        assert result.verdict.action is None
 
 
 # =============================================================================

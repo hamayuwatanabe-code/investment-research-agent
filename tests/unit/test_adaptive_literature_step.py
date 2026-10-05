@@ -247,6 +247,10 @@ def test_complete_fetch_converts_facts_runs_integrity_and_saves_snapshots(repo):
     assert all(f.fact_id in {g.fact_id for g in result.verified_facts} for f in verified_before)
     assert result.new_chunks != ()
     assert all(c.document.text for c in result.new_chunks)
+    assert result.new_sources != ()
+    new_chunk_doc_ids = {c.doc_id for c in result.new_chunks}
+    new_source_ids = {s.source_id for s in result.new_sources}
+    assert new_chunk_doc_ids or new_source_ids  # literature evidence produced at least one of each
 
     audit_ids = {r.agent_id for r in result.agent_records}
     assert audit_ids == {"fact_collector_adaptive", "evidence_integrity_adaptive"}
@@ -498,6 +502,52 @@ def test_verify_snapshot_restores_without_refetch_or_reintegrity(repo, monkeypat
         assert c.document.text == first_by_id[c.chunk_id].document.text
         assert c.document.doc_id == first_by_id[c.chunk_id].document.doc_id
     assert resumed.agent_records == ()  # no new agent_runs rows on a pure restore
+    # Sources round-trip too (Phase 4.3I correction 1) -- same set,
+    # restored from the collect snapshot the verify snapshot depends on.
+    assert {s.source_id for s in resumed.new_sources} == {s.source_id for s in first.new_sources}
+    assert resumed.new_sources != ()
+
+
+# =============================================================================
+# 10b. verify snapshot exists but its collect snapshot dependency is
+#      cleanly missing: fails closed, never restores partial evidence
+#      as if complete, never re-fetches, never re-runs Integrity
+# =============================================================================
+def test_verify_snapshot_without_collect_snapshot_fails_closed(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    assert repo.adaptive_verify_snapshot_for_resume(RUN_ID) is not None
+    assert repo.adaptive_collect_snapshot_for_resume(RUN_ID) is not None
+
+    # Simulate the collect snapshot row being cleanly removed (e.g. an
+    # operator pruning large Document bodies) while the verify snapshot
+    # -- which depends on it -- survives.
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (RUN_ID, "_adaptive_collect_snapshot"),
+    )
+    repo.conn.commit()
+    assert repo.adaptive_collect_snapshot_for_resume(RUN_ID) is None
+    assert repo.adaptive_verify_snapshot_for_resume(RUN_ID) is not None
+
+    def _explode(*a, **k):
+        raise AssertionError("must not re-fetch when the dependency state is inconsistent")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on an inconsistent snapshot state")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE
+    assert result.blocking_reasons != ()
+    assert result.new_chunks == ()
+    assert result.new_sources == ()
+    # The ORIGINAL (pre-adaptive) verified_facts are returned unchanged --
+    # never the previously-restored, now-unbacked verified_facts.
+    assert result.verified_facts == ()
 
 
 # =============================================================================

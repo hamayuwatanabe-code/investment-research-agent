@@ -1110,9 +1110,23 @@ class Pipeline:
         )
         result.adaptive_literature_diagnostics = dict(adaptive_result.diagnostics)
         result.adaptive_literature_blocking_reasons = list(adaptive_result.blocking_reasons)
-        if adaptive_result.verified_facts:
-            verified_facts = list(adaptive_result.verified_facts)
-            bus.facts = verified_facts
+        # Phase 4.3I correction 1: unconditional, never gated on
+        # "non-empty". adaptive_result.verified_facts is ALWAYS the
+        # authoritative final set for this point in the run -- for every
+        # NOT_ATTEMPTED_*/REFUSED/AMBIGUOUS/SNAPSHOT_CORRUPTED outcome it
+        # is already an identical copy of the input verified_facts (see
+        # adaptive_literature_step._not_attempted/_blocked), so assigning
+        # it unconditionally is a no-op in those cases; for an EXECUTED or
+        # RESTORED pass whose second Evidence Integrity run genuinely
+        # excluded every fact (quarantine cascade left nothing standing),
+        # an `if adaptive_result.verified_facts:` guard here would have
+        # silently kept the STALE pre-adaptive verified_facts/bus.facts
+        # alive instead of the confirmed-empty result -- exactly the kind
+        # of "plausible but wrong" gap-filling CLAUDE.md rule 7 forbids.
+        verified_facts = list(adaptive_result.verified_facts)
+        bus.facts = verified_facts
+        if adaptive_result.new_sources:
+            bus.add_sources(adaptive_result.new_sources)
         if adaptive_result.new_chunks:
             self.chunks = [*self.chunks, *adaptive_result.new_chunks]
             # result.chunks was already snapshotted from self.chunks at
