@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..collectors.documents import Chunk, Document
 from ..schemas.agent_io import AgentRunRecord, RunContext
 from ..schemas.enums import (
     ContentKind,
@@ -25,6 +26,7 @@ from ..schemas.enums import (
     FactCategory,
     Materiality,
     Provenance,
+    ResearchPath,
     SourceTier,
     VerifiedStatus,
 )
@@ -156,6 +158,87 @@ def _quarantined_source_to_dict(q: QuarantinedSource) -> dict:
 def _quarantined_source_from_dict(d: dict) -> QuarantinedSource:
     return QuarantinedSource(
         source_id=d["source_id"], url=d["url"], field=d["field"], value=d["value"], error=d["error"],
+    )
+
+
+def _document_to_dict(document: Document) -> dict:
+    """Every ``Document`` field, losslessly, including the full ``text``
+    body (never truncated -- same "lossless snapshot" rule
+    ``_source_to_snapshot_dict`` already follows for ``Source.excerpt``).
+    Used only by :meth:`Repository.save_adaptive_collect_snapshot` (Phase
+    4.3I) -- no ``documents`` table exists anywhere in this schema, and
+    this is deliberately not one either; a Document only ever travels
+    inside a run-scoped JSON snapshot, nested inside its own ``Chunk``."""
+    return {
+        "doc_id": document.doc_id,
+        "url": document.url,
+        "title": document.title,
+        "publisher": document.publisher,
+        "published_date": document.published_date,
+        "event_date": document.event_date,
+        "effective_date": document.effective_date,
+        "filing_date": document.filing_date,
+        "accession": document.accession,
+        "doc_type": document.doc_type,
+        "is_company_ir": bool(document.is_company_ir),
+        "text": document.text,
+        "content_kind": str(document.content_kind),
+        "provenance": str(document.provenance),
+        "research_path": str(document.research_path),
+        "retrieved_at": document.retrieved_at,
+        "tier": str(document.tier),
+        "authority": str(document.authority),
+    }
+
+
+def _document_from_dict(d: dict) -> Document:
+    return Document(
+        doc_id=d["doc_id"],
+        url=d["url"],
+        title=d["title"],
+        publisher=d["publisher"],
+        published_date=d["published_date"],
+        event_date=d["event_date"],
+        effective_date=d["effective_date"],
+        filing_date=d["filing_date"],
+        accession=d["accession"],
+        doc_type=d["doc_type"],
+        is_company_ir=bool(d["is_company_ir"]),
+        text=d["text"],
+        content_kind=ContentKind(d["content_kind"]),
+        provenance=Provenance(d["provenance"]),
+        research_path=ResearchPath(d["research_path"]),
+        retrieved_at=d["retrieved_at"],
+        tier=SourceTier(d["tier"]),
+        authority=DocumentAuthority(d["authority"]),
+    )
+
+
+def _chunk_to_dict(chunk: Chunk) -> dict:
+    """Every ``Chunk`` field, losslessly, including its nested ``Document``
+    in full -- the adaptive collect snapshot stores the EXACT, already
+    coverage-filtered ``LiteraturePipelineBundle.chunks`` tuple a fresh run
+    would have produced, rather than re-deriving chunks from a
+    reconstructed ``DocumentStore`` on resume. This is what gives a
+    resumed run byte-identical Chunk ids/order/text for Domain Agents'
+    Evidence Packs/TraceabilityIndex/report, without depending on
+    ``chunk_document()``'s determinism being re-invoked correctly."""
+    return {
+        "chunk_id": chunk.chunk_id,
+        "doc_id": chunk.doc_id,
+        "index": chunk.index,
+        "text": chunk.text,
+        "document": _document_to_dict(chunk.document),
+    }
+
+
+def _chunk_from_dict(d: dict) -> Chunk:
+    return Chunk(
+        chunk_id=d["chunk_id"],
+        doc_id=d["doc_id"],
+        index=int(d["index"]),
+        text=d["text"],
+        document=_document_from_dict(d["document"]),
     )
 
 
@@ -462,8 +545,52 @@ class VerifySnapshot:
     direct_acquisition_info: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class AdaptiveCollectSnapshot:
+    """Phase 4.3I: a run-scoped, lossless snapshot of the Adaptive
+    Literature step's own fetch output -- saved AFTER
+    ``execute_adaptive_literature_plan()`` returns COMPLETE/INCOMPLETE/
+    REFUSED and the new RawFacts (if any) have been converted to
+    pre-Integrity ``Fact``s via ``FactCollectorAgent``, but BEFORE the
+    second (ADAPTIVE) full Evidence Integrity pass runs. Mirrors
+    ``CollectSnapshot``'s own role one level down: this is the
+    "fetch succeeded and is durably recorded" commit boundary a later
+    resume relies on to tell "never fetched" apart from "fetched, crashed
+    before this write" (never both read as the same ``None``) -- see
+    :meth:`Repository.adaptive_literature_started`/
+    :meth:`Repository.adaptive_collect_snapshot_for_resume`."""
+
+    raw_facts: list[Fact] = field(default_factory=list)
+    sources: list[Source] = field(default_factory=list)
+    chunks: list[Chunk] = field(default_factory=list)
+    #: ``AdaptiveExecutionStatus`` value (``COMPLETE``/``INCOMPLETE``/
+    #: ``REFUSED``) this fetch concluded with -- carried through to the
+    #: verify snapshot's own blocking-reason computation on resume,
+    #: without needing to re-run the bridge to learn it again.
+    execution_status: str = ""
+
+
+@dataclass
+class AdaptiveVerifySnapshot:
+    """Phase 4.3I: a run-scoped, lossless snapshot of the Adaptive
+    Literature step's own second (ADAPTIVE) Evidence Integrity pass
+    output -- saved once that pass completes. ``blocking_reasons`` is
+    stored (never recomputed from ``execution_status`` alone on restore)
+    so a resumed run reports the exact same Action Gate consequence an
+    INCOMPLETE/REFUSED fetch already had, rather than silently reading as
+    resolved merely because Integrity itself succeeded."""
+
+    verified_facts: list[Fact] = field(default_factory=list)
+    quarantined_sources: list[QuarantinedSource] = field(default_factory=list)
+    execution_status: str = ""
+    blocking_reasons: list[str] = field(default_factory=list)
+
+
 _COLLECT_SNAPSHOT_STAGE = "_collect_snapshot"
 _VERIFY_SNAPSHOT_STAGE = "_verify_snapshot"
+_ADAPTIVE_STARTED_STAGE = "_adaptive_literature_started"
+_ADAPTIVE_COLLECT_SNAPSHOT_STAGE = "_adaptive_collect_snapshot"
+_ADAPTIVE_VERIFY_SNAPSHOT_STAGE = "_adaptive_verify_snapshot"
 #: Sentinel stage_index for the two synthetic stages above: never a real
 #: value from orchestrator.resume.STAGES (which only ever indexes
 #: non-negative), and orchestrator.resume.stage_index()/resume_point()
@@ -1133,6 +1260,148 @@ class Repository:
             verified_facts=verified_facts,
             quarantined_sources=quarantined,
             direct_acquisition_info=direct_acquisition_info,
+        )
+
+    # -- Phase 4.3I: Adaptive Literature Acquisition resume checkpoints ----
+    def save_adaptive_literature_started(self, run_id: str, nct_id: str, max_requests: int) -> None:
+        """Written BEFORE ``execute_adaptive_literature_plan()`` is ever
+        called for this run_id. Diagnostic only (``nct_id``/
+        ``max_requests``) -- its sole operational purpose is to exist, so
+        that a crash before :meth:`save_adaptive_collect_snapshot` leaves
+        an unambiguous "something was attempted, outcome unknown" trace a
+        later resume can fail closed on, rather than silently treating
+        that window as "never attempted"."""
+        payload = {"nct_id": nct_id, "max_requests": max_requests}
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                run_id, _ADAPTIVE_STARTED_STAGE, _SNAPSHOT_STAGE_INDEX, "OK",
+                json.dumps(payload, default=str), 0, _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def adaptive_literature_started(self, run_id: str) -> dict | None:
+        """``None`` when no started-marker was ever written for this
+        run_id (never attempted, or this invocation has not reached that
+        point yet). Raises :class:`ResumeSnapshotCorrupted` when a row
+        exists but cannot be parsed -- never silently treated as absent,
+        which would misread an ambiguous "attempted, outcome unknown"
+        state as a safe fresh start."""
+        row = self.conn.execute(
+            "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+            (run_id, _ADAPTIVE_STARTED_STAGE),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return dict(json.loads(row["payload"]))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ResumeSnapshotCorrupted(
+                f"adaptive literature started-marker for run_id={run_id!r} is corrupted: {exc}"
+            ) from exc
+
+    def save_adaptive_collect_snapshot(self, run_id: str, snapshot: AdaptiveCollectSnapshot) -> None:
+        """Persists the Adaptive Literature step's own pre-Integrity
+        output, in full, keyed only by this run_id -- the commit boundary
+        a resume relies on to know the fetch itself (not yet the second
+        Integrity pass) is durably recorded. Never merged with, or
+        replaced by, any other run_id's data, and never derived from the
+        global ``facts``/``sources`` tables (Phase 4.3I correction 4: the
+        same cross-run content-collision hazard ``CollectSnapshot``/
+        ``VerifySnapshot`` already avoid applies here identically)."""
+        payload = {
+            "raw_facts": [f.to_row() for f in snapshot.raw_facts],
+            "sources": [_source_to_snapshot_dict(s) for s in snapshot.sources],
+            "chunks": [_chunk_to_dict(c) for c in snapshot.chunks],
+            "execution_status": snapshot.execution_status,
+        }
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                run_id, _ADAPTIVE_COLLECT_SNAPSHOT_STAGE, _SNAPSHOT_STAGE_INDEX, "OK",
+                json.dumps(payload, default=str), len(snapshot.raw_facts), _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def adaptive_collect_snapshot_for_resume(self, run_id: str) -> AdaptiveCollectSnapshot | None:
+        """``None`` when no adaptive collect snapshot was ever saved for
+        this run_id -- never a guess. Raises :class:`ResumeSnapshotCorrupted`
+        when a row exists but cannot be parsed back losslessly."""
+        row = self.conn.execute(
+            "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+            (run_id, _ADAPTIVE_COLLECT_SNAPSHOT_STAGE),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+            raw_facts = [_fact_from_row(r) for r in payload["raw_facts"]]
+            sources = [_source_from_snapshot_dict(r) for r in payload["sources"]]
+            chunks = [_chunk_from_dict(r) for r in payload["chunks"]]
+            execution_status = str(payload["execution_status"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ResumeSnapshotCorrupted(
+                f"adaptive collect snapshot for run_id={run_id!r} is corrupted: {exc}"
+            ) from exc
+        return AdaptiveCollectSnapshot(
+            raw_facts=raw_facts, sources=sources, chunks=chunks, execution_status=execution_status,
+        )
+
+    def save_adaptive_verify_snapshot(self, run_id: str, snapshot: AdaptiveVerifySnapshot) -> None:
+        """Persists the Adaptive Literature step's own second (ADAPTIVE)
+        Evidence Integrity pass output, in full, keyed only by this
+        run_id. Called once, right after that pass computes its own
+        verified_facts/quarantined_sources and this step's own
+        blocking-reason decision -- never merged with, or replaced by,
+        any other run_id's data."""
+        payload = {
+            "verified_facts": [f.to_row() for f in snapshot.verified_facts],
+            "quarantined_sources": [_quarantined_source_to_dict(q) for q in snapshot.quarantined_sources],
+            "execution_status": snapshot.execution_status,
+            "blocking_reasons": list(snapshot.blocking_reasons),
+        }
+        self.conn.execute(
+            """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
+                                                      payload, fact_count, created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                run_id, _ADAPTIVE_VERIFY_SNAPSHOT_STAGE, _SNAPSHOT_STAGE_INDEX, "OK",
+                json.dumps(payload, default=str), len(snapshot.verified_facts), _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def adaptive_verify_snapshot_for_resume(self, run_id: str) -> AdaptiveVerifySnapshot | None:
+        """``None`` when no adaptive verify snapshot was ever saved for
+        this run_id -- never a guess. Raises :class:`ResumeSnapshotCorrupted`
+        when a row exists but cannot be parsed back losslessly."""
+        row = self.conn.execute(
+            "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+            (run_id, _ADAPTIVE_VERIFY_SNAPSHOT_STAGE),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+            verified_facts = [_fact_from_row(r) for r in payload["verified_facts"]]
+            quarantined = [_quarantined_source_from_dict(r) for r in payload["quarantined_sources"]]
+            execution_status = str(payload["execution_status"])
+            blocking_reasons = _snap_str_list(payload, "blocking_reasons")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, _SnapshotFieldError) as exc:
+            raise ResumeSnapshotCorrupted(
+                f"adaptive verify snapshot for run_id={run_id!r} is corrupted: {exc}"
+            ) from exc
+        return AdaptiveVerifySnapshot(
+            verified_facts=verified_facts,
+            quarantined_sources=quarantined,
+            execution_status=execution_status,
+            blocking_reasons=list(blocking_reasons),
         )
 
     def save_research_coverage(self, run_id: str, ticker: str, coverage) -> int:

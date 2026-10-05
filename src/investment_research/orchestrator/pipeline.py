@@ -17,7 +17,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -90,6 +90,7 @@ from ..storage.repository import (
     VerifySnapshot,
 )
 from ..thesis.versioning import diff_against_previous, snapshot_for
+from .adaptive_literature_step import run_adaptive_literature_step
 from .evidence_integrity_pass import (
     FullIntegrityPassInput,
     IntegrityPassKind,
@@ -292,6 +293,19 @@ class ResearchResult:
     bootstrap_program_identity: ProgramIdentityResolution | None = None
     bootstrap_literature_link: LiteratureLinkResolution | None = None
     adaptive_acquisition_plan: AdaptiveAcquisitionPlan | None = None
+    #: Phase 4.3I: safe (body/secret/URL-free) diagnostics from the
+    #: Adaptive Literature Acquisition step -- a SEPARATE typed carrier
+    #: from direct_acquisition_info (which belongs exclusively to the
+    #: existing EXPLICIT PMID/NCT path and is never mixed with this).
+    #: Empty for every run where the step was never attempted or never
+    #: applicable, exactly like direct_acquisition_info's own pattern.
+    adaptive_literature_diagnostics: dict[str, Any] = field(default_factory=dict)
+    #: Non-empty exactly when the Adaptive Literature step's own outcome
+    #: must withhold Verdict.action (REFUSED/INCOMPLETE/
+    #: AMBIGUOUS_RESUME_STATE/SNAPSHOT_CORRUPTED) -- read once, near Blind
+    #: Judge, to extend blocking_reasons, mirroring resume_snapshot_
+    #: failures'/the Literature path's own existing pattern exactly.
+    adaptive_literature_blocking_reasons: list[str] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -321,6 +335,8 @@ class Pipeline:
         capture_info: dict[str, Any] | None = None,
         agent_effort_policy: dict[str, str] | None = None,
         direct_acquisition_info: dict[str, Any] | None = None,
+        adaptive_http_client: Any | None = None,
+        adaptive_env: Mapping[str, str] | None = None,
     ) -> None:
         self.repo = repository
         self.search = search
@@ -333,6 +349,15 @@ class Pipeline:
         self.chunks = list(chunks)
         self.capture_info = capture_info or {}
         self.direct_acquisition_info = direct_acquisition_info or {}
+        # Phase 4.3I: the Adaptive Literature Acquisition step's own
+        # runner injection -- both default None, which is Production's own
+        # default and takes the NOT_ATTEMPTED_NO_RUNNER branch
+        # unconditionally (see orchestrator/adaptive_literature_step.py).
+        # No CLI flag or real transport wires these in this phase; a
+        # caller (today, only this repository's own test suite) injects a
+        # Fake transport directly.
+        self.adaptive_http_client = adaptive_http_client
+        self.adaptive_env = adaptive_env
         # Requirement G: configurable per-agent effort policy (never
         # hard-coded into agent logic). None means "use
         # llm.effort_policy.DEFAULT_AGENT_EFFORT_POLICY" -- resolve_effort()
@@ -1056,6 +1081,56 @@ class Pipeline:
             bootstrap_identity, bootstrap_literature, result.direct_acquisition_info
         )
 
+        # ---- Phase 4.3I: Adaptive Literature Acquisition -----------------
+        # Placed HERE -- immediately after the Phase 4.3G plan above is
+        # computed, before Stage 2b escalation -- so that (a) Stage 2b's
+        # escalate() and the central resolve_current_program() call below
+        # both operate on the EXPANDED verified_facts set once this step
+        # has run, and (b) this step itself sees the SAME verified_facts/
+        # bus.sources Stage 2b would otherwise have seen first. Safe to
+        # call on every invocation, fresh or resumed: resume-state is
+        # judged first, from persisted checkpoints alone, inside
+        # run_adaptive_literature_step() itself -- never gated by
+        # resume_plan.should_run(...), which only ever covers "collect"/
+        # "verify" (see that module's own docstring for why this step
+        # needs its own, independent resume gate).
+        adaptive_result = run_adaptive_literature_step(
+            repo=self.repo,
+            run_id=ctx.run_id,
+            ticker=ctx.ticker,
+            company_name=company_name,
+            plan=result.adaptive_acquisition_plan,
+            verified_facts=verified_facts,
+            sources=bus.sources,
+            base_evidence_available=not snapshot_unavailable,
+            http_client=self.adaptive_http_client,
+            env=self.adaptive_env,
+            today=self.today,
+            stale_after_days=self.stale_after_days,
+        )
+        result.adaptive_literature_diagnostics = dict(adaptive_result.diagnostics)
+        result.adaptive_literature_blocking_reasons = list(adaptive_result.blocking_reasons)
+        if adaptive_result.verified_facts:
+            verified_facts = list(adaptive_result.verified_facts)
+            bus.facts = verified_facts
+        if adaptive_result.new_chunks:
+            self.chunks = [*self.chunks, *adaptive_result.new_chunks]
+            # result.chunks was already snapshotted from self.chunks at
+            # Stage 1 (before this step could possibly have run) -- kept
+            # in sync here so report.py's own "Evidence was chunked into
+            # N chunk(s)" banner and any other result.chunks reader see
+            # the SAME set Domain Agents/TraceabilityIndex now read from
+            # self.chunks, on a fresh run or a resume alike.
+            result.chunks = list(self.chunks)
+        if adaptive_result.quarantined_sources:
+            result.quarantined_sources = [
+                *result.quarantined_sources, *adaptive_result.quarantined_sources,
+            ]
+        result.agent_records.extend(adaptive_result.agent_records)
+        for reason in adaptive_result.failures:
+            if reason not in result.failures:
+                result.failures.append(reason)
+
         # ---- Stage 2b: primary-source escalation (requirement P4) --------
         # Stage-aware budgeting (requirement: discovery must not starve later
         # stages): escalation gets its own quota, independent of whatever
@@ -1584,6 +1659,17 @@ class Pipeline:
         # free text to find it again.
         blocking_reasons.extend(result.resume_snapshot_failures)
         if result.resume_snapshot_failures:
+            ctx.status = RunStatus.INCOMPLETE_RESEARCH
+
+        # Phase 4.3I: an attempted-but-incomplete/refused Adaptive
+        # Literature fetch, or a genuinely ambiguous/corrupted adaptive
+        # resume state, withholds the Action the same way an incomplete
+        # EXPLICIT Literature acquisition or an unavailable resume
+        # snapshot already does -- same pattern, same placement. Never
+        # fires for NOT_ATTEMPTED_*/COMPLETE (adaptive_literature_
+        # blocking_reasons is empty in both cases).
+        blocking_reasons.extend(result.adaptive_literature_blocking_reasons)
+        if result.adaptive_literature_blocking_reasons:
             ctx.status = RunStatus.INCOMPLETE_RESEARCH
 
         if verdict is not None:
