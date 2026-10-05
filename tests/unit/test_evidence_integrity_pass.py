@@ -630,7 +630,10 @@ def test_pass_kind_is_a_closed_enum_not_a_caller_chosen_string(repo):
 # 4. Isolation (Phase 4.3C requirement D)
 # =============================================================================
 REPO_SRC = Path(__file__).resolve().parent.parent.parent / "src" / "investment_research"
-_FORBIDDEN_MODULE_NAMES = ("program_evidence", "identifier_validation", "program_identity_resolution")
+_FORBIDDEN_MODULE_NAMES = (
+    "program_evidence", "identifier_validation", "program_identity_resolution",
+    "adaptive_acquisition_plan",
+)
 
 
 def test_new_module_never_references_program_identity_modules():
@@ -639,19 +642,22 @@ def test_new_module_never_references_program_identity_modules():
         assert name not in text
 
 
-def test_pipeline_still_never_references_the_resolver_modules():
-    """Narrowed by Phase 4.3F (see tests/unit/
+def test_pipeline_still_never_references_identifier_validation_directly():
+    """Narrowed by Phase 4.3F, then again by Phase 4.3G (see tests/unit/
     test_program_identity_offline_isolation.py's own module docstring for
     the full reasoning): ``program_evidence`` -- the frozen evidence TYPES
-    -- is now a deliberate, required pipeline.py dependency (structured
-    Production collector output, snapshotted losslessly), so it is no
-    longer checked here. The resolver/validation half --
-    ``identifier_validation``/``program_identity_resolution`` -- must still
-    never reach pipeline.py; Program Identity Resolution execution stays
-    explicitly out of scope."""
+    -- became a deliberate, required pipeline.py dependency in Phase 4.3F
+    (structured Production collector output, snapshotted losslessly), and
+    ``program_identity_resolution``/``adaptive_acquisition_plan`` became
+    deliberate, required pipeline.py dependencies in Phase 4.3G (a
+    bootstrap resolution and plan, both plain internal diagnostics on
+    ResearchResult -- never reaching an AgentInput or affecting Action
+    gating). Only ``identifier_validation`` stays forbidden in pipeline.py
+    even now -- its validators are needed only inside
+    adaptive_acquisition_plan.py itself, which pipeline.py calls into,
+    never identifier_validation directly."""
     text = (REPO_SRC / "orchestrator" / "pipeline.py").read_text(encoding="utf-8")
-    for name in ("identifier_validation", "program_identity_resolution"):
-        assert name not in text
+    assert "identifier_validation" not in text
 
 
 def test_new_module_never_imports_http_llm_or_web_search():

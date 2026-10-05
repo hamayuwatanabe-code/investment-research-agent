@@ -58,14 +58,27 @@ from ..schemas.enums import (
 from ..schemas.evaluation import KillGateResult, ScoreCard, Verdict
 from ..schemas.fact import Fact
 from ..schemas.validation import QuarantinedSource
+from ..scoring.adaptive_acquisition_plan import (
+    AdaptiveAcquisitionPlan,
+    build_adaptive_acquisition_plan,
+)
 from ..scoring.completeness import CompletenessResult, assess_completeness
 from ..scoring.decision_gate_consistency import enforce_complete_only_action, sync_verdict_channel
 from ..scoring.evidence_confidence import compute_evidence_confidence
 from ..scoring.evidence_sufficiency import EvidenceSufficiencyMatrix, assess_evidence_sufficiency
 from ..scoring.program_evidence import (
     CompanyIdentityEvidence,
+    EvidenceValidationContext,
     LiteratureCandidateEvidence,
     ProgramCandidateEvidence,
+)
+from ..scoring.program_identity_resolution import (
+    LiteratureLinkResolution,
+    LiteratureLinkStatus,
+    ProgramIdentityResolution,
+    ProgramIdentityStatus,
+    resolve_literature_link,
+    resolve_program_identity,
 )
 from ..scoring.program_resolution import ProgramResolution, resolve_current_program
 from ..scoring.scenarios import build_scenarios
@@ -168,6 +181,34 @@ def _literature_incomplete_blocking_reasons(
     return reasons
 
 
+def _select_bootstrap_company_identity(
+    identities: Sequence[CompanyIdentityEvidence],
+) -> CompanyIdentityEvidence | None:
+    """Phase 4.3G cardinality gate for ``resolve_program_identity()``'s own
+    single-``CompanyIdentityEvidence`` contract: ``result.
+    company_identity_evidence`` is a LIST (Phase 4.3F flattens it across
+    every ``CollectionResult`` a run had), but the resolver takes exactly
+    one. Zero or two-or-more records is never resolved by inventing one,
+    nor by an arbitrary/first/last pick -- both return ``None`` here, and
+    the caller treats that as UNRESOLVED. A Production SEC collector
+    today reports at most one, but this boundary enforces the rule
+    regardless of how many collectors a future run has."""
+    if len(identities) != 1:
+        return None
+    return identities[0]
+
+
+def _bootstrap_company_identity_cardinality_rationale(
+    identities: Sequence[CompanyIdentityEvidence],
+) -> str:
+    if not identities:
+        return "no CompanyIdentityEvidence was produced this run"
+    return (
+        f"{len(identities)} CompanyIdentityEvidence records were produced this run; "
+        "never resolved by an arbitrary/first/last selection"
+    )
+
+
 def new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
@@ -234,6 +275,23 @@ class ResearchResult:
     company_identity_evidence: list[CompanyIdentityEvidence] = field(default_factory=list)
     program_candidate_evidence: list[ProgramCandidateEvidence] = field(default_factory=list)
     literature_candidate_evidence: list[LiteratureCandidateEvidence] = field(default_factory=list)
+    #: Phase 4.3G: the BOOTSTRAP Program Identity / Literature Link
+    #: resolution and the resulting Adaptive Acquisition Plan -- computed
+    #: once, after Stage 2's full Evidence Integrity pass completes
+    #: (quarantine and quarantine-cascade fact exclusion already applied)
+    #: and before Stage 2b's primary-source escalation runs (see Pipeline.
+    #: run()'s own comment at that exact point). Plain internal diagnostic
+    #: fields, exactly like company_identity_evidence/program_candidate_
+    #: evidence/literature_candidate_evidence above: never delivered to
+    #: any AgentInput (by any path, including params), never folded into
+    #: blocking_reasons/RunStatus/Verdict.action, never executed --
+    #: scoring/adaptive_acquisition_plan.py computes a PLAN only, and
+    #: nothing in this module (or that one) calls an executor, adapter,
+    #: HttpClient, or LLM. None only before this computation has run at
+    #: all (never reached on any real invocation of Pipeline.run()).
+    bootstrap_program_identity: ProgramIdentityResolution | None = None
+    bootstrap_literature_link: LiteratureLinkResolution | None = None
+    adaptive_acquisition_plan: AdaptiveAcquisitionPlan | None = None
 
     @property
     def blocked(self) -> bool:
@@ -923,6 +981,80 @@ class Pipeline:
             # perpetually re-discovering a missing VERIFY snapshot it can
             # never produce on its own.
             checkpoint("verify", {"verified": len(verified_facts)})
+
+        # ---- Phase 4.3G: bootstrap Program Identity / Literature Link /
+        # Adaptive Acquisition Plan ----------------------------------------
+        # Computed exactly ONCE per run, HERE -- after Stage 2's full
+        # Evidence Integrity pass completes (quarantine and quarantine-
+        # cascade fact exclusion already applied to verified_facts/
+        # result.quarantined_sources above) and BEFORE Stage 2b's
+        # primary-source escalation runs below. Never after Stage 2b:
+        # escalation's additional facts have NOT been through a full
+        # Evidence Integrity pass (see program_identity_resolution.py's
+        # own module docstring on why Stage 3b's escalate_unresolved_
+        # questions pattern -- appending facts without a second full pass
+        # -- must never become the model for what Program Identity is
+        # resolved against). This is deliberately a SEPARATE computation
+        # from the central resolve_current_program() call below: that one
+        # is unchanged (still runs once, after Stage 2b, for Science/Kill)
+        # and resolve_program_identity()/resolve_literature_link() are a
+        # different contract entirely -- never confused, never merged.
+        #
+        # Pure, side-effect-free, no new checkpoint/DB write (Phase 4.3G
+        # requirement: resume never needs a NEW snapshot for this -- a
+        # resumed run simply recomputes it from whichever already-
+        # snapshotted verified_facts/sources/structured-evidence it has
+        # at this exact point, identically to a fresh run given the same
+        # inputs). On the fail-closed resume path (snapshot_unavailable),
+        # verified_facts/bus.sources/result.quarantined_sources/the three
+        # structured-evidence lists are already all empty by construction
+        # (see the resume-plan-building block and Stage 1 above) -- this
+        # naturally yields UNRESOLVED/UNRESOLVED/a no-target, zero-budget
+        # plan below, with no special-casing needed here.
+        bootstrap_context = EvidenceValidationContext(
+            sources_by_id={
+                source.source_id: source
+                for source in bus.sources
+                if source.source_id not in {q.source_id for q in result.quarantined_sources}
+            },
+            verified_facts_by_id={fact.fact_id: fact for fact in verified_facts},
+        )
+        chosen_identity = _select_bootstrap_company_identity(result.company_identity_evidence)
+        if chosen_identity is None:
+            bootstrap_identity = ProgramIdentityResolution(
+                status=ProgramIdentityStatus.UNRESOLVED,
+                rationale=_bootstrap_company_identity_cardinality_rationale(
+                    result.company_identity_evidence
+                ),
+            )
+        else:
+            bootstrap_identity = resolve_program_identity(
+                chosen_identity, result.program_candidate_evidence, bootstrap_context
+            )
+        if bootstrap_identity.status is ProgramIdentityStatus.CONFIRMED:
+            # Phase 4.3G requirement 6: resolve_literature_link() is called
+            # ONLY in this branch. A malformed/non-strict nct_id here would
+            # already be unreachable by resolve_program_identity()'s own
+            # CONFIRMED contract, and resolve_literature_link() itself
+            # degrades safely to UNRESOLVED on one anyway -- the INDEPENDENT
+            # defensive re-check lives in build_adaptive_acquisition_plan()
+            # below (REFUSED), never duplicated here.
+            bootstrap_literature = resolve_literature_link(
+                bootstrap_identity.nct_id, result.literature_candidate_evidence, bootstrap_context
+            )
+        else:
+            bootstrap_literature = LiteratureLinkResolution(
+                status=LiteratureLinkStatus.UNRESOLVED,
+                rationale=(
+                    "program identity is not CONFIRMED; literature link resolution was not "
+                    "attempted (Phase 4.3G requirement 6)"
+                ),
+            )
+        result.bootstrap_program_identity = bootstrap_identity
+        result.bootstrap_literature_link = bootstrap_literature
+        result.adaptive_acquisition_plan = build_adaptive_acquisition_plan(
+            bootstrap_identity, bootstrap_literature, result.direct_acquisition_info
+        )
 
         # ---- Stage 2b: primary-source escalation (requirement P4) --------
         # Stage-aware budgeting (requirement: discovery must not starve later

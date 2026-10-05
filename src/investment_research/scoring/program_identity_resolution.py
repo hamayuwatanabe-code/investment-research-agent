@@ -1,14 +1,19 @@
 """Phase 4.3B: pure, deterministic Program Identity and Literature Link
 resolvers -- the offline contract layer's decision logic.
 
-**Not connected to Pipeline/CLI/any Agent.** ``resolve_program_identity``/
+**Not connected to CLI/any Agent. Connected to Pipeline as of Phase
+4.3G, for a bootstrap resolution only** (see this module's own
+"Pipeline connection" section below). ``resolve_program_identity``/
 ``resolve_literature_link`` take only the frozen evidence types from
 ``program_evidence.py`` (plus plain ``str``/``frozenset`` inputs and an
 ``EvidenceValidationContext``) and return a plain, frozen result -- no
-``AgentInput``, no network, no LLM. A dedicated test
-(``tests/unit/test_program_identity_offline_isolation.py``) asserts this
-module's name never appears in ``cli.py``/``pipeline.py``/any
-``agents/*.py`` source text.
+``AgentInput``, no network, no LLM; ``orchestrator.pipeline.Pipeline.run()``
+calls them directly now, but only to populate plain internal diagnostic
+fields on ``ResearchResult``, never anything an ``AgentInput``/
+``blocking_reasons``/``RunStatus``/``Verdict.action`` exposes. A dedicated
+test (``tests/unit/test_program_identity_offline_isolation.py``) asserts
+this module's name never appears in ``cli.py``/any ``agents/*.py`` source
+text, and (separately) that ``pipeline.py`` DOES reference it.
 
 Two states, kept structurally separate (Phase 4.3B requirement 1):
 
@@ -49,21 +54,36 @@ Phase 4.3B Correction 1: what changed
    field -- never a silent skip (requirement 6/7).
 
 ---------------------------------------------------------------------------
-Future (NOT implemented in Phase 4.3B) Pipeline connection
+Pipeline connection: Phase 4.3G implements the BOOTSTRAP half only
 ---------------------------------------------------------------------------
 
-The 2-pass structure Phase 4.3A-correction-1's audit specified, for a
-LATER phase to implement::
+The 2-pass structure Phase 4.3A-correction-1's audit specified::
 
     initial collect
       -> FactCollector
       -> full Evidence Integrity pass #1
-      -> Program Identity Resolution        (bootstrap resolution)
-      -> Adaptive Acquisition Plan
-      -> new Fact/Chunk projection
-      -> full Evidence Integrity pass #2
-      -> final Program Resolution           (post-Integrity-#2 resolution)
+      -> Program Identity Resolution        (bootstrap resolution)   [Phase 4.3G]
+      -> Adaptive Acquisition Plan                                   [Phase 4.3G]
+      -> new Fact/Chunk projection                                   (still future work)
+      -> full Evidence Integrity pass #2                             (still future work)
+      -> final Program Resolution           (post-Integrity-#2 resolution)  (still future work)
       -> Domain Agents (Kill/Science/...)
+
+Phase 4.3G connects ``orchestrator.pipeline.Pipeline.run()`` to the
+bootstrap resolution and the plan ONLY -- computed once, after Stage 2's
+full Evidence Integrity pass #1 completes (quarantine and quarantine-
+cascade fact exclusion already applied) and before Stage 2b's primary-
+source escalation runs, over Stage 1's structured evidence
+(``CompanyIdentityEvidence``/``ProgramCandidateEvidence``/
+``LiteratureCandidateEvidence``, Phase 4.3F) and Stage 2's own
+``verified_facts``/``bus.sources`` (minus quarantined sources). Both
+results, plus the resulting ``AdaptiveAcquisitionPlan``
+(``scoring/adaptive_acquisition_plan.py``), are stored as plain, typed,
+internal diagnostic fields on ``ResearchResult`` -- never delivered to
+any ``AgentInput``, never folded into ``blocking_reasons``/``RunStatus``/
+``Verdict.action``, never executed. The remaining steps above (new Fact/
+Chunk projection onward, and therefore a SECOND, "final" resolution) are
+still future work, not attempted here.
 
 "full Evidence Integrity pass" means the ENTIRE existing
 ``orchestrator.pipeline.Pipeline.run()`` Stage-2 sequence, not merely an
@@ -99,22 +119,31 @@ what a future implementation must NOT do without an explicit,
 agent-by-agent allowlist decision.
 
 ---------------------------------------------------------------------------
-Future (NOT implemented in Phase 4.3B) request-budget contract
+Request-budget contract (Phase 4.3G correction of this note)
 ---------------------------------------------------------------------------
 
-For a future Adaptive Acquisition step that fetches literature to attempt
-a Literature Link, per ticker, including at most one full-text fetch::
+Implemented in Phase 4.3G as ``scoring/adaptive_acquisition_plan.py``'s
+own ``READY_MAX_REQUESTS``. For a future Adaptive Acquisition EXECUTOR
+that fetches literature to attempt a Literature Link, per ticker,
+including at most one full-text fetch::
 
-    ClinicalTrials confirmation  1
-    + PubMed ESearch             1
-    + PubMed EFetch              1
-    + Europe PMC search          1
-    + full-text fetch (<=1)      1
-    ----------------------------------
-    = 5 requests/ticker (maximum)
+    PubMed ESearch                 <= 1
+    + PubMed EFetch                <= 1
+    + Europe PMC search            <= 3
+    + full-text fetch              <= 1
+    ------------------------------------
+    = 6 requests/ticker (maximum)
 
-Phase 4.3B implements zero network communication of any kind; this
-contract is recorded here for a future phase to hold itself to.
+ClinicalTrials confirmation is NOT counted (superseding this note's own
+earlier "5 requests" figure, which included it): ``ProgramCandidateEvidence``
+-- the structured trial-identity evidence a Literature Link is resolved
+against -- is already obtained by the ORIGINAL ClinicalTrials collector
+during Stage 1 collection, so a future executor would never need a second
+ClinicalTrials fetch merely to re-confirm the same NCT id.
+
+Phase 4.3B/4.3G implement zero network communication of any kind; this
+contract is recorded here (and enforced structurally, as a budget number
+on a PLAN, never executed) for a future phase to hold itself to.
 """
 
 from __future__ import annotations
