@@ -1,23 +1,28 @@
 """Phase 4.2A: Literature Pipeline Integration.
 
-The ONLY module in this repository that connects the Literature
-Document-First acquisition path --
+The validator (``validate_literature_pipeline_request``) and the
+execution entry point (``run_literature_pipeline_acquisition``) this
+module exposes connect the Literature Document-First acquisition path --
 
     AcquisitionExecutor -> PubMedLiteratureAdapter -> DocumentStore
     -> Literature Evidence Projection (Phase 4.1A)
     -> Literature Chunk Projection (Phase 4.1B)
 
--- to the real production orchestration path
-(``cli.py::run_one()`` -> ``Pipeline.run()``). Everything upstream of this
-module (``research/acquisition_executor.py``,
+-- to TWO real callers: ``cli.py::run_one()`` -> ``Pipeline.run()`` (an
+explicit, user-supplied ``--literature-pmid``/``--literature-nct-id``
+reference), and, as of Phase 4.3H, ``research/
+adaptive_literature_acquisition.py`` (an offline-verified bridge from a
+Phase 4.3G ``AdaptiveAcquisitionPlan``'s own automatically-resolved NCT
+id -- not yet connected to ``Pipeline.run()``/``cli.py`` itself). Both
+callers go through the SAME two functions, unmodified by either; this
+module adds no new PubMed/Europe PMC parsing, no new chunking rule, no
+new Evidence Integrity classification, and does not know or care which
+of its two callers invoked it. Everything upstream of this module
+(``research/acquisition_executor.py``,
 ``research/literature_acquisition_adapter.py``,
 ``research/literature_evidence_projection.py``,
 ``research/literature_chunk_projection.py``) is reused exactly as Phase
-3F/3F.0.x/3F.1/3F.2/4.1A/4.1B built and tested it -- this module adds no
-new PubMed/Europe PMC parsing, no new chunking rule, no new Evidence
-Integrity classification. It only decides WHEN those existing pieces run
-in a real invocation, and carries their output into ``Pipeline.run()``'s
-existing ``collection_results``/``chunks`` parameters.
+3F/3F.0.x/3F.1/3F.2/4.1A/4.1B built and tested it.
 
 User-authorized scope for this phase, and nothing beyond it:
 

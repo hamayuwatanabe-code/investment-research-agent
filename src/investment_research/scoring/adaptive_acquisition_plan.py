@@ -11,10 +11,14 @@ phase, not an action.
 Kept as its own module, separate from ``program_identity_resolution.py``,
 because resolution (what do we currently know?) and planning (what would be
 worth fetching next, and at what budget?) are different questions with
-different callers in mind -- a future executor would consume
-``AdaptiveAcquisitionPlan`` without ever needing to re-derive it from the
-two resolutions itself, mirroring ``program_evidence.py``/
-``program_identity_resolution.py``'s own layering.
+different callers in mind -- a consumer reads ``AdaptiveAcquisitionPlan``
+without ever needing to re-derive it from the two resolutions itself,
+mirroring ``program_evidence.py``/``program_identity_resolution.py``'s own
+layering. Phase 4.3H (``research/adaptive_literature_acquisition.py``) is
+that consumer, offline-verified only -- it independently re-verifies a
+``READY`` plan before turning it into one Literature Document-First
+acquisition request; it is still not connected to
+``orchestrator/pipeline.py``/``cli.py``/the Action Gate.
 
 Budget contract (Phase 4.3G correction of ``program_identity_resolution.py``'s
 own now-superseded "5 requests" note): a ``READY`` plan carries
