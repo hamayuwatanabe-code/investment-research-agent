@@ -259,6 +259,55 @@ def test_non_ready_plan_is_skipped_without_touching_the_acquisition_path(status,
     assert http.requested_urls == []
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        AcquisitionPlanStatus.NO_ACTION,
+        AcquisitionPlanStatus.UNRESOLVED,
+        AcquisitionPlanStatus.CONFLICTED,
+        AcquisitionPlanStatus.SKIPPED_EXPLICIT_OVERRIDE,
+        AcquisitionPlanStatus.REFUSED,
+    ],
+)
+@pytest.mark.parametrize(
+    "http_client_present,env_present",
+    [
+        (False, True),   # http_client=None, env injected
+        (True, False),   # http_client injected, env=None
+        (False, False),  # both None
+    ],
+    ids=["http_client_none", "env_none", "both_none"],
+)
+def test_non_ready_plan_is_skipped_even_with_missing_injection(
+    status, http_client_present, env_present, monkeypatch
+):
+    """Correction 1's final priority contract: plan.status is judged
+    BEFORE http_client/env are even inspected. A non-READY plan is
+    SKIPPED no matter which (or both) of http_client/env is missing --
+    never REFUSED, and the request validator/acquisition function are
+    never reached either way."""
+
+    def _explode(*_a, **_k):
+        raise AssertionError(
+            "the acquisition path must never be reached for a non-READY plan, "
+            "regardless of http_client/env injection"
+        )
+
+    monkeypatch.setattr(ala, "validate_literature_pipeline_request", _explode)
+    monkeypatch.setattr(ala, "run_literature_pipeline_acquisition", _explode)
+
+    plan = AdaptiveAcquisitionPlan(status=status, rationale="not ready")
+    http = fx.FakeHttpClient(responses={}) if http_client_present else None
+    env = _ENV if env_present else None
+
+    execution = execute_adaptive_literature_plan(plan, ticker=TICKER, http_client=http, env=env)
+
+    assert execution.status is AdaptiveExecutionStatus.SKIPPED
+    assert execution.bundle is None
+    if http is not None:
+        assert http.requested_urls == []
+
+
 # =============================================================================
 # 6. Each individually-broken READY field is REFUSED, zero HTTP
 # =============================================================================

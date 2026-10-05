@@ -25,12 +25,22 @@ this into ``Pipeline.run()`` (the FactCollector conversion, a second full
 Evidence Integrity pass over the new facts, and a resume-snapshot design
 for this step) is explicitly future work, not attempted here.
 
-``http_client``/``env`` are REQUIRED, explicitly-injected parameters with
-no default value -- a caller must always pass both, even if passing the
-literal ``None``. Passing ``None`` for either is never treated as "use
-the real HTTP client" / "use the real process environment": it is a
-``REFUSED`` outcome, checked before anything else in this module runs,
-including before ``validate_literature_pipeline_request`` is called.
+Correction 1's final priority contract: ``plan.status`` is judged FIRST,
+unconditionally, before ``http_client``/``env`` are even inspected. Any
+of the five non-``READY`` statuses (``NO_ACTION``/``UNRESOLVED``/
+``CONFLICTED``/``SKIPPED_EXPLICIT_OVERRIDE``/``REFUSED``) is always
+``SKIPPED`` -- regardless of whether ``http_client``/``env`` are
+present, absent, or malformed -- with zero calls into
+``validate_literature_pipeline_request``/``run_literature_pipeline_
+acquisition`` and zero HTTP. Only once a plan has passed that gate (i.e.
+only for a CLAIMED ``READY`` plan) does the required-injection guard
+run: ``http_client``/``env`` are REQUIRED, explicitly-injected
+parameters with no default value -- a caller must always pass both,
+even if passing the literal ``None``. Passing ``None`` for either is
+never treated as "use the real HTTP client" / "use the real process
+environment": it is a ``REFUSED`` outcome for that ``READY`` plan,
+checked before ``validate_literature_pipeline_request`` is called and
+before any of this module's other ``READY`` re-verification checks.
 This is a STRICTER contract than ``run_literature_pipeline_acquisition``'s
 own optional ``http_client``/``env`` parameters (which DO fall back to a
 real, network-capable ``AllowlistedHttpClient``/the real environment when
@@ -88,14 +98,18 @@ class AdaptiveExecutionStatus(StrEnum):
     #: The plan itself was not ``READY`` (``NO_ACTION``/``UNRESOLVED``/
     #: ``CONFLICTED``/``SKIPPED_EXPLICIT_OVERRIDE``/``REFUSED``) -- nothing
     #: to acquire, and this bridge never second-guesses the plan's own
-    #: status. Zero HTTP requests.
+    #: status. Judged FIRST, before ``http_client``/``env`` are even
+    #: inspected: a non-``READY`` plan is ``SKIPPED`` regardless of
+    #: whether those were injected, missing, or malformed. Zero HTTP
+    #: requests.
     SKIPPED = "SKIPPED"
-    #: The plan CLAIMED ``READY`` but failed this module's own independent
-    #: re-verification (see ``execute_adaptive_literature_plan``'s
-    #: docstring), OR the required ``http_client``/``env`` injection was
-    #: missing (``None``), OR ``validate_literature_pipeline_request``
-    #: itself rejected the derived request. Zero HTTP requests in every
-    #: case.
+    #: Reached only for a CLAIMED ``READY`` plan. Either the required
+    #: ``http_client``/``env`` injection was missing (``None`` -- checked
+    #: first, within this ``READY``-only path), OR the plan failed this
+    #: module's own independent re-verification (see ``execute_
+    #: adaptive_literature_plan``'s docstring), OR ``validate_literature_
+    #: pipeline_request`` itself rejected the derived request. Zero HTTP
+    #: requests in every case.
     REFUSED = "REFUSED"
     #: The acquisition ran and ``LiteraturePipelineBundle.coverage_complete``
     #: is ``True``.
@@ -143,30 +157,37 @@ def execute_adaptive_literature_plan(
     """Re-verify a ``READY`` plan, then (only if every check passes) run
     ONE Literature Document-First acquisition against it.
 
-    Required-injection guard (checked FIRST, before anything else,
-    including before looking at ``plan`` at all): ``http_client``/``env``
-    being ``None`` is ``REFUSED`` -- this bridge never falls back to a
-    real, network-capable transport or the real process environment.
+    Priority order (Correction 1's final contract):
 
-    Non-``READY`` plans (``NO_ACTION``/``UNRESOLVED``/``CONFLICTED``/
-    ``SKIPPED_EXPLICIT_OVERRIDE``/``REFUSED``) are ``SKIPPED`` -- this
-    bridge never second-guesses what Phase 4.3G's own ``build_
-    adaptive_acquisition_plan`` already decided.
+    1. ``plan.status`` is judged FIRST, unconditionally, before
+       ``http_client``/``env`` are even inspected. Non-``READY`` plans
+       (``NO_ACTION``/``UNRESOLVED``/``CONFLICTED``/
+       ``SKIPPED_EXPLICIT_OVERRIDE``/``REFUSED``) are always ``SKIPPED``
+       -- this bridge never second-guesses what Phase 4.3G's own
+       ``build_adaptive_acquisition_plan`` already decided, and it makes
+       no difference here whether ``http_client``/``env`` were injected,
+       ``None``, or malformed: a non-``READY`` plan never reaches that
+       check at all.
+    2. Only for a CLAIMED ``READY`` plan does the required-injection
+       guard run: ``http_client``/``env`` being ``None`` is ``REFUSED``
+       -- this bridge never falls back to a real, network-capable
+       transport or the real process environment.
+    3. A ``READY`` plan that passed the injection guard is independently
+       re-verified against every one of the following before any
+       request is built; failing ANY of them is ``REFUSED``, never a
+       guess or a silent correction:
 
-    A claimed ``READY`` plan is independently re-verified against every
-    one of the following before any request is built; failing ANY of
-    them is ``REFUSED``, never a guess or a silent correction:
-
-    1. ``plan.status is AcquisitionPlanStatus.READY``.
-    2. ``plan.requires_external_communication is True``.
-    3. ``plan.reference_mode == REFERENCE_MODE_NCT_ID``.
-    4. ``validate_strict_nct_id(plan.nct_id)`` succeeds.
-    5. That canonical NCT id equals ``plan.nct_id`` exactly (already
-       canonical -- never silently re-canonicalized here).
-    6. ``plan.pmid`` is ``""`` or ``"UNKNOWN"`` (never a specific pmid --
-       Phase 4.3G's own plan never populates one for ``READY``).
-    7. ``plan.max_requests`` is a plain ``int`` (not ``bool``) equal to
-       ``READY_MAX_REQUESTS`` (6).
+       a. ``plan.status is AcquisitionPlanStatus.READY``.
+       b. ``plan.requires_external_communication is True``.
+       c. ``plan.reference_mode == REFERENCE_MODE_NCT_ID``.
+       d. ``validate_strict_nct_id(plan.nct_id)`` succeeds.
+       e. That canonical NCT id equals ``plan.nct_id`` exactly (already
+          canonical -- never silently re-canonicalized here).
+       f. ``plan.pmid`` is ``""`` or ``"UNKNOWN"`` (never a specific
+          pmid -- Phase 4.3G's own plan never populates one for
+          ``READY``).
+       g. ``plan.max_requests`` is a plain ``int`` (not ``bool``) equal
+          to ``READY_MAX_REQUESTS`` (6).
 
     Only once every check above passes does this call
     ``validate_literature_pipeline_request`` -- always with
@@ -197,6 +218,17 @@ def execute_adaptive_literature_plan(
     * ``bundle.coverage_complete`` is ``True`` -- ``COMPLETE``.
     * otherwise -- ``INCOMPLETE``.
     """
+    if plan.status is not AcquisitionPlanStatus.READY:
+        # Judged FIRST, unconditionally -- before http_client/env are
+        # even inspected. A non-READY plan is SKIPPED regardless of
+        # whether those were injected, None, or malformed.
+        return AdaptiveLiteratureExecution(
+            status=AdaptiveExecutionStatus.SKIPPED,
+            plan=plan,
+            bundle=None,
+            rationale=f"plan status is {plan.status}, not READY -- nothing to acquire",
+        )
+
     if http_client is None:
         return _refused(
             plan, "http_client was not injected; this bridge never falls back to a real transport"
@@ -204,14 +236,6 @@ def execute_adaptive_literature_plan(
     if env is None:
         return _refused(
             plan, "env was not injected; this bridge never falls back to the real process environment"
-        )
-
-    if plan.status is not AcquisitionPlanStatus.READY:
-        return AdaptiveLiteratureExecution(
-            status=AdaptiveExecutionStatus.SKIPPED,
-            plan=plan,
-            bundle=None,
-            rationale=f"plan status is {plan.status}, not READY -- nothing to acquire",
         )
 
     if plan.requires_external_communication is not True:
