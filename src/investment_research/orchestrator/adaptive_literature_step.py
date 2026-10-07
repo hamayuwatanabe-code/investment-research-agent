@@ -41,6 +41,37 @@ reinventing:
   ``LiteraturePipelineBundle.chunks`` tuple), never re-derived from a
   reconstructed ``DocumentStore`` on resume -- see
   ``storage.repository._chunk_to_dict``'s own docstring.
+
+Phase 4.3I correction 2 (snapshot/input binding): every persisted
+checkpoint (``_adaptive_literature_started``/``_adaptive_collect_snapshot``/
+``_adaptive_verify_snapshot``) now carries a typed
+:class:`~investment_research.storage.repository.AdaptiveLiteratureTarget`
+(ticker, reference_mode, nct_id, max_requests, and a content-sensitive
+fingerprint of the Stage-2 base ``verified_facts`` the checkpoint was
+computed against) plus, for the verify snapshot, a dependency digest of
+the EXACT collect snapshot it was computed from. Restoring EITHER
+snapshot now independently re-verifies this binding against the CURRENT
+plan/ticker/base facts before trusting it -- a mismatch (different
+ticker, different NCT id, a changed request budget, or the same fact_id
+set with different content) is ``SNAPSHOT_INPUT_MISMATCH``: never
+re-fetched, never re-run through Integrity, never silently restored. A
+checkpoint saved before this correction (lacking the new identity
+fields entirely) is corrupted on read, never guessed at.
+
+Phase 4.3I correction 2 (resume-state ordering): resume-state (started
+marker / collect snapshot / verify snapshot, and now the input-binding
+check above) is judged FIRST, unconditionally -- before
+``base_evidence_available``, before ``plan.status``, and before the
+runner-injection check. A prior invocation's ambiguous state
+(``_adaptive_literature_started`` with no completed collect snapshot)
+must never be masked by this invocation's plan happening to be
+non-READY, or by this invocation's base evidence happening to be
+unavailable. ``base_evidence_available=False`` with a CLEAN (matching)
+prior snapshot on file still refuses to restore that snapshot's Facts
+-- the current base to compare it against is itself unknown, so the
+binding cannot be meaningfully re-verified, and restoring old evidence
+against an unknown new base is exactly the kind of stale-but-plausible
+result CLAUDE.md rule 7 forbids.
 """
 
 from __future__ import annotations
@@ -64,9 +95,13 @@ from ..schemas.validation import QuarantinedSource
 from ..scoring.adaptive_acquisition_plan import AcquisitionPlanStatus, AdaptiveAcquisitionPlan
 from ..storage.repository import (
     AdaptiveCollectSnapshot,
+    AdaptiveLiteratureStarted,
+    AdaptiveLiteratureTarget,
     AdaptiveVerifySnapshot,
     Repository,
     ResumeSnapshotCorrupted,
+    adaptive_collect_snapshot_digest,
+    fact_content_fingerprint,
 )
 from .evidence_integrity_pass import (
     FullIntegrityPassInput,
@@ -105,28 +140,49 @@ class AdaptiveLiteratureStepOutcome(StrEnum):
     (CLAUDE.md rule 8: an unsearched category is UNSEARCHED, never K0)."""
 
     #: plan.status was not READY (NO_ACTION/UNRESOLVED/CONFLICTED/
-    #: SKIPPED_EXPLICIT_OVERRIDE/REFUSED) -- nothing to acquire. Zero
-    #: effect on verified_facts/chunks/blocking_reasons.
+    #: SKIPPED_EXPLICIT_OVERRIDE/REFUSED) -- nothing to acquire. Reached
+    #: ONLY when no checkpoint of any kind exists yet for this run_id
+    #: (Phase 4.3I correction 2: checked AFTER resume-state, never
+    #: before). Zero effect on verified_facts/chunks/blocking_reasons.
     NOT_ATTEMPTED_NON_READY = "NOT_ATTEMPTED_NON_READY"
     #: plan.status is READY but no http_client/env was injected into this
     #: Pipeline -- this step never calls execute_adaptive_literature_plan
     #: at all in this case (distinct from the bridge's own REFUSED, which
-    #: means a call WAS made). Zero effect on verified_facts/chunks/
-    #: blocking_reasons.
+    #: means a call WAS made). Reached ONLY when no checkpoint exists yet.
+    #: Zero effect on verified_facts/chunks/blocking_reasons.
     NOT_ATTEMPTED_NO_RUNNER = "NOT_ATTEMPTED_NO_RUNNER"
     #: The base evidence set itself was unavailable this invocation
     #: (Pipeline's own resume-snapshot fail-closed path) -- fetching new
-    #: literature against a known-incomplete base makes no sense. Zero
-    #: HTTP, zero new facts.
+    #: literature against a known-incomplete base makes no sense, and
+    #: restoring an OLD (even cleanly matching) snapshot's Facts against
+    #: an unknown new base is refused for the same reason. Zero HTTP,
+    #: zero new facts, zero restored facts.
     NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE = "NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE"
     #: A "_adaptive_literature_started" marker exists for this run_id with
     #: no completed collect snapshot -- whether HTTP was ever sent cannot
-    #: be determined from persisted state. Fails closed: blocking_reasons
-    #: is always non-empty, Action=None. Never auto-retried.
+    #: be determined from persisted state. Checked UNCONDITIONALLY, before
+    #: base_evidence_available/plan.status are even inspected (Phase 4.3I
+    #: correction 2) -- never masked by a later invocation's plan
+    #: happening to be non-READY or its base evidence happening to be
+    #: unavailable. Fails closed: blocking_reasons is always non-empty,
+    #: Action=None. Never auto-retried.
     AMBIGUOUS_RESUME_STATE = "AMBIGUOUS_RESUME_STATE"
     #: A snapshot row exists for this run_id but could not be parsed back
-    #: losslessly. Fails closed, same as AMBIGUOUS_RESUME_STATE.
+    #: losslessly -- INCLUDING a pre-correction-2 snapshot lacking the
+    #: identity fields a restore now requires. Fails closed, same as
+    #: AMBIGUOUS_RESUME_STATE.
     SNAPSHOT_CORRUPTED = "SNAPSHOT_CORRUPTED"
+    #: Phase 4.3I correction 2: a collect and/or verify snapshot exists
+    #: and parses cleanly, but its stored target identity (ticker/
+    #: reference_mode/nct_id/max_requests), its base-fact fingerprint, its
+    #: execution_status, or (for a verify snapshot) its dependency digest
+    #: on the current collect snapshot does NOT match the CURRENT
+    #: invocation's plan/ticker/base facts. Never re-fetched, never
+    #: re-run through Integrity, never silently restored -- this is a
+    #: DIFFERENT condition from AMBIGUOUS_RESUME_STATE (there, whether a
+    #: request was ever sent is unknown; here, a request's recorded
+    #: result is known but no longer applies to this invocation's input).
+    SNAPSHOT_INPUT_MISMATCH = "SNAPSHOT_INPUT_MISMATCH"
     #: The bridge was called and refused (READY re-verification failure,
     #: request validation refusal, or bundle.refused) -- zero HTTP in
     #: every case per execute_adaptive_literature_plan's own contract.
@@ -151,7 +207,8 @@ class AdaptiveLiteratureStepResult:
     outcome: AdaptiveLiteratureStepOutcome
     #: The full verified_facts set after this step -- identical to the
     #: input verified_facts when outcome is any NOT_ATTEMPTED_*/
-    #: AMBIGUOUS_RESUME_STATE/SNAPSHOT_CORRUPTED/REFUSED value.
+    #: AMBIGUOUS_RESUME_STATE/SNAPSHOT_CORRUPTED/SNAPSHOT_INPUT_MISMATCH/
+    #: REFUSED value.
     verified_facts: tuple[Fact, ...]
     #: New Chunks to append to Pipeline.chunks -- empty for every outcome
     #: except COMPLETE/INCOMPLETE.
@@ -173,10 +230,10 @@ class AdaptiveLiteratureStepResult:
     agent_records: tuple[AgentRunRecord, ...]
     failures: tuple[str, ...]
     #: Non-empty exactly for REFUSED/INCOMPLETE/AMBIGUOUS_RESUME_STATE/
-    #: SNAPSHOT_CORRUPTED -- the caller extends blocking_reasons (Action
-    #: Gate) with these, distinct from direct_acquisition_info (the
-    #: existing explicit-Literature-path diagnostic, never mixed with
-    #: this step's own).
+    #: SNAPSHOT_CORRUPTED/SNAPSHOT_INPUT_MISMATCH -- the caller extends
+    #: blocking_reasons (Action Gate) with these, distinct from
+    #: direct_acquisition_info (the existing explicit-Literature-path
+    #: diagnostic, never mixed with this step's own).
     blocking_reasons: tuple[str, ...]
     #: Safe (body/secret/URL-free) diagnostics -- a SEPARATE typed carrier
     #: from result.direct_acquisition_info (which belongs exclusively to
@@ -219,6 +276,50 @@ def _blocked(
         blocking_reasons=(reason,),
         diagnostics={"outcome": str(outcome), "reason": reason},
     )
+
+
+def _current_target(
+    plan: AdaptiveAcquisitionPlan, ticker: str, verified_facts: Sequence[Fact],
+) -> AdaptiveLiteratureTarget:
+    """Phase 4.3I correction 2: the identity THIS invocation's plan/
+    ticker/base facts would bind a NEW checkpoint to -- also what any
+    EXISTING checkpoint is compared against before being trusted."""
+    return AdaptiveLiteratureTarget(
+        ticker=ticker,
+        reference_mode=plan.reference_mode,
+        nct_id=plan.nct_id,
+        max_requests=plan.max_requests,
+        base_fact_fingerprint=fact_content_fingerprint(verified_facts),
+    )
+
+
+def _target_mismatch_reason(
+    current: AdaptiveLiteratureTarget, stored: AdaptiveLiteratureTarget,
+) -> str:
+    """Empty string when every field matches. Never a bare bool -- the
+    returned text names exactly which field(s) disagree, so a human
+    reading blocking_reasons can tell "the ticker changed" apart from
+    "the same fact_id's content changed under this run_id"."""
+    diffs: list[str] = []
+    if current.ticker != stored.ticker:
+        diffs.append(f"ticker (stored={stored.ticker!r}, current={current.ticker!r})")
+    if current.reference_mode != stored.reference_mode:
+        diffs.append(
+            f"reference_mode (stored={stored.reference_mode!r}, current={current.reference_mode!r})"
+        )
+    if current.nct_id != stored.nct_id:
+        diffs.append(f"nct_id (stored={stored.nct_id!r}, current={current.nct_id!r})")
+    if current.max_requests != stored.max_requests:
+        diffs.append(
+            f"max_requests (stored={stored.max_requests!r}, current={current.max_requests!r})"
+        )
+    if current.base_fact_fingerprint != stored.base_fact_fingerprint:
+        diffs.append(
+            "base_fact_fingerprint (the Stage-2 base verified_facts this checkpoint was "
+            "computed against no longer match the current invocation's -- same run_id, "
+            "different or differently-content fact set)"
+        )
+    return "; ".join(diffs)
 
 
 def _run_fact_collector_adaptive(
@@ -274,22 +375,24 @@ def _finalize_with_integrity(
     company_name: str,
     verified_facts: Sequence[Fact],
     old_sources: Sequence[Source],
-    new_raw_facts: Sequence[Fact],
-    new_sources: Sequence[Source],
-    chunks: Sequence[Chunk],
-    execution_status: str,
+    collect_snapshot: AdaptiveCollectSnapshot,
     today: date | None,
     stale_after_days: int,
     extra_agent_records: tuple[AgentRunRecord, ...],
     extra_failures: tuple[str, ...],
 ) -> AdaptiveLiteratureStepResult:
     """Shared tail for both the "fetch just completed" path and the
-    "resuming from a completed collect snapshot" path: run the second
-    (ADAPTIVE) full Evidence Integrity pass over
-    verified_facts UNION new_raw_facts, decide this step's own
-    blocking_reasons, and save the verify snapshot."""
-    combined_pre_integrity = tuple(verified_facts) + tuple(new_raw_facts)
-    combined_sources = tuple(old_sources) + tuple(new_sources)
+    "resuming from a completed, input-verified collect snapshot" path:
+    run the second (ADAPTIVE) full Evidence Integrity pass over
+    verified_facts UNION collect_snapshot.raw_facts, decide this step's
+    own blocking_reasons, and save the verify snapshot bound to
+    ``collect_snapshot``'s own target/digest (Phase 4.3I correction 2) --
+    ``collect_snapshot`` is ALWAYS the exact object just persisted (fresh
+    fetch) or just read back and input-verified (resume), never rebuilt
+    from loose parts, so the saved digest is always computed from exactly
+    what a later restore will re-read."""
+    combined_pre_integrity = tuple(verified_facts) + tuple(collect_snapshot.raw_facts)
+    combined_sources = tuple(old_sources) + tuple(collect_snapshot.sources)
     pass_input = FullIntegrityPassInput(
         ticker=ticker,
         company_name=company_name,
@@ -303,7 +406,7 @@ def _finalize_with_integrity(
     pass_output = run_full_evidence_integrity_pass(pass_input, repo)
 
     blocking: list[str] = []
-    if execution_status == AdaptiveExecutionStatus.INCOMPLETE.value:
+    if collect_snapshot.execution_status == AdaptiveExecutionStatus.INCOMPLETE.value:
         blocking.append(
             "adaptive literature acquisition ran but did not achieve full coverage "
             "(AdaptiveExecutionStatus.INCOMPLETE); the resulting evidence gap is not "
@@ -320,8 +423,10 @@ def _finalize_with_integrity(
         AdaptiveVerifySnapshot(
             verified_facts=list(pass_output.verified_facts),
             quarantined_sources=list(pass_output.quarantined_sources),
-            execution_status=execution_status,
+            execution_status=collect_snapshot.execution_status,
             blocking_reasons=list(blocking),
+            target=collect_snapshot.target,
+            collect_snapshot_digest=adaptive_collect_snapshot_digest(collect_snapshot),
         ),
     )
 
@@ -333,17 +438,17 @@ def _finalize_with_integrity(
     return AdaptiveLiteratureStepResult(
         outcome=outcome,
         verified_facts=tuple(pass_output.verified_facts),
-        new_chunks=tuple(chunks),
-        new_sources=tuple(new_sources),
+        new_chunks=tuple(collect_snapshot.chunks),
+        new_sources=tuple(collect_snapshot.sources),
         quarantined_sources=tuple(pass_output.quarantined_sources),
         agent_records=(*extra_agent_records, pass_output.agent_run_record),
         failures=(*extra_failures, *pass_output.failures),
         blocking_reasons=tuple(blocking),
         diagnostics={
             "outcome": str(outcome),
-            "execution_status": execution_status,
-            "new_fact_count": len(new_raw_facts),
-            "new_chunk_count": len(chunks),
+            "execution_status": collect_snapshot.execution_status,
+            "new_fact_count": len(collect_snapshot.raw_facts),
+            "new_chunk_count": len(collect_snapshot.chunks),
             "verified_fact_count": len(pass_output.verified_facts),
         },
     )
@@ -366,32 +471,17 @@ def run_adaptive_literature_step(
 ) -> AdaptiveLiteratureStepResult:
     """Called by ``Pipeline.run()`` once per invocation, immediately after
     the Phase 4.3G bootstrap block and before Stage 2b escalation. Safe to
-    call on every invocation, fresh or resumed: resume-state is judged
-    FIRST, from persisted checkpoints alone, before the runner-injection
-    check (Phase 4.3I correction 5) -- an ambiguous resume state is never
-    allowed to fall through into "runner not injected, so this is a
-    normal no-op" the way a naive ordering would.
+    call on every invocation, fresh or resumed.
+
+    Phase 4.3I correction 2's decision order (see module docstring for
+    the reasoning): persisted checkpoint state is read and judged FIRST,
+    unconditionally -- a verify snapshot's missing collect-snapshot
+    dependency, an input-binding mismatch, or a started-marker with no
+    completed collect snapshot are all judged BEFORE
+    ``base_evidence_available``/``plan.status``/the runner-injection
+    check are even inspected. Those three checks are reached ONLY when
+    NOTHING is persisted yet for this run_id.
     """
-    if not base_evidence_available:
-        return _not_attempted(
-            AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE,
-            verified_facts,
-            "the base evidence set itself was unavailable this invocation "
-            "(resume snapshot fail-closed) -- adaptive literature acquisition was not "
-            "attempted against a known-incomplete base",
-        )
-
-    if plan.status is not AcquisitionPlanStatus.READY:
-        return _not_attempted(
-            AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_NON_READY,
-            verified_facts,
-            f"plan.status is {plan.status}, not READY -- nothing to acquire",
-        )
-
-    # Resume-state judged FIRST, unconditionally, before http_client/env
-    # are even inspected (Phase 4.3I correction 5): a started-marker with
-    # no completed collect snapshot is ambiguous REGARDLESS of whether a
-    # runner happens to be injected on THIS invocation.
     try:
         verify_snapshot = repo.adaptive_verify_snapshot_for_resume(run_id)
         collect_snapshot = repo.adaptive_collect_snapshot_for_resume(run_id)
@@ -407,19 +497,13 @@ def run_adaptive_literature_step(
         # verify_snapshot's own Integrity pass was run FROM a collect
         # snapshot's pre-Integrity facts/sources/chunks (every one of this
         # module's OWN save paths writes the collect snapshot strictly
-        # BEFORE the verify snapshot -- see save_adaptive_collect_snapshot
-        # call sites below). A verify snapshot with no collect snapshot
-        # is therefore never a "clean" state to restore from: it is
-        # missing exactly the Sources/Chunks the restored Facts are
-        # supposed to be backed by. Never trusted implicitly -- checked
-        # explicitly, the same defensive-in-depth precedent
-        # build_adaptive_acquisition_plan's own independent NCT re-check
-        # already sets for this module. Distinguished from
-        # SNAPSHOT_CORRUPTED (a row that exists but fails to parse,
-        # handled above): this is a row that is cleanly ABSENT, which is
-        # just as untrustworthy here, and fails closed identically --
-        # never re-fetched, never re-Integrity'd, never silently restored
-        # with empty Sources/Chunks standing in for missing ones.
+        # BEFORE the verify snapshot). A verify snapshot with no collect
+        # snapshot is therefore never a "clean" state to restore from: it
+        # is missing exactly the Sources/Chunks the restored Facts are
+        # supposed to be backed by. Distinguished from SNAPSHOT_CORRUPTED
+        # (a row that exists but fails to parse, handled above): this is
+        # a row that is cleanly ABSENT, which is just as untrustworthy
+        # here, and fails closed identically.
         if collect_snapshot is None:
             return _blocked(
                 AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE,
@@ -430,12 +514,58 @@ def run_adaptive_literature_step(
                 "recovered; failing closed rather than restoring an incomplete evidence set "
                 "as if it were complete",
             )
-        # State F: Integrity already completed in a prior invocation --
-        # restore directly, re-fetch nothing, re-run nothing. The ORIGINAL
-        # execution_status category is preserved rather than re-derived
-        # from blocking_reasons alone, so a restored REFUSED/SKIPPED fetch
-        # is never relabeled INCOMPLETE merely because it also happens to
-        # carry a non-empty blocking_reasons tuple.
+        if not base_evidence_available:
+            # Phase 4.3I correction 2: the CURRENT base (verified_facts)
+            # is itself unavailable this invocation -- there is nothing
+            # trustworthy to re-verify the snapshot's own base_fact_
+            # fingerprint against, so this step refuses to restore ANY
+            # Facts/Chunks/Sources from a prior invocation's snapshot,
+            # clean or not. The overall run's own INCOMPLETE_RESEARCH/
+            # Action=None already comes from resume_snapshot_failures
+            # (Stage 1/2's own fail-closed path); this step adds no
+            # separate blocking reason of its own here, it simply never
+            # lets old evidence re-enter verified_facts/bus.facts.
+            return _not_attempted(
+                AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE,
+                verified_facts,
+                "a completed adaptive verify snapshot exists for this run_id, but the base "
+                "evidence set itself is unavailable this invocation -- restoring its Facts "
+                "against an unknown/incomplete current base is refused rather than silently "
+                "reusing stale evidence",
+            )
+        current_target = _current_target(plan, ticker, verified_facts)
+        mismatch = _target_mismatch_reason(current_target, verify_snapshot.target)
+        current_digest = adaptive_collect_snapshot_digest(collect_snapshot)
+        digest_mismatch = current_digest != verify_snapshot.collect_snapshot_digest
+        status_mismatch = verify_snapshot.execution_status != collect_snapshot.execution_status
+        if mismatch or digest_mismatch or status_mismatch:
+            reasons = []
+            if mismatch:
+                reasons.append(mismatch)
+            if digest_mismatch:
+                reasons.append(
+                    "collect_snapshot_digest differs -- the verify snapshot was computed from "
+                    "a different collect snapshot than the one currently on file"
+                )
+            if status_mismatch:
+                reasons.append(
+                    f"execution_status differs (verify={verify_snapshot.execution_status!r}, "
+                    f"collect={collect_snapshot.execution_status!r})"
+                )
+            return _blocked(
+                AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH,
+                verified_facts,
+                f"adaptive literature verify snapshot for run_id={run_id!r} no longer matches "
+                f"the current input, and is refused rather than restored or re-fetched: "
+                + "; ".join(reasons),
+            )
+        # State F: Integrity already completed in a prior invocation,
+        # input binding verified -- restore directly, re-fetch nothing,
+        # re-run nothing. The ORIGINAL execution_status category is
+        # preserved rather than re-derived from blocking_reasons alone,
+        # so a restored REFUSED/SKIPPED fetch is never relabeled
+        # INCOMPLETE merely because it also happens to carry a non-empty
+        # blocking_reasons tuple.
         if verify_snapshot.execution_status in (
             str(AdaptiveExecutionStatus.SKIPPED), str(AdaptiveExecutionStatus.REFUSED),
         ):
@@ -461,9 +591,30 @@ def run_adaptive_literature_step(
         )
 
     if collect_snapshot is not None:
-        # State D/E: fetch already completed and durably recorded; skip
-        # re-fetching entirely and (re-)run the second Integrity pass from
-        # the persisted pre-Integrity facts/sources/chunks.
+        # State D/E: fetch already completed and durably recorded.
+        # Phase 4.3I correction 3: this is reached regardless of whether
+        # a `started` marker also exists -- collect_snapshot's own save
+        # order being "after started" is NEVER, by itself, treated as
+        # proof of safety. Safety is established independently, here, by
+        # verifying collect_snapshot's OWN stored target/base-fact
+        # fingerprint against the CURRENT plan/ticker/base facts.
+        if not base_evidence_available:
+            return _not_attempted(
+                AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE,
+                verified_facts,
+                "a completed adaptive collect snapshot exists for this run_id, but the base "
+                "evidence set itself is unavailable this invocation -- re-running Evidence "
+                "Integrity against an unknown/incomplete current base is refused",
+            )
+        current_target = _current_target(plan, ticker, verified_facts)
+        mismatch = _target_mismatch_reason(current_target, collect_snapshot.target)
+        if mismatch:
+            return _blocked(
+                AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH,
+                verified_facts,
+                f"adaptive literature collect snapshot for run_id={run_id!r} no longer matches "
+                f"the current input, and is refused rather than restored or re-fetched: {mismatch}",
+            )
         return _finalize_with_integrity(
             repo,
             run_id=run_id,
@@ -471,10 +622,7 @@ def run_adaptive_literature_step(
             company_name=company_name,
             verified_facts=verified_facts,
             old_sources=sources,
-            new_raw_facts=collect_snapshot.raw_facts,
-            new_sources=collect_snapshot.sources,
-            chunks=collect_snapshot.chunks,
-            execution_status=collect_snapshot.execution_status,
+            collect_snapshot=collect_snapshot,
             today=today,
             stale_after_days=stale_after_days,
             extra_agent_records=(),
@@ -485,6 +633,12 @@ def run_adaptive_literature_step(
         # State B/C: something was attempted, but whether it reached the
         # network cannot be determined from persisted state -- never
         # auto-retried, never silently treated as "not attempted".
+        # Phase 4.3I correction 1: judged UNCONDITIONALLY here, before
+        # base_evidence_available/plan.status are inspected at all --
+        # this invocation's plan being non-READY (e.g. an explicit
+        # PMID/NCT override used this time) or its base evidence being
+        # unavailable must never mask a prior invocation's unresolved
+        # ambiguity.
         return _blocked(
             AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE,
             verified_facts,
@@ -494,9 +648,24 @@ def run_adaptive_literature_step(
             "closed rather than guessing or auto-retrying",
         )
 
-    # Nothing attempted yet for this run_id. Runner-injection is checked
-    # ONLY now, after every resume-state check above has already ruled
-    # out ambiguity (Phase 4.3I correction 5).
+    # Nothing persisted at all for this run_id. base_evidence_available/
+    # plan.status/runner-injection are checked ONLY now.
+    if not base_evidence_available:
+        return _not_attempted(
+            AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE,
+            verified_facts,
+            "the base evidence set itself was unavailable this invocation "
+            "(resume snapshot fail-closed) -- adaptive literature acquisition was not "
+            "attempted against a known-incomplete base",
+        )
+
+    if plan.status is not AcquisitionPlanStatus.READY:
+        return _not_attempted(
+            AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_NON_READY,
+            verified_facts,
+            f"plan.status is {plan.status}, not READY -- nothing to acquire",
+        )
+
     if http_client is None or env is None:
         return _not_attempted(
             AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_NO_RUNNER,
@@ -505,7 +674,8 @@ def run_adaptive_literature_step(
             "Pipeline -- execute_adaptive_literature_plan was never called",
         )
 
-    repo.save_adaptive_literature_started(run_id, plan.nct_id, plan.max_requests)
+    current_target = _current_target(plan, ticker, verified_facts)
+    repo.save_adaptive_literature_started(run_id, AdaptiveLiteratureStarted(target=current_target))
     try:
         execution = execute_adaptive_literature_plan(
             plan, ticker=ticker, http_client=http_client, env=env,
@@ -534,16 +704,18 @@ def run_adaptive_literature_step(
             f"adaptive literature acquisition was attempted and {execution.status}: "
             f"{execution.rationale}"
         )
-        repo.save_adaptive_collect_snapshot(
-            run_id,
-            AdaptiveCollectSnapshot(execution_status=str(execution.status)),
+        refused_collect = AdaptiveCollectSnapshot(
+            execution_status=str(execution.status), target=current_target,
         )
+        repo.save_adaptive_collect_snapshot(run_id, refused_collect)
         repo.save_adaptive_verify_snapshot(
             run_id,
             AdaptiveVerifySnapshot(
                 verified_facts=list(verified_facts),
                 execution_status=str(execution.status),
                 blocking_reasons=[reason],
+                target=current_target,
+                collect_snapshot_digest=adaptive_collect_snapshot_digest(refused_collect),
             ),
         )
         return _blocked(AdaptiveLiteratureStepOutcome.REFUSED, verified_facts, reason)
@@ -559,15 +731,14 @@ def run_adaptive_literature_step(
         company_name=company_name,
         collection_result=bundle.collection_result,
     )
-    repo.save_adaptive_collect_snapshot(
-        run_id,
-        AdaptiveCollectSnapshot(
-            raw_facts=list(new_facts),
-            sources=list(bundle.collection_result.sources),
-            chunks=list(new_chunks),
-            execution_status=str(execution.status),
-        ),
+    collect_snapshot_obj = AdaptiveCollectSnapshot(
+        raw_facts=list(new_facts),
+        sources=list(bundle.collection_result.sources),
+        chunks=list(new_chunks),
+        execution_status=str(execution.status),
+        target=current_target,
     )
+    repo.save_adaptive_collect_snapshot(run_id, collect_snapshot_obj)
     return _finalize_with_integrity(
         repo,
         run_id=run_id,
@@ -575,10 +746,7 @@ def run_adaptive_literature_step(
         company_name=company_name,
         verified_facts=verified_facts,
         old_sources=sources,
-        new_raw_facts=new_facts,
-        new_sources=bundle.collection_result.sources,
-        chunks=new_chunks,
-        execution_status=str(execution.status),
+        collect_snapshot=collect_snapshot_obj,
         today=today,
         stale_after_days=stale_after_days,
         extra_agent_records=(fact_collector_record,),

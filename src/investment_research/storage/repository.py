@@ -8,6 +8,7 @@ key.  Identical content is a no-op (duplicate detection).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -239,6 +240,39 @@ def _chunk_from_dict(d: dict) -> Chunk:
         index=int(d["index"]),
         text=d["text"],
         document=_document_from_dict(d["document"]),
+    )
+
+
+def _adaptive_target_to_dict(target: AdaptiveLiteratureTarget) -> dict:
+    """Phase 4.3I correction 2. Every field is required on the way back
+    in (see ``_adaptive_target_from_dict``) -- never defaulted, so a
+    checkpoint saved before this correction (lacking this key entirely)
+    is corrupted on read, never silently trusted with a guessed/empty
+    identity."""
+    return {
+        "ticker": target.ticker,
+        "reference_mode": target.reference_mode,
+        "nct_id": target.nct_id,
+        "max_requests": target.max_requests,
+        "base_fact_fingerprint": target.base_fact_fingerprint,
+    }
+
+
+def _adaptive_target_from_dict(d: dict) -> AdaptiveLiteratureTarget:
+    """Direct required-key access (never ``.get()``) -- a dict missing
+    any of these keys raises ``KeyError``, which every call site below
+    catches as part of its own ``ResumeSnapshotCorrupted`` conversion.
+    ``max_requests`` is explicitly type-checked (never ``bool``, which
+    Python's ``int`` subclassing would otherwise let through silently)."""
+    max_requests = d["max_requests"]
+    if isinstance(max_requests, bool) or not isinstance(max_requests, int):
+        raise TypeError(f"max_requests must be a plain int, got {type(max_requests).__name__}")
+    return AdaptiveLiteratureTarget(
+        ticker=str(d["ticker"]),
+        reference_mode=str(d["reference_mode"]),
+        nct_id=str(d["nct_id"]),
+        max_requests=max_requests,
+        base_fact_fingerprint=str(d["base_fact_fingerprint"]),
     )
 
 
@@ -546,6 +580,36 @@ class VerifySnapshot:
 
 
 @dataclass
+class AdaptiveLiteratureTarget:
+    """Phase 4.3I correction 2: the typed identity binding a persisted
+    Adaptive Literature checkpoint to the exact input it was computed
+    against. Embedded (never a separate table) in
+    :class:`AdaptiveLiteratureStarted`/:class:`AdaptiveCollectSnapshot`/
+    :class:`AdaptiveVerifySnapshot`, and compared field-by-field on
+    restore -- never trusted implicitly. ``base_fact_fingerprint`` is
+    :func:`fact_content_fingerprint` of the Stage-2 ``verified_facts``
+    this checkpoint was computed against, which changes if the SAME
+    fact_id's content changes, not merely if the fact_id set changes."""
+
+    ticker: str = ""
+    reference_mode: str = ""
+    nct_id: str = ""
+    max_requests: int = 0
+    base_fact_fingerprint: str = ""
+
+
+@dataclass
+class AdaptiveLiteratureStarted:
+    """Phase 4.3I correction 2: the started-marker's own payload, now a
+    typed value (was a plain ``dict``) so its identity fields are read
+    back with the same strictness as the two snapshots below -- a
+    pre-correction-2 marker lacking these fields is corrupted on read,
+    never silently trusted with defaulted/guessed values."""
+
+    target: AdaptiveLiteratureTarget = field(default_factory=AdaptiveLiteratureTarget)
+
+
+@dataclass
 class AdaptiveCollectSnapshot:
     """Phase 4.3I: a run-scoped, lossless snapshot of the Adaptive
     Literature step's own fetch output -- saved AFTER
@@ -558,7 +622,12 @@ class AdaptiveCollectSnapshot:
     resume relies on to tell "never fetched" apart from "fetched, crashed
     before this write" (never both read as the same ``None``) -- see
     :meth:`Repository.adaptive_literature_started`/
-    :meth:`Repository.adaptive_collect_snapshot_for_resume`."""
+    :meth:`Repository.adaptive_collect_snapshot_for_resume`.
+
+    Phase 4.3I correction 2: ``target`` is now REQUIRED on read (no
+    default silently substituted) -- see
+    :func:`adaptive_collect_snapshot_digest`, the dependency digest
+    :class:`AdaptiveVerifySnapshot` binds itself to."""
 
     raw_facts: list[Fact] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
@@ -568,6 +637,7 @@ class AdaptiveCollectSnapshot:
     #: verify snapshot's own blocking-reason computation on resume,
     #: without needing to re-run the bridge to learn it again.
     execution_status: str = ""
+    target: AdaptiveLiteratureTarget = field(default_factory=AdaptiveLiteratureTarget)
 
 
 @dataclass
@@ -578,12 +648,22 @@ class AdaptiveVerifySnapshot:
     stored (never recomputed from ``execution_status`` alone on restore)
     so a resumed run reports the exact same Action Gate consequence an
     INCOMPLETE/REFUSED fetch already had, rather than silently reading as
-    resolved merely because Integrity itself succeeded."""
+    resolved merely because Integrity itself succeeded.
+
+    Phase 4.3I correction 2: ``target`` and ``collect_snapshot_digest``
+    bind this snapshot to the EXACT collect snapshot it was computed
+    from -- a caller restoring this must independently recompute
+    :func:`adaptive_collect_snapshot_digest` over the CURRENT collect
+    snapshot and reject the pair on any mismatch (target, digest, or
+    ``execution_status`` disagreement), rather than assuming the two
+    rows sharing a run_id are automatically consistent."""
 
     verified_facts: list[Fact] = field(default_factory=list)
     quarantined_sources: list[QuarantinedSource] = field(default_factory=list)
     execution_status: str = ""
     blocking_reasons: list[str] = field(default_factory=list)
+    target: AdaptiveLiteratureTarget = field(default_factory=AdaptiveLiteratureTarget)
+    collect_snapshot_digest: str = ""
 
 
 _COLLECT_SNAPSHOT_STAGE = "_collect_snapshot"
@@ -611,6 +691,56 @@ _CONTENT_FIELDS = (
     "source_url",
     "event_date",
 )
+
+
+def fact_content_fingerprint(facts: Sequence[Fact]) -> str:
+    """Phase 4.3I correction 2: a stable, order-independent digest of a
+    ``Fact`` sequence's own CONTENT -- reuses ``_CONTENT_FIELDS`` above,
+    the SAME fields :meth:`Repository.save_fact`'s own dedup-by-content
+    check already treats as "a fact's content" -- never ``fact_id``
+    alone: two Fact sets sharing the same fact_id set but different
+    claim/value/evidence_class/verified_status/... content produce
+    DIFFERENT fingerprints. Used by the Adaptive Literature step to bind
+    a persisted snapshot to the exact Stage-2 base evidence it was
+    computed against, so a later resume can detect "the same run_id, but
+    the underlying facts changed" rather than silently trusting a stale
+    snapshot. Always computed directly from an already-in-hand Fact
+    sequence (``verified_facts``) -- never by querying the global
+    ``facts`` table, which is not run_id-scoped (see ``orchestrator/
+    resume.py``'s own ``ResumePlan`` docstring on why that query shape is
+    unsafe)."""
+    rows = sorted(
+        (fact.fact_id, tuple(str(getattr(fact, field)) for field in _CONTENT_FIELDS))
+        for fact in facts
+    )
+    payload = json.dumps(rows, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def adaptive_collect_snapshot_digest(snapshot: AdaptiveCollectSnapshot) -> str:
+    """Phase 4.3I correction 2: a stable digest of an
+    :class:`AdaptiveCollectSnapshot`'s own COMPLETE content (its target
+    identity, every raw Fact, Source, and Chunk, and its
+    ``execution_status``) -- what :class:`AdaptiveVerifySnapshot` binds
+    itself to via ``collect_snapshot_digest``, so a restore can detect
+    ANY difference between the collect snapshot a verify snapshot was
+    actually computed from and whatever collect snapshot happens to be
+    present now, not merely a target/fact-set mismatch. Computed the same
+    way whether ``snapshot`` was just built in memory (at save time) or
+    just read back from the database (at restore time) -- both go
+    through the identical serialization helpers
+    (``_adaptive_target_to_dict``/``Fact.to_row``/
+    ``_source_to_snapshot_dict``/``_chunk_to_dict``), so the two are
+    bit-for-bit comparable."""
+    payload = {
+        "target": _adaptive_target_to_dict(snapshot.target),
+        "raw_facts": [f.to_row() for f in snapshot.raw_facts],
+        "sources": [_source_to_snapshot_dict(s) for s in snapshot.sources],
+        "chunks": [_chunk_to_dict(c) for c in snapshot.chunks],
+        "execution_status": snapshot.execution_status,
+    }
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def _now() -> str:
@@ -1042,6 +1172,20 @@ class Repository:
             )
         return out
 
+    def run_id_has_existing_checkpoint_data(self, run_id: str) -> bool:
+        """Phase 4.3I correction 2: whether ANY row (a real Stage-1/2
+        checkpoint, a ``_collect_snapshot``/``_verify_snapshot``, or any
+        of the three Adaptive Literature checkpoints) already exists for
+        this run_id -- a lightweight existence check, never reconstructing
+        ``Checkpoint`` objects, used by :meth:`Pipeline.run` to refuse a
+        ``resume=False`` call that would otherwise silently overwrite (via
+        every ``save_*_snapshot``'s own ``INSERT OR REPLACE``) a run_id a
+        caller is reusing by mistake rather than genuinely starting fresh."""
+        row = self.conn.execute(
+            "SELECT 1 FROM run_checkpoints WHERE run_id = ? LIMIT 1", (run_id,)
+        ).fetchone()
+        return row is not None
+
     def facts_for_resume(self, run_id: str) -> list:
         """Rehydrate the LATEST version of every fact recorded for a run --
         i.e. whatever this run's own persistence has most recently written
@@ -1263,15 +1407,20 @@ class Repository:
         )
 
     # -- Phase 4.3I: Adaptive Literature Acquisition resume checkpoints ----
-    def save_adaptive_literature_started(self, run_id: str, nct_id: str, max_requests: int) -> None:
+    def save_adaptive_literature_started(
+        self, run_id: str, started: AdaptiveLiteratureStarted,
+    ) -> None:
         """Written BEFORE ``execute_adaptive_literature_plan()`` is ever
-        called for this run_id. Diagnostic only (``nct_id``/
-        ``max_requests``) -- its sole operational purpose is to exist, so
-        that a crash before :meth:`save_adaptive_collect_snapshot` leaves
-        an unambiguous "something was attempted, outcome unknown" trace a
-        later resume can fail closed on, rather than silently treating
-        that window as "never attempted"."""
-        payload = {"nct_id": nct_id, "max_requests": max_requests}
+        called for this run_id. Diagnostic only -- its sole operational
+        purpose is to exist, so that a crash before
+        :meth:`save_adaptive_collect_snapshot` leaves an unambiguous
+        "something was attempted, outcome unknown" trace a later resume
+        can fail closed on, rather than silently treating that window as
+        "never attempted". Phase 4.3I correction 2: ``started.target`` is
+        now a typed, required-on-read identity (ticker/reference_mode/
+        nct_id/max_requests/base_fact_fingerprint) -- a legacy marker
+        lacking it is corrupted on read, never guessed."""
+        payload = {"target": _adaptive_target_to_dict(started.target)}
         self.conn.execute(
             """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
                                                       payload, fact_count, created_at)
@@ -1283,13 +1432,15 @@ class Repository:
         )
         self.conn.commit()
 
-    def adaptive_literature_started(self, run_id: str) -> dict | None:
+    def adaptive_literature_started(self, run_id: str) -> AdaptiveLiteratureStarted | None:
         """``None`` when no started-marker was ever written for this
         run_id (never attempted, or this invocation has not reached that
         point yet). Raises :class:`ResumeSnapshotCorrupted` when a row
         exists but cannot be parsed -- never silently treated as absent,
         which would misread an ambiguous "attempted, outcome unknown"
-        state as a safe fresh start."""
+        state as a safe fresh start. A pre-correction-2 marker (no
+        ``target`` key at all) is corrupted here too -- its own identity
+        cannot be verified, so it is never implicitly trusted."""
         row = self.conn.execute(
             "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
             (run_id, _ADAPTIVE_STARTED_STAGE),
@@ -1297,11 +1448,13 @@ class Repository:
         if row is None:
             return None
         try:
-            return dict(json.loads(row["payload"]))
-        except (json.JSONDecodeError, TypeError) as exc:
+            payload = json.loads(row["payload"])
+            target = _adaptive_target_from_dict(payload["target"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ResumeSnapshotCorrupted(
                 f"adaptive literature started-marker for run_id={run_id!r} is corrupted: {exc}"
             ) from exc
+        return AdaptiveLiteratureStarted(target=target)
 
     def save_adaptive_collect_snapshot(self, run_id: str, snapshot: AdaptiveCollectSnapshot) -> None:
         """Persists the Adaptive Literature step's own pre-Integrity
@@ -1311,8 +1464,12 @@ class Repository:
         replaced by, any other run_id's data, and never derived from the
         global ``facts``/``sources`` tables (Phase 4.3I correction 4: the
         same cross-run content-collision hazard ``CollectSnapshot``/
-        ``VerifySnapshot`` already avoid applies here identically)."""
+        ``VerifySnapshot`` already avoid applies here identically).
+        Phase 4.3I correction 2: ``snapshot.target`` is persisted
+        alongside the fetched content -- required on read, never
+        defaulted."""
         payload = {
+            "target": _adaptive_target_to_dict(snapshot.target),
             "raw_facts": [f.to_row() for f in snapshot.raw_facts],
             "sources": [_source_to_snapshot_dict(s) for s in snapshot.sources],
             "chunks": [_chunk_to_dict(c) for c in snapshot.chunks],
@@ -1332,7 +1489,9 @@ class Repository:
     def adaptive_collect_snapshot_for_resume(self, run_id: str) -> AdaptiveCollectSnapshot | None:
         """``None`` when no adaptive collect snapshot was ever saved for
         this run_id -- never a guess. Raises :class:`ResumeSnapshotCorrupted`
-        when a row exists but cannot be parsed back losslessly."""
+        when a row exists but cannot be parsed back losslessly -- INCLUDING
+        a pre-correction-2 snapshot with no ``target`` key, since its
+        identity can no longer be verified before restoring from it."""
         row = self.conn.execute(
             "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
             (run_id, _ADAPTIVE_COLLECT_SNAPSHOT_STAGE),
@@ -1341,6 +1500,7 @@ class Repository:
             return None
         try:
             payload = json.loads(row["payload"])
+            target = _adaptive_target_from_dict(payload["target"])
             raw_facts = [_fact_from_row(r) for r in payload["raw_facts"]]
             sources = [_source_from_snapshot_dict(r) for r in payload["sources"]]
             chunks = [_chunk_from_dict(r) for r in payload["chunks"]]
@@ -1351,6 +1511,7 @@ class Repository:
             ) from exc
         return AdaptiveCollectSnapshot(
             raw_facts=raw_facts, sources=sources, chunks=chunks, execution_status=execution_status,
+            target=target,
         )
 
     def save_adaptive_verify_snapshot(self, run_id: str, snapshot: AdaptiveVerifySnapshot) -> None:
@@ -1359,8 +1520,15 @@ class Repository:
         run_id. Called once, right after that pass computes its own
         verified_facts/quarantined_sources and this step's own
         blocking-reason decision -- never merged with, or replaced by,
-        any other run_id's data."""
+        any other run_id's data. Phase 4.3I correction 2:
+        ``snapshot.target``/``snapshot.collect_snapshot_digest`` are
+        persisted so a restore can independently verify this snapshot is
+        still consistent with the CURRENT plan/ticker/base facts and with
+        whatever collect snapshot is currently on file -- required on
+        read, never defaulted."""
         payload = {
+            "target": _adaptive_target_to_dict(snapshot.target),
+            "collect_snapshot_digest": snapshot.collect_snapshot_digest,
             "verified_facts": [f.to_row() for f in snapshot.verified_facts],
             "quarantined_sources": [_quarantined_source_to_dict(q) for q in snapshot.quarantined_sources],
             "execution_status": snapshot.execution_status,
@@ -1380,7 +1548,10 @@ class Repository:
     def adaptive_verify_snapshot_for_resume(self, run_id: str) -> AdaptiveVerifySnapshot | None:
         """``None`` when no adaptive verify snapshot was ever saved for
         this run_id -- never a guess. Raises :class:`ResumeSnapshotCorrupted`
-        when a row exists but cannot be parsed back losslessly."""
+        when a row exists but cannot be parsed back losslessly -- INCLUDING
+        a pre-correction-2 snapshot with no ``target``/
+        ``collect_snapshot_digest`` key, since its binding to the
+        collect snapshot it depended on can no longer be verified."""
         row = self.conn.execute(
             "SELECT payload FROM run_checkpoints WHERE run_id = ? AND stage = ?",
             (run_id, _ADAPTIVE_VERIFY_SNAPSHOT_STAGE),
@@ -1389,6 +1560,8 @@ class Repository:
             return None
         try:
             payload = json.loads(row["payload"])
+            target = _adaptive_target_from_dict(payload["target"])
+            collect_snapshot_digest = str(payload["collect_snapshot_digest"])
             verified_facts = [_fact_from_row(r) for r in payload["verified_facts"]]
             quarantined = [_quarantined_source_from_dict(r) for r in payload["quarantined_sources"]]
             execution_status = str(payload["execution_status"])
@@ -1402,6 +1575,8 @@ class Repository:
             quarantined_sources=quarantined,
             execution_status=execution_status,
             blocking_reasons=list(blocking_reasons),
+            target=target,
+            collect_snapshot_digest=collect_snapshot_digest,
         )
 
     def save_research_coverage(self, run_id: str, ticker: str, coverage) -> int:

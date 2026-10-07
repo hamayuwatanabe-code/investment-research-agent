@@ -214,6 +214,13 @@ def new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
 
+class RunIdAlreadyUsedError(ValueError):
+    """Phase 4.3I correction 2: raised by ``Pipeline.run()`` when a
+    caller-supplied ``run_id`` already has persisted checkpoint data and
+    ``resume=False`` was passed -- see that call site's own comment for
+    why silently proceeding would be unsafe."""
+
+
 @dataclass
 class ResearchResult:
     context: RunContext
@@ -607,6 +614,28 @@ class Pipeline:
         run_id: str | None = None,
         resume: bool = False,
     ) -> ResearchResult:
+        # Phase 4.3I correction 2: a caller-supplied run_id with
+        # resume=False is refused outright if that run_id already has ANY
+        # persisted checkpoint data (a Stage 1/2 checkpoint, a
+        # _collect_snapshot/_verify_snapshot, or any Adaptive Literature
+        # checkpoint) -- every save_*_snapshot call below is an
+        # unconditional INSERT OR REPLACE, so proceeding here would
+        # silently overwrite Stage 1/2 data with this invocation's own
+        # fresh collection_results while leaving stale Adaptive Literature
+        # checkpoints (saved against the OLD Stage-2 base) in place under
+        # the SAME run_id -- exactly the cross-invocation mixing Phase
+        # 4.3I correction 2's own snapshot/input binding check (see
+        # adaptive_literature_step.py) is designed to catch downstream,
+        # but refusing it HERE, before any overwrite happens, is strictly
+        # safer. An auto-generated run_id (run_id=None, the common case)
+        # is never checked -- new_run_id() is collision-free in practice,
+        # and this guard only ever fires for a caller-chosen id.
+        if run_id is not None and not resume and self.repo.run_id_has_existing_checkpoint_data(run_id):
+            raise RunIdAlreadyUsedError(
+                f"run_id={run_id!r} already has persisted checkpoint data but resume=False "
+                "was passed -- refusing to silently overwrite it. Pass resume=True to resume "
+                "this run, or omit run_id (or pass a new, never-used one) to start a fresh run."
+            )
         ctx = RunContext(
             run_id=run_id or new_run_id(),
             ticker=ticker.upper(),

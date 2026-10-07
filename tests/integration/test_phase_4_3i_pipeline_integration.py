@@ -415,3 +415,49 @@ def test_cli_module_never_wires_a_real_adaptive_transport():
     cli_text = (repo_src / "cli.py").read_text(encoding="utf-8")
     assert "adaptive_http_client" not in cli_text
     assert "adaptive_env" not in cli_text
+
+
+# =============================================================================
+# 7. Phase 4.3I correction 2: reusing an existing run_id with resume=False
+#    is refused outright, before anything is overwritten -- Stage 1/2
+#    snapshots and stale Adaptive Literature checkpoints can never mix
+#    with a fresh invocation's own input under the same run_id
+# =============================================================================
+def test_reusing_run_id_with_resume_false_is_refused_before_any_overwrite():
+    from investment_research.orchestrator.pipeline import RunIdAlreadyUsedError
+
+    repo = _new_repo()
+    run_id = "p43i-reuse-guard"
+    _, first = _run(
+        _confirmed_scenario_collection_results(), run_id, repo=repo,
+        adaptive_http_client=_success_fake_http(), adaptive_env=_ENV,
+    )
+    assert first.adaptive_literature_diagnostics["outcome"] == "COMPLETE"
+    first_fact_ids = {f.fact_id for f in first.bus.facts}
+
+    pipeline = Pipeline(
+        repo, NullSearchProvider(), today=TODAY,
+        adaptive_http_client=_PoisonHttpClient(), adaptive_env=_ENV,
+    )
+    with pytest.raises(RunIdAlreadyUsedError):
+        pipeline.run(
+            ticker=TICKER, company_name=COMPANY,
+            collection_results=_confirmed_scenario_collection_results(),
+            run_id=run_id, resume=False,
+        )
+
+    # Nothing was overwritten by the refused call -- a genuine resume of
+    # the SAME run_id still sees the ORIGINAL data untouched.
+    _, resumed = _run(
+        [], run_id, repo=repo, resume=True,
+        adaptive_http_client=_PoisonHttpClient(), adaptive_env=_ENV,
+    )
+    assert {f.fact_id for f in resumed.bus.facts} == first_fact_ids
+
+
+def test_fresh_auto_generated_run_id_is_never_subject_to_the_reuse_guard():
+    """The reuse guard only ever fires for a caller-CHOSEN run_id --
+    omitting run_id (the common case) must never trip it."""
+    repo = _new_repo()
+    _, result = _run(_confirmed_scenario_collection_results(), run_id=None, repo=repo)
+    assert result.context.run_id  # a fresh id was auto-generated, no exception

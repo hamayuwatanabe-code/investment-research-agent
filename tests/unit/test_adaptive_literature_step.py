@@ -37,6 +37,11 @@ from investment_research.scoring.adaptive_acquisition_plan import (
     AcquisitionPlanStatus,
     AdaptiveAcquisitionPlan,
 )
+from investment_research.storage.repository import (
+    AdaptiveLiteratureStarted,
+    AdaptiveLiteratureTarget,
+    fact_content_fingerprint,
+)
 
 from . import _literature_fixture_support as fx
 from ._network_guard import forbid_external_network_autouse  # noqa: F401
@@ -148,6 +153,20 @@ def _stage1_fact(repo, claim: str, source: Source, run_id: str = RUN_ID):
         AgentInput(agent_id=agent.agent_id, run_id=run_id, ticker=TICKER, company_name=COMPANY)
     )
     return list(output.facts)
+
+
+def _target(
+    *, ticker: str = TICKER, reference_mode: str = REFERENCE_MODE_NCT_ID, nct_id: str = NCT_ID,
+    max_requests: int = READY_MAX_REQUESTS, verified_facts=(),
+) -> AdaptiveLiteratureTarget:
+    return AdaptiveLiteratureTarget(
+        ticker=ticker, reference_mode=reference_mode, nct_id=nct_id, max_requests=max_requests,
+        base_fact_fingerprint=fact_content_fingerprint(verified_facts),
+    )
+
+
+def _started(**target_overrides) -> AdaptiveLiteratureStarted:
+    return AdaptiveLiteratureStarted(target=_target(**target_overrides))
 
 
 # =============================================================================
@@ -415,7 +434,7 @@ def test_uncontained_runner_exception_is_ambiguous_and_never_crashes(repo, monke
 # 8. Ambiguous resume state: started marker alone, no collect snapshot
 # =============================================================================
 def test_started_marker_alone_fails_closed_and_is_never_auto_retried(repo, monkeypatch):
-    repo.save_adaptive_literature_started(RUN_ID, NCT_ID, READY_MAX_REQUESTS)
+    repo.save_adaptive_literature_started(RUN_ID, _started())
 
     calls = []
     monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
@@ -436,7 +455,7 @@ def test_started_marker_alone_is_ambiguous_even_with_no_runner_injected(repo):
     """Resume-state must be judged BEFORE the runner-injection check --
     an ambiguous state is never reclassified as a normal no-op merely
     because this invocation also happens to have no runner configured."""
-    repo.save_adaptive_literature_started(RUN_ID, NCT_ID, READY_MAX_REQUESTS)
+    repo.save_adaptive_literature_started(RUN_ID, _started())
     result = _step(repo=repo, http_client=None, env=None)
     assert result.outcome is AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE
     assert result.blocking_reasons != ()
@@ -554,7 +573,7 @@ def test_verify_snapshot_without_collect_snapshot_fails_closed(repo, monkeypatch
 # 11. Snapshot corruption: distinguishable from "missing", fails closed
 # =============================================================================
 def test_corrupted_collect_snapshot_fails_closed_distinctly_from_missing(repo):
-    repo.save_adaptive_literature_started(RUN_ID, NCT_ID, READY_MAX_REQUESTS)
+    repo.save_adaptive_literature_started(RUN_ID, _started())
     repo.conn.execute(
         """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
                                                   payload, fact_count, created_at)
@@ -565,3 +584,264 @@ def test_corrupted_collect_snapshot_fails_closed_distinctly_from_missing(repo):
     result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
     assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_CORRUPTED
     assert result.blocking_reasons != ()
+
+
+# =============================================================================
+# 12. Phase 4.3I correction 2: decision-order fixes -- a prior ambiguous
+#     'started'-only state is never masked by this invocation's plan
+#     being non-READY or its base evidence being unavailable
+# =============================================================================
+def test_started_only_fails_closed_even_when_this_invocations_plan_is_non_ready(repo, monkeypatch):
+    repo.save_adaptive_literature_started(RUN_ID, _started())
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+    result = _step(repo=repo, plan=_non_ready_plan(), http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE
+    assert result.blocking_reasons != ()
+    assert calls == []
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_started_only_fails_closed_even_when_base_evidence_is_unavailable(repo, monkeypatch):
+    repo.save_adaptive_literature_started(RUN_ID, _started())
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+    result = _step(repo=repo, base_evidence_available=False, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.AMBIGUOUS_RESUME_STATE
+    assert result.blocking_reasons != ()
+    assert calls == []
+
+
+# =============================================================================
+# 13. Phase 4.3I correction 2: a CLEAN (matching) verify/collect snapshot
+#     is still never restored when base evidence is unavailable THIS
+#     invocation -- never silently reuses stale evidence
+# =============================================================================
+def test_verify_snapshot_is_not_restored_when_base_evidence_unavailable(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    assert first.verified_facts != ()
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, base_evidence_available=False, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE
+    # The input verified_facts (empty, per _step's own default) are echoed
+    # back unchanged -- NEVER the old, now-unverifiable restored facts.
+    assert result.verified_facts == ()
+    assert result.new_chunks == ()
+    assert result.new_sources == ()
+
+
+def test_collect_snapshot_is_not_reintegrated_when_base_evidence_unavailable(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (RUN_ID, "_adaptive_verify_snapshot"),
+    )
+    repo.conn.commit()
+    assert repo.adaptive_verify_snapshot_for_resume(RUN_ID) is None
+    assert repo.adaptive_collect_snapshot_for_resume(RUN_ID) is not None
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not run Evidence Integrity against an unavailable base")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, base_evidence_available=False, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE
+    assert result.verified_facts == ()
+    assert result.new_chunks == ()
+
+
+# =============================================================================
+# 14. Phase 4.3I correction 2: snapshot/input binding -- ticker, NCT id,
+#     request budget, and base-fact CONTENT mismatches each refuse to
+#     restore or re-fetch
+# =============================================================================
+def test_ticker_mismatch_refuses_restore_and_never_refetches(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a target mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a target mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, ticker="DIFFERENT", http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "ticker" in result.blocking_reasons[0]
+    assert result.new_chunks == () and result.new_sources == ()
+    assert result.verified_facts == ()
+
+
+def test_nct_id_mismatch_refuses_restore(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a target mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    different_plan = _ready_plan(nct_id="NCT01010101")
+    result = _step(repo=repo, plan=different_plan, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "nct_id" in result.blocking_reasons[0]
+
+
+def test_max_requests_budget_mismatch_refuses_restore(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a target mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    different_plan = _ready_plan(max_requests=READY_MAX_REQUESTS + 1)
+    result = _step(repo=repo, plan=different_plan, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "max_requests" in result.blocking_reasons[0]
+
+
+def test_base_fact_content_change_under_same_fact_id_refuses_restore(repo, monkeypatch):
+    """The audit's own requirement: fact_id-set equality is NOT enough --
+    the SAME fact_id with DIFFERENT content must also be detected."""
+
+    fact_v1 = _stage1_fact(repo, "Original claim text.", _source("s1", url="https://www.sec.gov/one"))[0]
+    first = _step(repo=repo, verified_facts=(fact_v1,), http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    import dataclasses
+
+    fact_v2 = dataclasses.replace(fact_v1, claim="A DIFFERENT claim text, same fact_id.")
+    assert fact_v2.fact_id == fact_v1.fact_id
+    assert fact_v2.claim != fact_v1.claim
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a base-fact content mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    result = _step(repo=repo, verified_facts=(fact_v2,), http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "base_fact_fingerprint" in result.blocking_reasons[0]
+
+
+# =============================================================================
+# 15. Phase 4.3I correction 2: a collect snapshot whose digest/status no
+#     longer matches the verify snapshot's own recorded dependency fails
+#     closed -- never restored, never re-fetched, never re-integrated
+# =============================================================================
+def test_collect_and_verify_digest_mismatch_fails_closed(repo, monkeypatch):
+    from investment_research.storage.repository import AdaptiveCollectSnapshot
+
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    real_collect = repo.adaptive_collect_snapshot_for_resume(RUN_ID)
+    assert real_collect is not None
+
+    # Forge a DIFFERENT collect snapshot (same target, different fetched
+    # content) and silently overwrite the real one -- simulating a state
+    # where the verify snapshot's own recorded dependency no longer
+    # matches what is currently on file.
+    forged = AdaptiveCollectSnapshot(
+        raw_facts=[], sources=[], chunks=[], execution_status="COMPLETE", target=real_collect.target,
+    )
+    repo.save_adaptive_collect_snapshot(RUN_ID, forged)
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a digest mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a digest mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "collect_snapshot_digest" in result.blocking_reasons[0]
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_collect_and_verify_status_mismatch_fails_closed(repo, monkeypatch):
+    from investment_research.storage.repository import AdaptiveVerifySnapshot
+
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    real_verify = repo.adaptive_verify_snapshot_for_resume(RUN_ID)
+    assert real_verify is not None
+
+    # Forge a verify snapshot claiming a different execution_status than
+    # the collect snapshot it is supposedly bound to, while keeping the
+    # SAME (now stale) collect_snapshot_digest.
+    forged = AdaptiveVerifySnapshot(
+        verified_facts=real_verify.verified_facts,
+        quarantined_sources=real_verify.quarantined_sources,
+        execution_status="INCOMPLETE",
+        blocking_reasons=[],
+        target=real_verify.target,
+        collect_snapshot_digest=real_verify.collect_snapshot_digest,
+    )
+    repo.save_adaptive_verify_snapshot(RUN_ID, forged)
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a status mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "execution_status" in result.blocking_reasons[0]
+
+
+# =============================================================================
+# 16. Phase 4.3I correction 3: collect-only with started missing is
+#     verified INDEPENDENTLY (never trusted merely because of save order)
+# =============================================================================
+def test_collect_snapshot_with_started_missing_is_still_independently_verified_safe(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (RUN_ID, "_adaptive_verify_snapshot"),
+    )
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (RUN_ID, "_adaptive_literature_started"),
+    )
+    repo.conn.commit()
+    assert repo.adaptive_literature_started(RUN_ID) is None
+    assert repo.adaptive_collect_snapshot_for_resume(RUN_ID) is not None
+
+    def _explode(*a, **k):
+        raise AssertionError("must not re-fetch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+    second = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    # Safe to restore -- proven by the collect snapshot's OWN target/
+    # base-fact fingerprint matching the current input, never by "started
+    # was written before collect, so collect must be fine".
+    assert second.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    assert second.verified_facts == first.verified_facts
