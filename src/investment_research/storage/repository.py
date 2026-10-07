@@ -693,26 +693,95 @@ _CONTENT_FIELDS = (
 )
 
 
+#: Phase 4.3I correction 3: the fields of a ``Fact`` this module treats as
+#: its SEMANTIC content for :func:`fact_content_fingerprint` -- a
+#: materially larger set than ``_CONTENT_FIELDS`` above, which exists for
+#: a DIFFERENT, narrower purpose (:meth:`Repository.save_fact`'s own
+#: decision of whether a re-submitted fact_id needs a new version row).
+#: Reusing ``_CONTENT_FIELDS`` here (as this function originally did)
+#: left ``source_tier``/``source_authority``/``content_kind``/every
+#: date/``source_id`` undetected: the SAME fact_id could change any of
+#: those without the fingerprint noticing, silently defeating the
+#: "detect a changed Stage-2 base" purpose this function exists for.
+#: Every field of ``Fact`` is accounted for below, in one of two lists:
+#: this one (included) or the exclusion comment just after it.
+_FACT_FINGERPRINT_FIELDS = (
+    "ticker",
+    "category",
+    "claim",
+    "evidence_class",
+    "source_id",
+    "source_url",
+    "source_title",
+    "source_tier",
+    "publication_date",
+    "event_date",
+    "effective_date",
+    "filing_date",
+    "verified_status",
+    "confidence",
+    "company_claim",
+    "independent_confirmation",
+    "corroborating_source_ids",
+    "contradicting_evidence",
+    "materiality",
+    "value",
+    "unit",
+    "provenance",
+    "tags",
+    "content_kind",
+    "primary_source_url",
+    "document_id",
+    "source_authority",
+)
+#: Deliberately EXCLUDED from ``_FACT_FINGERPRINT_FIELDS`` -- every
+#: ``Fact`` field not listed above is one of these five, each excluded
+#: for a stated reason, never by omission:
+#:
+#: * ``version``/``superseded_by`` -- storage-layer bookkeeping written
+#:   by ``save_fact``'s own append-only persistence (which version row
+#:   this is, and what superseded it), never part of what the fact
+#:   itself asserts. Two byte-identical claims persisted under different
+#:   version numbers must fingerprint the same.
+#: * ``run_id`` -- records which run's own collection produced this Fact
+#:   row, not the fact's own semantic content; already redundant here
+#:   since every Fact this function ever sees belongs to the one run_id
+#:   the Adaptive Literature step is itself scoped to.
+#: * ``stale`` -- recomputed by ``EvidenceIntegrityAgent._assess()`` on
+#:   EVERY Integrity pass from ``self.today``/``self.stale_after_days``
+#:   compared against the fact's own dates (``agents/evidence_integrity.py``
+#:   ``_staleness``) -- a WALL-CLOCK-dependent, not content-dependent,
+#:   value. Including it would make a resume dated even one day after
+#:   the original fetch fingerprint differently from an otherwise
+#:   byte-identical fact, breaking fresh/resume equivalence purely from
+#:   elapsed calendar time.
+#: * ``notes`` -- free text that mixes the collector's own
+#:   "collected_by=..." annotation with Evidence Integrity's own
+#:   marker-tagged reasoning, which ``_split_off_integrity_notes()``
+#:   strips and ``_assess()`` recomputes FRESH on every pass -- and that
+#:   recomputed text embeds the SAME wall-clock-dependent staleness
+#:   reasoning as ``stale`` above (e.g. "stale: effective date ... older
+#:   than ...d"). Same elapsed-time hazard; excluded for the same reason.
 def fact_content_fingerprint(facts: Sequence[Fact]) -> str:
-    """Phase 4.3I correction 2: a stable, order-independent digest of a
-    ``Fact`` sequence's own CONTENT -- reuses ``_CONTENT_FIELDS`` above,
-    the SAME fields :meth:`Repository.save_fact`'s own dedup-by-content
-    check already treats as "a fact's content" -- never ``fact_id``
-    alone: two Fact sets sharing the same fact_id set but different
-    claim/value/evidence_class/verified_status/... content produce
-    DIFFERENT fingerprints. Used by the Adaptive Literature step to bind
-    a persisted snapshot to the exact Stage-2 base evidence it was
-    computed against, so a later resume can detect "the same run_id, but
-    the underlying facts changed" rather than silently trusting a stale
-    snapshot. Always computed directly from an already-in-hand Fact
-    sequence (``verified_facts``) -- never by querying the global
-    ``facts`` table, which is not run_id-scoped (see ``orchestrator/
-    resume.py``'s own ``ResumePlan`` docstring on why that query shape is
-    unsafe)."""
-    rows = sorted(
-        (fact.fact_id, tuple(str(getattr(fact, field)) for field in _CONTENT_FIELDS))
-        for fact in facts
-    )
+    """Phase 4.3I correction 2/3: a stable, order-independent digest of a
+    ``Fact`` sequence's own SEMANTIC content (``_FACT_FINGERPRINT_FIELDS``
+    above) -- never ``fact_id`` alone: two Fact sets sharing the same
+    fact_id set but differing in ANY of those fields (not merely
+    claim/value/evidence_class) produce DIFFERENT fingerprints. Used by
+    the Adaptive Literature step to bind a persisted snapshot to the
+    exact Stage-2 base evidence it was computed against, so a later
+    resume can detect "the same run_id, but the underlying facts
+    changed" rather than silently trusting a stale snapshot. Always
+    computed directly from an already-in-hand Fact sequence
+    (``verified_facts``) via each Fact's own ``to_row()`` -- never by
+    querying the global ``facts`` table, which is not run_id-scoped (see
+    ``orchestrator/resume.py``'s own ``ResumePlan`` docstring on why that
+    query shape is unsafe)."""
+    rows = []
+    for fact in facts:
+        row = fact.to_row()
+        rows.append((fact.fact_id, tuple(str(row[field]) for field in _FACT_FINGERPRINT_FIELDS)))
+    rows.sort()
     payload = json.dumps(rows, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 

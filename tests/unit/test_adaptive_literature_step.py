@@ -845,3 +845,177 @@ def test_collect_snapshot_with_started_missing_is_still_independently_verified_s
     # was written before collect, so collect must be fine".
     assert second.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
     assert second.verified_facts == first.verified_facts
+
+
+# =============================================================================
+# 17. Phase 4.3I correction 3: fact_content_fingerprint() now covers every
+#     semantic Fact field, not just save_fact's own _CONTENT_FIELDS --
+#     the SAME fact_id with only a previously-undetected field changed
+#     (source_tier/source_authority/content_kind/a date/source_id) must
+#     now be refused, never silently restored
+# =============================================================================
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"source_tier": SourceTier.TIER_3},
+        {"publication_date": "2026-02-02"},
+        {"event_date": "2026-02-02"},
+        {"effective_date": "2026-02-02"},
+        {"filing_date": "2026-02-02"},
+    ],
+    ids=["source_tier", "publication_date", "event_date", "effective_date", "filing_date"],
+)
+def test_base_fact_field_change_previously_invisible_to_fingerprint_is_now_detected(
+    repo, monkeypatch, replacement,
+):
+    """Before this correction, fact_content_fingerprint() reused
+    save_fact's own _CONTENT_FIELDS (claim/value/evidence_class/
+    verified_status/confidence/materiality/independent_confirmation/
+    contradicting_evidence/source_url/event_date only) -- a changed
+    source_tier, source_authority, content_kind, most dates, or source_id
+    under the SAME fact_id went completely undetected. Each parametrized
+    field here is now covered."""
+    import dataclasses
+
+    fact_v1 = _stage1_fact(repo, "Original claim text.", _source("s1", url="https://www.sec.gov/one"))[0]
+    first = _step(repo=repo, verified_facts=(fact_v1,), http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    fact_v2 = dataclasses.replace(fact_v1, **replacement)
+    assert fact_v2.fact_id == fact_v1.fact_id
+    assert fact_v2 != fact_v1
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a base-fact mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, verified_facts=(fact_v2,), http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert result.blocking_reasons != ()
+    assert "base_fact_fingerprint" in result.blocking_reasons[0]
+    assert calls == []  # zero HTTP
+    assert result.verified_facts == (fact_v2,)  # the (unchanged) input is echoed back, nothing restored
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_source_id_change_under_same_fact_id_is_now_detected(repo, monkeypatch):
+    """source_id is explicitly named in the correction as previously
+    undetectable -- tested separately since it also changes source_url
+    (a real Source re-pointing), unlike the single-field replacements
+    above."""
+    fact_v1 = _stage1_fact(repo, "Original claim text.", _source("s1", url="https://www.sec.gov/one"))[0]
+    first = _step(repo=repo, verified_facts=(fact_v1,), http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    import dataclasses
+
+    fact_v2 = dataclasses.replace(fact_v1, source_id="s1-different")
+    assert fact_v2.fact_id == fact_v1.fact_id
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+    result = _step(repo=repo, verified_facts=(fact_v2,), http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert calls == []
+
+
+# =============================================================================
+# 18. Phase 4.3I correction 3: a started-marker's own target, when it
+#     exists, is now checked against the current input in BOTH the
+#     verify-restore and collect-only branches -- not merely
+#     collect_snapshot's/verify_snapshot's own target
+# =============================================================================
+def test_started_target_mismatch_blocks_collect_only_restore(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    repo.conn.execute(
+        "DELETE FROM run_checkpoints WHERE run_id = ? AND stage = ?",
+        (RUN_ID, "_adaptive_verify_snapshot"),
+    )
+    repo.conn.commit()
+    assert repo.adaptive_verify_snapshot_for_resume(RUN_ID) is None
+    assert repo.adaptive_collect_snapshot_for_resume(RUN_ID) is not None
+
+    # Forge a started-marker whose OWN target disagrees (a different
+    # nct_id) with collect_snapshot's target, even though collect_snapshot
+    # itself still matches the current plan/ticker/base facts.
+    repo.save_adaptive_literature_started(RUN_ID, _started(nct_id="NCT01010101"))
+
+    def _explode(*a, **k):
+        raise AssertionError("must not re-fetch on a started-marker target mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a started-marker target mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "started.target" in result.blocking_reasons[0]
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_started_target_mismatch_blocks_verify_restore(repo, monkeypatch):
+    first = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    assert repo.adaptive_verify_snapshot_for_resume(RUN_ID) is not None
+
+    # Forge a started-marker with a different max_requests budget, even
+    # though verify_snapshot/collect_snapshot both still agree with the
+    # current plan/ticker/base facts.
+    repo.save_adaptive_literature_started(RUN_ID, _started(max_requests=READY_MAX_REQUESTS + 1))
+
+    def _explode(*a, **k):
+        raise AssertionError("must not call the bridge on a started-marker target mismatch")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+
+    result = _step(repo=repo, http_client=_success_fake_http(), env=_ENV)
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert "started.target" in result.blocking_reasons[0]
+
+
+# =============================================================================
+# 19. Sanity: existing fresh/resume, collect-only, and started-missing
+#     contracts are unaffected by the widened fingerprint and the new
+#     cross-checkpoint target checks
+# =============================================================================
+def test_fresh_and_resume_equivalence_still_holds_with_widened_fingerprint(repo, monkeypatch):
+    existing_source = _source("s_old", url="https://www.sec.gov/old")
+    existing = _stage1_fact(repo, "An existing company claim.", existing_source)[0]
+    pass1 = run_full_evidence_integrity_pass(
+        FullIntegrityPassInput(
+            ticker=TICKER, company_name=COMPANY, run_id=RUN_ID,
+            pre_integrity_facts=(existing,), sources=(existing_source,),
+        ),
+        repo,
+    )
+    verified_before = pass1.verified_facts
+
+    first = _step(
+        repo=repo, verified_facts=verified_before, sources=(existing_source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    def _explode(*a, **k):
+        raise AssertionError("must not re-fetch on a genuinely unchanged resume")
+
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", _explode)
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode)
+
+    second = _step(
+        repo=repo, verified_facts=verified_before, sources=(existing_source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert second.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+    assert second.verified_facts == first.verified_facts
+    assert {c.chunk_id for c in second.new_chunks} == {c.chunk_id for c in first.new_chunks}
+    assert {s.source_id for s in second.new_sources} == {s.source_id for s in first.new_sources}

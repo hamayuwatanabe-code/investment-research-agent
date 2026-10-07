@@ -322,6 +322,33 @@ def _target_mismatch_reason(
     return "; ".join(diffs)
 
 
+def _all_target_mismatches(
+    current: AdaptiveLiteratureTarget,
+    named_targets: Sequence[tuple[str, AdaptiveLiteratureTarget | None]],
+) -> list[str]:
+    """Phase 4.3I correction 3: checks EVERY persisted checkpoint's own
+    target against the SAME ``current`` reference, never only one of
+    them -- a verify snapshot's own target matching ``current`` says
+    nothing about whether the COLLECT snapshot it depends on (or a
+    co-existing started-marker) also still does. Comparing every
+    existing target against one common reference is sufficient to catch
+    any mutual disagreement too (if A and B both equal ``current``, they
+    equal each other; if either does not, that mismatch is reported on
+    its own), without needing separate pairwise comparisons. A ``None``
+    entry (e.g. ``started`` genuinely absent) is skipped, never treated
+    as a mismatch -- Phase 4.3I correction 3 explicitly preserves the
+    existing contract that a missing started-marker never blocks an
+    otherwise-independently-verified collect snapshot from restoring."""
+    reasons: list[str] = []
+    for label, target in named_targets:
+        if target is None:
+            continue
+        mismatch = _target_mismatch_reason(current, target)
+        if mismatch:
+            reasons.append(f"{label}: {mismatch}")
+    return reasons
+
+
 def _run_fact_collector_adaptive(
     repo: Repository,
     *,
@@ -533,15 +560,27 @@ def run_adaptive_literature_step(
                 "against an unknown/incomplete current base is refused rather than silently "
                 "reusing stale evidence",
             )
+        # Phase 4.3I correction 3: every persisted checkpoint's own target
+        # is checked against the current input -- not verify_snapshot's
+        # alone. collect_snapshot.target and (when present) started.target
+        # are checked here too, so a divergence between what collect/
+        # started/verify each believe this run_id's target to be is
+        # caught directly, never left to the collect_snapshot_digest
+        # check alone to notice indirectly.
         current_target = _current_target(plan, ticker, verified_facts)
-        mismatch = _target_mismatch_reason(current_target, verify_snapshot.target)
+        target_mismatches = _all_target_mismatches(
+            current_target,
+            (
+                ("verify_snapshot.target", verify_snapshot.target),
+                ("collect_snapshot.target", collect_snapshot.target),
+                ("started.target", started.target if started is not None else None),
+            ),
+        )
         current_digest = adaptive_collect_snapshot_digest(collect_snapshot)
         digest_mismatch = current_digest != verify_snapshot.collect_snapshot_digest
         status_mismatch = verify_snapshot.execution_status != collect_snapshot.execution_status
-        if mismatch or digest_mismatch or status_mismatch:
-            reasons = []
-            if mismatch:
-                reasons.append(mismatch)
+        if target_mismatches or digest_mismatch or status_mismatch:
+            reasons = list(target_mismatches)
             if digest_mismatch:
                 reasons.append(
                     "collect_snapshot_digest differs -- the verify snapshot was computed from "
@@ -606,14 +645,28 @@ def run_adaptive_literature_step(
                 "evidence set itself is unavailable this invocation -- re-running Evidence "
                 "Integrity against an unknown/incomplete current base is refused",
             )
+        # Phase 4.3I correction 3: collect_snapshot.target is checked
+        # against current input AND, when a started-marker also happens
+        # to exist, against started.target too -- a missing started
+        # marker is never treated as a mismatch (the existing "verified
+        # independently, never by save order alone" contract for a
+        # genuinely absent started-marker is preserved), but a PRESENT
+        # one that disagrees with collect_snapshot's own target is.
         current_target = _current_target(plan, ticker, verified_facts)
-        mismatch = _target_mismatch_reason(current_target, collect_snapshot.target)
-        if mismatch:
+        target_mismatches = _all_target_mismatches(
+            current_target,
+            (
+                ("collect_snapshot.target", collect_snapshot.target),
+                ("started.target", started.target if started is not None else None),
+            ),
+        )
+        if target_mismatches:
             return _blocked(
                 AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH,
                 verified_facts,
                 f"adaptive literature collect snapshot for run_id={run_id!r} no longer matches "
-                f"the current input, and is refused rather than restored or re-fetched: {mismatch}",
+                "the current input, and is refused rather than restored or re-fetched: "
+                + "; ".join(target_mismatches),
             )
         return _finalize_with_integrity(
             repo,
