@@ -102,6 +102,7 @@ from ..storage.repository import (
     ResumeSnapshotCorrupted,
     adaptive_collect_snapshot_digest,
     fact_content_fingerprint,
+    source_content_fingerprint,
 )
 from .evidence_integrity_pass import (
     FullIntegrityPassInput,
@@ -279,17 +280,27 @@ def _blocked(
 
 
 def _current_target(
-    plan: AdaptiveAcquisitionPlan, ticker: str, verified_facts: Sequence[Fact],
+    plan: AdaptiveAcquisitionPlan,
+    ticker: str,
+    verified_facts: Sequence[Fact],
+    sources: Sequence[Source],
 ) -> AdaptiveLiteratureTarget:
-    """Phase 4.3I correction 2: the identity THIS invocation's plan/
-    ticker/base facts would bind a NEW checkpoint to -- also what any
-    EXISTING checkpoint is compared against before being trusted."""
+    """Phase 4.3I correction 2 (correction 4 adds ``sources``): the
+    identity THIS invocation's plan/ticker/base facts/base sources would
+    bind a NEW checkpoint to -- also what any EXISTING checkpoint is
+    compared against before being trusted. ``sources`` is the run's own
+    in-memory base Source set (e.g. ``bus.sources``), never a fresh query
+    against the global ``sources`` table -- the second Evidence Integrity
+    pass consumes this same set as ``old_sources``
+    (``_finalize_with_integrity`` below), so its content must be bound
+    into the target exactly like the base facts already are."""
     return AdaptiveLiteratureTarget(
         ticker=ticker,
         reference_mode=plan.reference_mode,
         nct_id=plan.nct_id,
         max_requests=plan.max_requests,
         base_fact_fingerprint=fact_content_fingerprint(verified_facts),
+        base_source_fingerprint=source_content_fingerprint(sources),
     )
 
 
@@ -318,6 +329,12 @@ def _target_mismatch_reason(
             "base_fact_fingerprint (the Stage-2 base verified_facts this checkpoint was "
             "computed against no longer match the current invocation's -- same run_id, "
             "different or differently-content fact set)"
+        )
+    if current.base_source_fingerprint != stored.base_source_fingerprint:
+        diffs.append(
+            "base_source_fingerprint (the Stage-2 base sources this checkpoint was "
+            "computed against no longer match the current invocation's -- same run_id, "
+            "different or differently-content source set)"
         )
     return "; ".join(diffs)
 
@@ -567,7 +584,7 @@ def run_adaptive_literature_step(
         # started/verify each believe this run_id's target to be is
         # caught directly, never left to the collect_snapshot_digest
         # check alone to notice indirectly.
-        current_target = _current_target(plan, ticker, verified_facts)
+        current_target = _current_target(plan, ticker, verified_facts, sources)
         target_mismatches = _all_target_mismatches(
             current_target,
             (
@@ -652,7 +669,7 @@ def run_adaptive_literature_step(
         # independently, never by save order alone" contract for a
         # genuinely absent started-marker is preserved), but a PRESENT
         # one that disagrees with collect_snapshot's own target is.
-        current_target = _current_target(plan, ticker, verified_facts)
+        current_target = _current_target(plan, ticker, verified_facts, sources)
         target_mismatches = _all_target_mismatches(
             current_target,
             (
@@ -727,7 +744,7 @@ def run_adaptive_literature_step(
             "Pipeline -- execute_adaptive_literature_plan was never called",
         )
 
-    current_target = _current_target(plan, ticker, verified_facts)
+    current_target = _current_target(plan, ticker, verified_facts, sources)
     repo.save_adaptive_literature_started(run_id, AdaptiveLiteratureStarted(target=current_target))
     try:
         execution = execute_adaptive_literature_plan(

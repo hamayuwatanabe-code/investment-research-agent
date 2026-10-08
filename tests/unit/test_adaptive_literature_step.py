@@ -41,6 +41,7 @@ from investment_research.storage.repository import (
     AdaptiveLiteratureStarted,
     AdaptiveLiteratureTarget,
     fact_content_fingerprint,
+    source_content_fingerprint,
 )
 
 from . import _literature_fixture_support as fx
@@ -157,11 +158,12 @@ def _stage1_fact(repo, claim: str, source: Source, run_id: str = RUN_ID):
 
 def _target(
     *, ticker: str = TICKER, reference_mode: str = REFERENCE_MODE_NCT_ID, nct_id: str = NCT_ID,
-    max_requests: int = READY_MAX_REQUESTS, verified_facts=(),
+    max_requests: int = READY_MAX_REQUESTS, verified_facts=(), sources=(),
 ) -> AdaptiveLiteratureTarget:
     return AdaptiveLiteratureTarget(
         ticker=ticker, reference_mode=reference_mode, nct_id=nct_id, max_requests=max_requests,
         base_fact_fingerprint=fact_content_fingerprint(verified_facts),
+        base_source_fingerprint=source_content_fingerprint(sources),
     )
 
 
@@ -1019,3 +1021,167 @@ def test_fresh_and_resume_equivalence_still_holds_with_widened_fingerprint(repo,
     assert second.verified_facts == first.verified_facts
     assert {c.chunk_id for c in second.new_chunks} == {c.chunk_id for c in first.new_chunks}
     assert {s.source_id for s in second.new_sources} == {s.source_id for s in first.new_sources}
+
+
+# =============================================================================
+# 20. Phase 4.3I correction 4: fact_content_fingerprint() now covers
+#     stale/notes too (previously excluded by correction 3), and a new
+#     source_content_fingerprint()/base_source_fingerprint catches a
+#     content-only change to the SAME source_id -- each must now refuse a
+#     restore, never silently reuse an adaptive snapshot computed against
+#     different base evidence
+# =============================================================================
+def test_fact_stale_only_change_is_now_detected(repo, monkeypatch):
+    """Before correction 4, fact_content_fingerprint() excluded ``stale``
+    entirely (on the theory that it is wall-clock-, not content-,
+    dependent) -- the SAME fact_id with only ``stale`` flipped went
+    completely undetected."""
+    import dataclasses
+
+    source = _source("s1", url="https://www.sec.gov/one")
+    fact_v1 = _stage1_fact(repo, "Original claim text.", source)[0]
+    first = _step(
+        repo=repo, verified_facts=(fact_v1,), sources=(source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    fact_v2 = dataclasses.replace(fact_v1, stale=not fact_v1.stale)
+    assert fact_v2.fact_id == fact_v1.fact_id
+    assert fact_v2 != fact_v1
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a base-fact mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(
+        repo=repo, verified_facts=(fact_v2,), sources=(source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert result.blocking_reasons != ()
+    assert "base_fact_fingerprint" in result.blocking_reasons[0]
+    assert calls == []  # zero HTTP
+    assert result.verified_facts == (fact_v2,)  # the (unchanged) input is echoed back, nothing restored
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_fact_notes_only_change_is_now_detected(repo, monkeypatch):
+    """Before correction 4, fact_content_fingerprint() excluded ``notes``
+    entirely -- the SAME fact_id with only collector-originated ``notes``
+    text changed went completely undetected."""
+    import dataclasses
+
+    source = _source("s1", url="https://www.sec.gov/one")
+    fact_v1 = _stage1_fact(repo, "Original claim text.", source)[0]
+    first = _step(
+        repo=repo, verified_facts=(fact_v1,), sources=(source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    fact_v2 = dataclasses.replace(fact_v1, notes=fact_v1.notes + " a different collector annotation")
+    assert fact_v2.fact_id == fact_v1.fact_id
+    assert fact_v2 != fact_v1
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a base-fact mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(
+        repo=repo, verified_facts=(fact_v2,), sources=(source,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert result.blocking_reasons != ()
+    assert "base_fact_fingerprint" in result.blocking_reasons[0]
+    assert calls == []  # zero HTTP
+    assert result.verified_facts == (fact_v2,)  # the (unchanged) input is echoed back, nothing restored
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_source_content_hash_only_change_is_now_detected(repo, monkeypatch):
+    """Phase 4.3I correction 4: before ``base_source_fingerprint`` existed,
+    no checkpoint target covered the base Source set at all -- the SAME
+    base source_id with only ``content_hash`` changed (a re-fetch of the
+    same URL whose underlying document content differs) went completely
+    undetected."""
+    import dataclasses
+
+    source_v1 = _source("s1", url="https://www.sec.gov/one")
+    fact = _stage1_fact(repo, "Original claim text.", source_v1)[0]
+    first = _step(
+        repo=repo, verified_facts=(fact,), sources=(source_v1,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    source_v2 = dataclasses.replace(source_v1, content_hash="a-different-content-hash")
+    assert source_v2.source_id == source_v1.source_id
+    assert source_v2 != source_v1
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a base-source mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(
+        repo=repo, verified_facts=(fact,), sources=(source_v2,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert result.blocking_reasons != ()
+    assert "base_source_fingerprint" in result.blocking_reasons[0]
+    assert calls == []  # zero HTTP
+    assert result.verified_facts == (fact,)  # the (unchanged) input is echoed back, nothing restored
+    assert result.new_chunks == () and result.new_sources == ()
+
+
+def test_source_syndicated_from_only_change_is_now_detected(repo, monkeypatch):
+    """Phase 4.3I correction 4: the SAME base source_id with only
+    ``syndicated_from`` changed (syndication provenance, load-bearing for
+    requirement 13's independent-confirmation rule) went completely
+    undetected before ``base_source_fingerprint`` existed."""
+    import dataclasses
+
+    source_v1 = _source("s1", url="https://www.sec.gov/one")
+    fact = _stage1_fact(repo, "Original claim text.", source_v1)[0]
+    first = _step(
+        repo=repo, verified_facts=(fact,), sources=(source_v1,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert first.outcome is AdaptiveLiteratureStepOutcome.COMPLETE
+
+    source_v2 = dataclasses.replace(source_v1, syndicated_from="s-upstream")
+    assert source_v2.source_id == source_v1.source_id
+    assert source_v2 != source_v1
+
+    calls = []
+    monkeypatch.setattr(step_module, "execute_adaptive_literature_plan", lambda *a, **k: calls.append(1))
+
+    def _explode_integrity(*a, **k):
+        raise AssertionError("must not re-run Evidence Integrity on a base-source mismatch")
+
+    monkeypatch.setattr(step_module, "run_full_evidence_integrity_pass", _explode_integrity)
+
+    result = _step(
+        repo=repo, verified_facts=(fact,), sources=(source_v2,),
+        http_client=_success_fake_http(), env=_ENV,
+    )
+    assert result.outcome is AdaptiveLiteratureStepOutcome.SNAPSHOT_INPUT_MISMATCH
+    assert result.blocking_reasons != ()
+    assert "base_source_fingerprint" in result.blocking_reasons[0]
+    assert calls == []  # zero HTTP
+    assert result.verified_facts == (fact,)  # the (unchanged) input is echoed back, nothing restored
+    assert result.new_chunks == () and result.new_sources == ()

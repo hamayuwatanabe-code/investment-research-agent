@@ -244,10 +244,11 @@ def _chunk_from_dict(d: dict) -> Chunk:
 
 
 def _adaptive_target_to_dict(target: AdaptiveLiteratureTarget) -> dict:
-    """Phase 4.3I correction 2. Every field is required on the way back
-    in (see ``_adaptive_target_from_dict``) -- never defaulted, so a
-    checkpoint saved before this correction (lacking this key entirely)
-    is corrupted on read, never silently trusted with a guessed/empty
+    """Phase 4.3I correction 2 (correction 4 adds ``base_source_
+    fingerprint``). Every field is required on the way back in (see
+    ``_adaptive_target_from_dict``) -- never defaulted, so a checkpoint
+    saved before this correction (lacking this key entirely) is
+    corrupted on read, never silently trusted with a guessed/empty
     identity."""
     return {
         "ticker": target.ticker,
@@ -255,6 +256,7 @@ def _adaptive_target_to_dict(target: AdaptiveLiteratureTarget) -> dict:
         "nct_id": target.nct_id,
         "max_requests": target.max_requests,
         "base_fact_fingerprint": target.base_fact_fingerprint,
+        "base_source_fingerprint": target.base_source_fingerprint,
     }
 
 
@@ -262,8 +264,13 @@ def _adaptive_target_from_dict(d: dict) -> AdaptiveLiteratureTarget:
     """Direct required-key access (never ``.get()``) -- a dict missing
     any of these keys raises ``KeyError``, which every call site below
     catches as part of its own ``ResumeSnapshotCorrupted`` conversion.
-    ``max_requests`` is explicitly type-checked (never ``bool``, which
-    Python's ``int`` subclassing would otherwise let through silently)."""
+    Phase 4.3I correction 4: this includes ``base_source_fingerprint`` --
+    a pre-correction-4 checkpoint lacking that key is never assumed safe
+    and is corrupted on read exactly like a missing ``base_fact_
+    fingerprint`` always was, not defaulted to an empty string that would
+    spuriously match an all-zero current target. ``max_requests`` is
+    explicitly type-checked (never ``bool``, which Python's ``int``
+    subclassing would otherwise let through silently)."""
     max_requests = d["max_requests"]
     if isinstance(max_requests, bool) or not isinstance(max_requests, int):
         raise TypeError(f"max_requests must be a plain int, got {type(max_requests).__name__}")
@@ -273,6 +280,7 @@ def _adaptive_target_from_dict(d: dict) -> AdaptiveLiteratureTarget:
         nct_id=str(d["nct_id"]),
         max_requests=max_requests,
         base_fact_fingerprint=str(d["base_fact_fingerprint"]),
+        base_source_fingerprint=str(d["base_source_fingerprint"]),
     )
 
 
@@ -589,13 +597,21 @@ class AdaptiveLiteratureTarget:
     restore -- never trusted implicitly. ``base_fact_fingerprint`` is
     :func:`fact_content_fingerprint` of the Stage-2 ``verified_facts``
     this checkpoint was computed against, which changes if the SAME
-    fact_id's content changes, not merely if the fact_id set changes."""
+    fact_id's content changes, not merely if the fact_id set changes.
+    ``base_source_fingerprint`` (Phase 4.3I correction 4) is the
+    analogous :func:`source_content_fingerprint` of the Stage-2 base
+    ``sources`` this checkpoint was computed against -- a second Evidence
+    Integrity pass also consumes ``old_sources``
+    (``adaptive_literature_step.py``'s ``_finalize_with_integrity``), so a
+    base Source set that differs in content under the same source_id must
+    be caught here too, never only the base Facts."""
 
     ticker: str = ""
     reference_mode: str = ""
     nct_id: str = ""
     max_requests: int = 0
     base_fact_fingerprint: str = ""
+    base_source_fingerprint: str = ""
 
 
 @dataclass
@@ -733,9 +749,11 @@ _FACT_FINGERPRINT_FIELDS = (
     "primary_source_url",
     "document_id",
     "source_authority",
+    "stale",
+    "notes",
 )
 #: Deliberately EXCLUDED from ``_FACT_FINGERPRINT_FIELDS`` -- every
-#: ``Fact`` field not listed above is one of these five, each excluded
+#: ``Fact`` field not listed above is one of these three, each excluded
 #: for a stated reason, never by omission:
 #:
 #: * ``version``/``superseded_by`` -- storage-layer bookkeeping written
@@ -747,21 +765,34 @@ _FACT_FINGERPRINT_FIELDS = (
 #:   row, not the fact's own semantic content; already redundant here
 #:   since every Fact this function ever sees belongs to the one run_id
 #:   the Adaptive Literature step is itself scoped to.
-#: * ``stale`` -- recomputed by ``EvidenceIntegrityAgent._assess()`` on
-#:   EVERY Integrity pass from ``self.today``/``self.stale_after_days``
-#:   compared against the fact's own dates (``agents/evidence_integrity.py``
-#:   ``_staleness``) -- a WALL-CLOCK-dependent, not content-dependent,
-#:   value. Including it would make a resume dated even one day after
-#:   the original fetch fingerprint differently from an otherwise
-#:   byte-identical fact, breaking fresh/resume equivalence purely from
-#:   elapsed calendar time.
-#: * ``notes`` -- free text that mixes the collector's own
-#:   "collected_by=..." annotation with Evidence Integrity's own
-#:   marker-tagged reasoning, which ``_split_off_integrity_notes()``
-#:   strips and ``_assess()`` recomputes FRESH on every pass -- and that
-#:   recomputed text embeds the SAME wall-clock-dependent staleness
-#:   reasoning as ``stale`` above (e.g. "stale: effective date ... older
-#:   than ...d"). Same elapsed-time hazard; excluded for the same reason.
+#:
+#: Phase 4.3I correction 4: ``stale``/``notes`` were excluded by
+#: correction 3 on the theory that both are WALL-CLOCK-dependent --
+#: recomputed by ``EvidenceIntegrityAgent._assess()`` on every Integrity
+#: pass (``agents/evidence_integrity.py`` ``_staleness``/
+#: ``_split_off_integrity_notes()``) -- so including them would fingerprint
+#: an otherwise byte-identical fact differently purely from elapsed
+#: calendar time between an original fetch and a later resume. That
+#: theory does not survive reading ``pipeline.py``'s own Stage 2 restore
+#: logic: ``_assess()`` runs again ONLY when Stage 2's full Evidence
+#: Integrity pass is genuinely RE-EXECUTED (``skip_verify`` is ``False``,
+#: ``pipeline.py`` line ~978 on); a pure restore (``skip_verify`` is
+#: ``True``, same file line ~965) reads the ALREADY-ASSESSED ``Fact`` rows
+#: back from ``VerifySnapshot`` byte-for-byte, and ``_assess()`` never
+#: touches them again. Since Stage 2 runs its Integrity pass AT MOST ONCE
+#: per run_id (every later call to this same run_id's pipeline either
+#: restores that one pass's output unchanged or fails closed), the
+#: ``stale``/``notes`` a given fact_id carries are themselves fixed for
+#: the lifetime of a run_id, exactly like every other field already in
+#: ``_FACT_FINGERPRINT_FIELDS`` -- there is no elapsed-time hazard to
+#: guard against. What excluding them actually did was hide a genuine
+#: signal: if the SAME fact_id's assessed staleness or notes (``notes``
+#: includes the collector-originated portion ``_split_off_integrity_
+#: notes()`` leaves untouched, not only Integrity's own marker-tagged
+#: text) ever differs between what a persisted adaptive checkpoint was
+#: computed against and the current invocation's base facts, that is the
+#: base evidence having changed, which this fingerprint exists to detect
+#: -- so both are included.
 def fact_content_fingerprint(facts: Sequence[Fact]) -> str:
     """Phase 4.3I correction 2/3: a stable, order-independent digest of a
     ``Fact`` sequence's own SEMANTIC content (``_FACT_FINGERPRINT_FIELDS``
@@ -782,6 +813,32 @@ def fact_content_fingerprint(facts: Sequence[Fact]) -> str:
         row = fact.to_row()
         rows.append((fact.fact_id, tuple(str(row[field]) for field in _FACT_FINGERPRINT_FIELDS)))
     rows.sort()
+    payload = json.dumps(rows, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def source_content_fingerprint(sources: Sequence[Source]) -> str:
+    """Phase 4.3I correction 4: a stable, order-independent digest of a
+    ``Source`` sequence's own content, used the same way
+    :func:`fact_content_fingerprint` is used for ``Fact`` -- to bind a
+    persisted Adaptive Literature checkpoint to the exact Stage-2 base
+    Source set it was computed against, so a later invocation whose base
+    Sources differ in content under the SAME ``source_id`` (e.g.
+    ``content_hash``/``syndicated_from`` changing) is detected rather than
+    silently trusted, mirroring the "same fact_id, different content" gap
+    correction 3 closed for ``_FACT_FINGERPRINT_FIELDS``. Serializes every
+    ``Source`` field via ``_source_to_snapshot_dict`` (already a complete,
+    lossless serialization of every field -- see its own docstring), so
+    unlike ``_FACT_FINGERPRINT_FIELDS`` there is no narrower subset to
+    pick and no field to exclude: ``Source`` has no storage-bookkeeping-
+    only field analogous to ``Fact.version``/``superseded_by``/``run_id``.
+    Always computed directly from an already-in-hand Source sequence
+    (the run's own in-memory ``sources``, e.g. ``bus.sources`` or a
+    collect snapshot's own ``sources``) -- never by querying the global
+    ``sources`` table, which is not run_id-scoped (the same hazard
+    :func:`fact_content_fingerprint` avoids, for the same reason)."""
+    rows = [(source.source_id, _source_to_snapshot_dict(source)) for source in sources]
+    rows.sort(key=lambda row: row[0])
     payload = json.dumps(rows, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
 
