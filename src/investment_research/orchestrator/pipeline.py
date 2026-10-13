@@ -50,6 +50,7 @@ from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
     FactCategory,
+    FetchOutcome,
     Provenance,
     ResearchDomain,
     ResearchStatus,
@@ -180,6 +181,48 @@ def _literature_incomplete_blocking_reasons(
             f"Literature Document-First acquisition did not reach full coverage: {unresolved}"
         )
     return reasons
+
+
+def _restored_literature_blocking_reasons(
+    collector_summaries: Sequence[Mapping[str, Any]],
+    restored_direct_acquisition_info: Mapping[str, Any] | None,
+) -> list[str]:
+    """Blocking reasons for an explicit Literature Document-First
+    acquisition that an EARLIER invocation of this run_id made and that a
+    resume restored as part of its base evidence -- the case
+    ``_literature_incomplete_blocking_reasons`` cannot see on its own,
+    since it reads only THIS invocation's ``collection_results``/
+    ``direct_acquisition_info``.
+
+    ``collector_summaries`` is the restored collect snapshot's per-
+    collector metadata; ``restored_direct_acquisition_info`` is the
+    verify snapshot's persisted copy, or ``None`` when the resume restored
+    from the collect snapshot (which never persists it). The acquisition
+    counts as complete only when that persisted record affirmatively says
+    so (``feature_enabled``, not ``refused``, ``coverage_complete is True``)
+    and no restored Literature collector was degraded. Anything less is
+    unprovable and fails closed -- never presumed complete."""
+    prefix = "Restored from an earlier invocation of this run_id: "
+    reasons = [
+        f"{prefix}Literature Document-First acquisition did not complete: collector outcome "
+        f"was {summary.get('outcome')}"
+        for summary in collector_summaries
+        if summary.get("collector") == _LITERATURE_BRIDGE_COLLECTOR_LABEL
+        and summary.get("outcome") != str(FetchOutcome.OK)
+    ]
+    info = dict(restored_direct_acquisition_info or {})
+    proven_complete = bool(info.get("feature_enabled")) and (
+        info.get("refused") is not True and info.get("coverage_complete") is True
+    )
+    if info.get("feature_enabled"):
+        reasons.extend(f"{prefix}{r}" for r in _literature_incomplete_blocking_reasons((), info))
+    if reasons or proven_complete:
+        return reasons
+    return [
+        "Literature Document-First acquisition restored from an earlier invocation of this "
+        "run_id cannot be shown complete: the snapshot this resume restored from does not "
+        "record its completeness -- failing closed rather than presuming coverage"
+    ]
 
 
 def _select_bootstrap_company_identity(
@@ -1109,20 +1152,32 @@ class Pipeline:
         # result.direct_acquisition_info only says whether an explicit
         # PMID/NCT override ran THIS invocation. When collection was
         # skipped, the base evidence instead came from the run_id's own
-        # collect snapshot, whose per-collector metadata records whether
-        # an earlier invocation's explicit Literature acquisition is part
-        # of it -- without this, a resume that omits the explicit flags
-        # would plan READY and acquire the same literature a second time
-        # on top of the restored copy. A resume that re-collects from the
-        # start (stale facts) has skip_collect False and plans exactly
-        # like a fresh run.
-        restored_explicit_literature = (
-            skip_collect
-            and collect_snapshot is not None
-            and any(
-                c.get("collector") == _LITERATURE_BRIDGE_COLLECTOR_LABEL
-                for c in collect_snapshot.collectors
+        # snapshots: the collect snapshot's per-collector metadata records
+        # whether an earlier invocation's explicit Literature acquisition
+        # is part of it, and (when resuming past verify) the verify
+        # snapshot persists that invocation's direct_acquisition_info --
+        # which also covers an acquisition refused before any request, one
+        # that never produced a collector entry. Without this, a resume
+        # that omits the explicit flags would plan READY and acquire the
+        # same literature a second time on top of the restored copy, and
+        # would lose that acquisition's incompleteness from the final
+        # Literature completeness check below. A resume that re-collects
+        # from the start (stale facts) has skip_collect False and behaves
+        # exactly like a fresh run.
+        restored_direct_acquisition_info = (
+            dict(verify_snapshot.direct_acquisition_info)
+            if skip_verify and verify_snapshot is not None
+            else None
+        )
+        restored_explicit_literature = skip_collect and (
+            (
+                collect_snapshot is not None
+                and any(
+                    c.get("collector") == _LITERATURE_BRIDGE_COLLECTOR_LABEL
+                    for c in collect_snapshot.collectors
+                )
             )
+            or bool((restored_direct_acquisition_info or {}).get("feature_enabled"))
         )
         result.adaptive_acquisition_plan = build_adaptive_acquisition_plan(
             bootstrap_identity,
@@ -1699,6 +1754,20 @@ class Pipeline:
         literature_blocking_reasons = _literature_incomplete_blocking_reasons(
             collection_results, result.direct_acquisition_info
         )
+        # The restored base evidence is what this resumed run actually
+        # judges, so an earlier invocation's explicit acquisition must be
+        # judged too -- in ADDITION to (never instead of) whatever THIS
+        # invocation's own explicit acquisition reported above, whose
+        # direct_acquisition_info stays the one on result. Skipped on the
+        # snapshot-unavailable path, which already fails closed through
+        # result.resume_snapshot_failures.
+        if restored_explicit_literature and not snapshot_unavailable:
+            for reason in _restored_literature_blocking_reasons(
+                collect_snapshot.collectors if collect_snapshot is not None else (),
+                restored_direct_acquisition_info,
+            ):
+                if reason not in literature_blocking_reasons:
+                    literature_blocking_reasons.append(reason)
         blocking_reasons.extend(literature_blocking_reasons)
         if literature_blocking_reasons:
             # Without this, a run whose ONLY incompleteness is Literature's
