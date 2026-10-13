@@ -1106,8 +1106,29 @@ class Pipeline:
             )
         result.bootstrap_program_identity = bootstrap_identity
         result.bootstrap_literature_link = bootstrap_literature
+        # result.direct_acquisition_info only says whether an explicit
+        # PMID/NCT override ran THIS invocation. When collection was
+        # skipped, the base evidence instead came from the run_id's own
+        # collect snapshot, whose per-collector metadata records whether
+        # an earlier invocation's explicit Literature acquisition is part
+        # of it -- without this, a resume that omits the explicit flags
+        # would plan READY and acquire the same literature a second time
+        # on top of the restored copy. A resume that re-collects from the
+        # start (stale facts) has skip_collect False and plans exactly
+        # like a fresh run.
+        restored_explicit_literature = (
+            skip_collect
+            and collect_snapshot is not None
+            and any(
+                c.get("collector") == _LITERATURE_BRIDGE_COLLECTOR_LABEL
+                for c in collect_snapshot.collectors
+            )
+        )
         result.adaptive_acquisition_plan = build_adaptive_acquisition_plan(
-            bootstrap_identity, bootstrap_literature, result.direct_acquisition_info
+            bootstrap_identity,
+            bootstrap_literature,
+            result.direct_acquisition_info,
+            restored_explicit_literature=restored_explicit_literature,
         )
 
         # ---- Phase 4.3I: Adaptive Literature Acquisition -----------------

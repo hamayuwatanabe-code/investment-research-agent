@@ -127,6 +127,44 @@ def test_explicit_override_disabled_or_absent_does_not_skip():
         assert plan.status is AcquisitionPlanStatus.READY
 
 
+
+@pytest.mark.parametrize(
+    "identity_status",
+    [
+        ProgramIdentityStatus.CONFIRMED,
+        ProgramIdentityStatus.UNRESOLVED,
+        ProgramIdentityStatus.CONFLICTED,
+    ],
+)
+def test_restored_explicit_literature_skips_even_without_this_invocations_override(identity_status):
+    """A resume whose restored base already holds an earlier invocation's
+    explicit Literature acquisition must not plan a second acquisition of
+    the same literature merely because THIS invocation omitted the flags."""
+    for info in (None, {}, {"feature_enabled": False}):
+        plan = build_adaptive_acquisition_plan(
+            _identity(identity_status),
+            _literature(LiteratureLinkStatus.UNRESOLVED),
+            direct_acquisition_info=info,
+            restored_explicit_literature=True,
+        )
+        assert plan.status is AcquisitionPlanStatus.SKIPPED_EXPLICIT_OVERRIDE
+        assert plan.nct_id == "UNKNOWN"
+        assert plan.max_requests == 0
+        assert plan.requires_external_communication is False
+
+
+def test_restored_explicit_literature_false_is_the_default_and_changes_nothing():
+    default = build_adaptive_acquisition_plan(
+        _identity(ProgramIdentityStatus.CONFIRMED), _literature(LiteratureLinkStatus.NOT_FOUND),
+    )
+    explicit_false = build_adaptive_acquisition_plan(
+        _identity(ProgramIdentityStatus.CONFIRMED), _literature(LiteratureLinkStatus.NOT_FOUND),
+        restored_explicit_literature=False,
+    )
+    assert default == explicit_false
+    assert default.status is AcquisitionPlanStatus.READY
+
+
 # --- Required test 6: malformed NCT -> REFUSED, zero communication --------
 @pytest.mark.parametrize("bad_nct", ["NCT1234567", "NOTANNCT", "", "UNKNOWN"])
 def test_confirmed_with_malformed_nct_is_refused(bad_nct):

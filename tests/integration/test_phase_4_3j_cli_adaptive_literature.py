@@ -540,3 +540,98 @@ def test_result_to_json_and_report_import_without_circularity():
     importlib.reload(cli)
     assert hasattr(cli, "adaptive_literature_info")
     assert cli.adaptive_literature_info is report_module.adaptive_literature_info
+
+
+# =============================================================================
+# 10. --resume of a run_id whose base already holds an EXPLICIT PMID/NCT
+#     acquisition, with the explicit flags omitted this time: Adaptive must
+#     not acquire the same literature a second time on top of the restored
+#     copy (duplicate requests, and the same facts counted twice).
+# =============================================================================
+def _complete_literature_http() -> fx.FakeHttpClient:
+    from urllib.parse import urlencode
+
+    from investment_research.research.literature_acquisition_adapter import (
+        NCBI_EFETCH_URL,
+        NCBI_ESEARCH_URL,
+    )
+
+    pmids = ["90000015", "90000016"]
+    courtesy = {"tool": "test-tool", "email": "test@example.com"}
+    esearch = urlencode({
+        "db": "pubmed", "term": f"{NCT_ID}[si]", "retmode": "json", "retmax": "20", **courtesy,
+    })
+    efetch = urlencode({
+        "db": "pubmed", "id": ",".join(pmids), "retmode": "xml", "rettype": "abstract", **courtesy,
+    })
+    return fx.FakeHttpClient(responses={
+        f"{NCBI_ESEARCH_URL}?{esearch}": fx.ok(fx.esearch_response(pmids)),
+        f"{NCBI_EFETCH_URL}?{efetch}": fx.ok(fx.fixture_text("batch_articleset.xml")),
+        fx.europepmc_search_url(pmids[0]): fx.ok('{"resultList": {"result": []}}'),
+        fx.europepmc_search_url(pmids[1]): fx.ok('{"resultList": {"result": []}}'),
+    })
+
+
+@pytest.mark.parametrize("restored_facts_fresh", [True, False], ids=["restored", "re-collected"])
+def test_resume_of_explicit_override_run_without_explicit_flags(
+    monkeypatch, tmp_path, restored_facts_fresh,
+):
+    from investment_research.orchestrator import resume as resume_module
+    from investment_research.research.literature_pipeline_integration import (
+        run_literature_pipeline_acquisition,
+        validate_literature_pipeline_request,
+    )
+
+    explicit_http = _complete_literature_http()
+    adaptive_http = _complete_literature_http()
+
+    def fake_literature(request, *, ticker, **_kw):
+        return run_literature_pipeline_acquisition(
+            request, ticker=ticker, http_client=explicit_http, env=_ENV,
+        )
+
+    monkeypatch.setattr(cli, "collect", lambda *_a, **_k: (_confirmed_scenario(), {}))
+    monkeypatch.setattr(cli, "run_literature_pipeline_acquisition", fake_literature)
+    monkeypatch.setattr(cli, "build_adaptive_http_client", lambda: adaptive_http)
+    monkeypatch.setattr(cli.os, "environ", dict(_ENV))
+    if restored_facts_fresh:
+        # The fixture articles are older than their category's freshness
+        # threshold, which would make the resume re-collect from the start
+        # (the "re-collected" case below). Hold them fresh so the resume
+        # really restores the first invocation's base evidence.
+        monkeypatch.setattr(resume_module, "is_stale", lambda _fact, _today: False)
+
+    repo = _repo()
+    settings = _settings(tmp_path)
+    first_args = cli.build_parser().parse_args([
+        TICKER, "--adaptive-literature", "--live",
+        "--document-first-literature", "--literature-nct-id", NCT_ID,
+    ])
+    request = validate_literature_pipeline_request(
+        enabled=True, pmid=None, nct_id=NCT_ID, live=True,
+        use_fixtures=False, use_corpus=False, env=_ENV,
+    )
+    first = cli.run_one(TICKER, first_args, settings, repo, http=None, literature_request=request)
+    assert first.adaptive_acquisition_plan.status is AcquisitionPlanStatus.SKIPPED_EXPLICIT_OVERRIDE
+    assert explicit_http.requested_urls
+    assert adaptive_http.requested_urls == []
+
+    second_args = cli.build_parser().parse_args([
+        TICKER, "--adaptive-literature", "--live", "--resume", first.context.run_id,
+    ])
+    second = cli.run_one(TICKER, second_args, settings, repo, http=None)
+    fact_ids = [fact.fact_id for fact in second.bus.facts]
+    assert len(fact_ids) == len(set(fact_ids))
+
+    if restored_facts_fresh:
+        assert second.adaptive_acquisition_plan.status is AcquisitionPlanStatus.SKIPPED_EXPLICIT_OVERRIDE
+        assert second.adaptive_literature_diagnostics["outcome"] == "NOT_ATTEMPTED_NON_READY"
+        assert adaptive_http.requested_urls == []
+        assert len(second.bus.facts) == len(first.bus.facts)
+    else:
+        # Re-collected from the start: the explicit evidence is no longer in
+        # the base, so this invocation plans exactly like a fresh run with
+        # its own flags -- the Adaptive acquisition is the only literature.
+        assert second.adaptive_acquisition_plan.status is AcquisitionPlanStatus.READY
+        assert second.adaptive_literature_diagnostics["outcome"] == "COMPLETE"
+        assert adaptive_http.requested_urls

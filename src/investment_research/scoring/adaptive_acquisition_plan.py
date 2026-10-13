@@ -91,8 +91,10 @@ class AcquisitionPlanStatus(StrEnum):
     CONFLICTED = "CONFLICTED"
     #: An explicit PMID/NCT Literature Document-First override already ran
     #: this invocation (``direct_acquisition_info["feature_enabled"]`` is
-    #: true) -- an automatic plan must never second-guess or override an
-    #: explicit user-supplied reference.
+    #: true), or a resumed run's restored base evidence already contains one
+    #: from an earlier invocation of the same run_id -- an automatic plan
+    #: must never second-guess or override an explicit user-supplied
+    #: reference.
     SKIPPED_EXPLICIT_OVERRIDE = "SKIPPED_EXPLICIT_OVERRIDE"
     #: Program identity claims CONFIRMED but its own ``nct_id`` fails this
     #: module's independent, defensive strict-NCT re-check -- refuses to
@@ -130,8 +132,10 @@ def build_adaptive_acquisition_plan(
     identity: ProgramIdentityResolution,
     literature: LiteratureLinkResolution,
     direct_acquisition_info: Mapping[str, Any] | None = None,
+    *,
+    restored_explicit_literature: bool = False,
 ) -> AdaptiveAcquisitionPlan:
-    """Pure function: three already-computed values in, one plan out. No
+    """Pure function: already-computed values in, one plan out. No
     I/O, no randomness, no clock reads -- the SAME inputs always produce
     the SAME plan (Phase 4.3G's fresh-run/resume equivalence requirement
     depends on this).
@@ -143,6 +147,17 @@ def build_adaptive_acquisition_plan(
        ``SKIPPED_EXPLICIT_OVERRIDE``, regardless of what ``identity``/
        ``literature`` say. An automatic plan must never second-guess or
        override an explicit, already-used reference.
+    1b. ``restored_explicit_literature`` is true: this invocation is a
+       resume whose RESTORED base evidence (the run_id's own collect
+       snapshot) already contains an explicit Literature Document-First
+       acquisition made by an EARLIER invocation of the same run_id --
+       ``SKIPPED_EXPLICIT_OVERRIDE`` too. ``direct_acquisition_info`` is
+       per-invocation, so without this a resume that omits the explicit
+       flags would plan READY and re-acquire the same literature on top of
+       the restored copy (duplicate external requests, and the same
+       documents' facts counted twice in ``verified_facts``). The caller
+       (``Pipeline.run()``) derives this from the restored snapshot alone,
+       never from a guess about what an earlier invocation probably did.
     2. ``identity.status`` is ``CONFLICTED`` -- ``CONFLICTED``, no target.
     3. ``identity.status`` is ``UNRESOLVED`` -- ``UNRESOLVED``, no target.
     4. ``identity.status`` is ``CONFIRMED`` but ``identity.nct_id`` fails
@@ -168,6 +183,15 @@ def build_adaptive_acquisition_plan(
             rationale=(
                 "an explicit PMID/NCT Literature Document-First override already ran this "
                 "invocation; an automatic plan never overrides an explicit reference"
+            ),
+        )
+    if restored_explicit_literature:
+        return AdaptiveAcquisitionPlan(
+            status=AcquisitionPlanStatus.SKIPPED_EXPLICIT_OVERRIDE,
+            rationale=(
+                "this resumed run's restored base evidence already includes an explicit "
+                "PMID/NCT Literature Document-First acquisition from an earlier invocation of "
+                "the same run_id; an automatic plan never re-acquires on top of it"
             ),
         )
 
