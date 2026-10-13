@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from ..orchestrator.adaptive_literature_step import AdaptiveLiteratureStepOutcome
 from ..orchestrator.isolation import Channel
 from ..orchestrator.pipeline import ResearchResult
 from ..schemas.enums import (
@@ -75,6 +76,86 @@ def _num(value: Any) -> str:
         return f"{float(value):,.0f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+#: Phase 4.3J: outcomes that occur identically whether or not
+#: --adaptive-literature was ever passed -- a plan reaching READY with no
+#: runner injected (NOT_ATTEMPTED_NO_RUNNER), or never reaching READY at
+#: all (NOT_ATTEMPTED_NON_READY/NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE).
+#: These three are excluded from adaptive_literature_info() so that a run
+#: which never used the flag (the default, and every run before Phase
+#: 4.3J existed) gets an EMPTY dict here, and cli.py/this module's own
+#: report renderer add nothing to --json/the report in that case. The
+#: remaining six outcomes (AMBIGUOUS_RESUME_STATE/SNAPSHOT_CORRUPTED/
+#: SNAPSHOT_INPUT_MISMATCH/REFUSED/COMPLETE/INCOMPLETE) are reachable only
+#: when a runner was actually injected this invocation OR a persisted
+#: Adaptive Literature checkpoint already exists for this run_id from an
+#: earlier invocation that did inject one -- in both cases, something the
+#: flag caused is worth showing, including on a later --resume where this
+#: invocation's own flag happens to be off (Correction: "re-fetch zero"
+#: is an Adaptive-channel-only claim; the diagnostics below reflect
+#: whatever this run_id's Adaptive state already is, not merely this
+#: invocation's own flag value).
+_ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES = frozenset(
+    str(o)
+    for o in (
+        AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_NON_READY,
+        AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_NO_RUNNER,
+        AdaptiveLiteratureStepOutcome.NOT_ATTEMPTED_BASE_EVIDENCE_UNAVAILABLE,
+    )
+)
+
+#: Phase 4.3J: the only diagnostics keys ever read from
+#: result.adaptive_literature_diagnostics -- each one either an
+#: AdaptiveExecutionStatus/AdaptiveLiteratureStepOutcome string, a plain
+#: count, or a closed "restored_from" label. Never read "reason" (the
+#: same text already carried, identically, by blocking_reasons -- see
+#: adaptive_literature_step.py's own _blocked() helper) to avoid a
+#: confusing duplicate key, and never any field this dict does not
+#: already carry -- a key absent for this outcome's own diagnostics
+#: branch is simply omitted below, never guessed or defaulted.
+_ADAPTIVE_DIAGNOSTICS_OPTIONAL_KEYS = (
+    "execution_status",
+    "new_fact_count",
+    "new_chunk_count",
+    "verified_fact_count",
+    "restored_from",
+)
+
+
+def adaptive_literature_info(result: ResearchResult) -> dict[str, Any]:
+    """Phase 4.3J: a safe, minimal, JSON-serializable summary of the
+    Adaptive Literature Acquisition step (Phase 4.3I) for this run --
+    shared by cli.py's ``result_to_json()`` (via import, never duplicated)
+    and this module's own ``_section_1_verdict()`` below, so the two never
+    drift. Lives here (reporting/report.py), never in cli.py, because
+    cli.py already imports this module (``from .reporting.report import
+    render_report``) -- defining this in cli.py and importing it back into
+    report.py would be circular.
+
+    Returns ``{}`` whenever nothing the --adaptive-literature flag could
+    have caused is visible for this run (see
+    ``_ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES``'s own docstring) -- callers
+    must treat an empty dict as "add nothing", never as a value to render.
+    Every value returned here is already proven credential-/URL-/wire-
+    free by this field's own producer in adaptive_literature_step.py; this
+    function adds no new field and performs no further sanitization
+    itself.
+    """
+    diagnostics = result.adaptive_literature_diagnostics
+    outcome = diagnostics.get("outcome")
+    if not outcome or outcome in _ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES:
+        return {}
+    info: dict[str, Any] = {"outcome": outcome}
+    for key in _ADAPTIVE_DIAGNOSTICS_OPTIONAL_KEYS:
+        if key in diagnostics:
+            info[key] = diagnostics[key]
+    plan = result.adaptive_acquisition_plan
+    if plan is not None:
+        info["reference_mode"] = plan.reference_mode
+        info["nct_id"] = plan.nct_id
+    info["blocking_reasons"] = list(result.adaptive_literature_blocking_reasons)
+    return info
 
 
 class ReportRenderer:
@@ -260,6 +341,31 @@ class ReportRenderer:
         out.append("")
         out.append("Reasoning:")
         out.extend(f"  - {self._safe(r)}" for r in verdict.reasoning)
+        # Phase 4.3J: added only when adaptive_literature_info() is
+        # non-empty (see that function's own docstring for exactly which
+        # outcomes qualify) -- a run that never exercised
+        # --adaptive-literature (every run before this phase, and every
+        # run since that still leaves the flag off with nothing restored
+        # from an earlier invocation) adds not one byte here.
+        adaptive_info = adaptive_literature_info(self.result)
+        if adaptive_info:
+            out.append("")
+            out.append("Adaptive Literature Acquisition (Phase 4.3I/4.3J):")
+            out.append(f"  outcome: {adaptive_info['outcome']}")
+            if "execution_status" in adaptive_info:
+                out.append(f"  execution_status: {adaptive_info['execution_status']}")
+            if "reference_mode" in adaptive_info:
+                out.append(f"  reference_mode: {adaptive_info['reference_mode']}")
+            if "nct_id" in adaptive_info:
+                out.append(f"  nct_id: {adaptive_info['nct_id']}")
+            if "restored_from" in adaptive_info:
+                out.append(f"  restored_from: {adaptive_info['restored_from']}")
+            for count_key in ("new_fact_count", "new_chunk_count", "verified_fact_count"):
+                if count_key in adaptive_info:
+                    out.append(f"  {count_key}: {adaptive_info[count_key]}")
+            if adaptive_info["blocking_reasons"]:
+                out.append("  blocking_reasons:")
+                out.extend(f"    - {self._safe(r)}" for r in adaptive_info["blocking_reasons"])
         return "\n".join(out)
 
     def _section_2_confidence(self) -> str:

@@ -408,13 +408,20 @@ def test_empty_adaptive_integrity_result_never_leaves_stale_facts(monkeypatch):
 
 
 # =============================================================================
-# 6. CLI source never references the new Pipeline constructor params
+# 6. Phase 4.3J: CLI source NOW wires the Pipeline constructor params this
+#    test originally asserted it never would -- superseded in place
+#    rather than silently deleted, so the history of this boundary (never
+#    wired through Phase 4.3I, deliberately wired starting Phase 4.3J,
+#    only under an explicit opt-in gate) stays visible in one place.
+#    test_phase_4_3j_cli_adaptive_literature.py covers the actual
+#    gating/transport/env/diagnostics behavior; this test only asserts
+#    the textual fact that cli.py now references both names.
 # =============================================================================
-def test_cli_module_never_wires_a_real_adaptive_transport():
+def test_cli_module_now_wires_the_adaptive_transport_params():
     repo_src = Path(__file__).resolve().parent.parent.parent / "src" / "investment_research"
     cli_text = (repo_src / "cli.py").read_text(encoding="utf-8")
-    assert "adaptive_http_client" not in cli_text
-    assert "adaptive_env" not in cli_text
+    assert "adaptive_http_client" in cli_text
+    assert "adaptive_env" in cli_text
 
 
 # =============================================================================

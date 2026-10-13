@@ -1301,7 +1301,7 @@ def test_flag_off_run_one_makes_zero_literature_calls(monkeypatch, repo, fixture
     args = argparse.Namespace(
         fixtures=True, corpus=False, live=False, llm=False, token_budget=500_000, adversarial=False,
         full_dd=False, kill_test=False, catalyst=False, update=False, price=None, company_name=None,
-        portfolio=None, resume=None,
+        portfolio=None, resume=None, adaptive_literature=False,
     )
     result = cli_module.run_one("DEMOBIO", args, settings, repo, http=None, literature_request=None)
     assert calls == []
@@ -1347,7 +1347,7 @@ def test_flag_on_run_one_runs_literature_after_structured_collectors_before_adve
     args = argparse.Namespace(
         fixtures=False, corpus=False, live=True, llm=False, token_budget=500_000, adversarial=False,
         full_dd=False, kill_test=False, catalyst=False, update=False, price=None, company_name=None,
-        portfolio=None, resume=None,
+        portfolio=None, resume=None, adaptive_literature=False,
     )
     request = _pmid_request(pmid="90000015")
     result = cli_module.run_one("DEMOBIO", args, settings, repo, http=None, literature_request=request)

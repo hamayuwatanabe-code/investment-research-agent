@@ -17,8 +17,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
@@ -34,10 +35,11 @@ from .config import get_settings
 from .llm.client import LLMBudget, LLMClient
 from .logging_setup import setup_logging
 from .orchestrator.pipeline import Pipeline, ResearchResult, new_run_id
-from .reporting.report import render_report
+from .reporting.report import adaptive_literature_info, render_report
 from .research.adversarial import build_plan, run_adversarial_search
 from .research.anthropic_web import AnthropicWebResearchProvider
 from .research.corpus import CorpusResearchProvider
+from .research.literature_acquisition_adapter import ALLOWED_HOSTS as LITERATURE_ALLOWED_HOSTS
 from .research.literature_pipeline_integration import (
     DEFAULT_MAX_ARTICLES as LITERATURE_DEFAULT_MAX_ARTICLES,
 )
@@ -45,18 +47,38 @@ from .research.literature_pipeline_integration import (
     DEFAULT_MAX_FULLTEXT_FETCHES as LITERATURE_DEFAULT_MAX_FULLTEXT_FETCHES,
 )
 from .research.literature_pipeline_integration import (
+    DEFAULT_RATE_LIMIT_RPS as ADAPTIVE_RATE_LIMIT_RPS,
+)
+from .research.literature_pipeline_integration import (
+    DEFAULT_TIMEOUT_SECONDS as ADAPTIVE_TIMEOUT_SECONDS,
+)
+from .research.literature_pipeline_integration import (
+    LITERATURE_PIPELINE_USER_AGENT,
     LiteraturePipelineRequest,
     LiteraturePipelineRequestError,
     bundle_diagnostics,
     run_literature_pipeline_acquisition,
     validate_literature_pipeline_request,
 )
+from .research.literature_pipeline_integration import (
+    MAX_REDIRECTS as ADAPTIVE_MAX_REDIRECTS,
+)
+from .research.literature_pipeline_integration import (
+    MAX_RETRIES as ADAPTIVE_MAX_RETRIES,
+)
+from .research.ncbi_credentials import (
+    NCBI_API_KEY_ENV_VAR,
+    NCBI_EMAIL_ENV_VAR,
+    NCBI_TOOL_ENV_VAR,
+)
 from .research.provider import (
     CompositeResearchProvider,
     NullResearchProvider,
     ResearchProvider,
 )
+from .research.sec_live_smoke import AllowlistedHttpClient
 from .schemas.enums import Provenance, RunStatus
+from .scoring.adaptive_acquisition_plan import READY_MAX_REQUESTS
 from .storage.db import open_db
 from .storage.repository import Repository
 
@@ -210,7 +232,160 @@ def build_parser() -> argparse.ArgumentParser:
             "capped at 1 regardless of this value)"
         ),
     )
+    parser.add_argument(
+        "--adaptive-literature",
+        action="store_true",
+        help=(
+            "Phase 4.3J, default OFF: when combined with --live (and never with --fixtures/"
+            "--corpus -- that combination is REJECTED at startup, exit code 2, before any "
+            "ticker is researched), inject a real NCBI/Europe PMC transport into Pipeline so "
+            "Phase 4.3G's automatically-resolved Adaptive Literature Acquisition plan (if "
+            "READY) can execute. Requires IRA_NCBI_TOOL/IRA_NCBI_EMAIL in the environment; "
+            "without them, IF a READY plan is actually reached for a given ticker, the "
+            "acquisition is REFUSED (zero HTTP for this step only -- not the same as zero "
+            "communication for the whole run) and that ticker's run reports RESEARCH STATUS: "
+            "BLOCKED_PENDING_VERIFICATION with no action label. This credential check is NOT "
+            "performed at startup, since whether any ticker's plan ever reaches READY cannot "
+            "be known before research runs. Never shares a transport with "
+            "--document-first-literature or across tickers; never promoted over an explicit "
+            "PMID/NCT reference used this invocation (SKIPPED_EXPLICIT_OVERRIDE)."
+        ),
+    )
     return parser
+
+
+class AdaptiveLiteratureFlagError(ValueError):
+    """Phase 4.3J: raised by ``validate_adaptive_literature_flags`` for an
+    invalid --adaptive-literature flag combination -- distinguishable
+    from a generic ``ValueError`` so ``main()`` can catch it and print/
+    exit(2) without a traceback, exactly like
+    ``LiteraturePipelineRequestError``. Every raise site fires strictly
+    BEFORE ``settings``/the DB/the ``HttpClient``/any ticker is even
+    touched -- there is no silent fall-through to the pre-existing
+    NOT_ATTEMPTED_NO_RUNNER no-op for an invalid combination; the run
+    never starts at all."""
+
+
+def validate_adaptive_literature_flags(
+    *, enabled: bool, live: bool, use_fixtures: bool, use_corpus: bool,
+) -> None:
+    """Phase 4.3J: validate --adaptive-literature's own flag combination,
+    independently of ``validate_literature_pipeline_request`` (the
+    explicit PMID/NCT path's own validator) -- the two flags are
+    orthogonal and this never duplicates or re-implements that one.
+
+    ``enabled=False`` (the default; every pre-4.3J invocation) is a
+    no-op -- returns immediately, so this function changes nothing about
+    any existing flag combination that does not pass --adaptive-literature.
+
+    ``enabled=True`` is rejected (``AdaptiveLiteratureFlagError``) when:
+
+    1. ``--fixtures``/``--corpus`` is also set.
+       The function that re-verifies a READY plan and runs the bridge
+       (``orchestrator.adaptive_literature_step``'s own dependency, in
+       ``research/``) always calls ``validate_literature_pipeline_request`` with
+       ``use_fixtures=False, use_corpus=False`` HARD-CODED -- it never
+       inspects this CLI invocation's own --fixtures/--corpus state.
+       Without this check
+       here, a real transport would be constructed and handed to Pipeline
+       even during a --fixtures run, and the ONLY thing stopping it from
+       making a real NCBI/Europe PMC request would be whether a given
+       ticker's own Program Identity happens to resolve to READY --
+       exactly the kind of silent, data-dependent behavior change this
+       phase's own design review was written to prevent (CLAUDE.md:
+       fixture runs never make real requests, unconditionally).
+    2. ``--live`` is NOT also set. This path can never reach the network
+       without it, mirroring the explicit PMID/NCT path's own identical
+       rule.
+
+    Deliberately NEVER checks NCBI credential configuration here --
+    whether any ticker's plan ever reaches READY depends on that
+    ticker's own live research this invocation has not yet done, so a
+    credential check at this point would reject flag combinations that
+    might never even need a credential. See ``run_one()``'s own runtime
+    REFUSED handling for that case instead.
+    """
+    if not enabled:
+        return
+    if use_fixtures or use_corpus:
+        raise AdaptiveLiteratureFlagError(
+            "--adaptive-literature cannot be combined with --fixtures/--corpus -- refusing "
+            "before any ticker is researched rather than silently taking the "
+            "NOT_ATTEMPTED_NO_RUNNER no-op path"
+        )
+    if not live:
+        raise AdaptiveLiteratureFlagError(
+            "--adaptive-literature requires --live -- refusing before any ticker is "
+            "researched rather than silently taking the NOT_ATTEMPTED_NO_RUNNER no-op path"
+        )
+
+
+#: Phase 4.3J: the only environment variable NAMES ever read for
+#: --adaptive-literature's own transport injection -- never the full
+#: process environment. Mirrors research/ncbi_credentials.py's own
+#: closed set exactly (that module is the single place these three
+#: names are defined; never redefined here).
+_ADAPTIVE_ENV_VAR_NAMES = (NCBI_TOOL_ENV_VAR, NCBI_EMAIL_ENV_VAR, NCBI_API_KEY_ENV_VAR)
+
+
+def build_adaptive_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Phase 4.3J: a minimal dict carrying ONLY the (at most) three NCBI
+    courtesy-identification variables, extracted from ``environ`` --
+    never the full process environment. This is deliberately narrower
+    than simply passing ``os.environ`` through: ``resolve_ncbi_
+    credentials`` (research/ncbi_credentials.py) only ever reads these
+    three keys regardless, but keeping the injected mapping itself this
+    narrow means no OTHER secret (e.g. IRA_ANTHROPIC_API_KEY) is even
+    reachable from this code path, now or if it is ever extended. Values
+    are never logged, printed, or placed in any diagnostic by this
+    function or anything downstream of it (research/
+    literature_pipeline_integration.py's own module docstring; also
+    independently redacted from any log line by ``config.Settings.
+    secret_values()``, which already includes the SAME env vars read
+    under ``config.Settings.ncbi_email``/``ncbi_api_key``)."""
+    return {name: environ[name] for name in _ADAPTIVE_ENV_VAR_NAMES if name in environ}
+
+
+def build_adaptive_http_client() -> AllowlistedHttpClient:
+    """Phase 4.3J: one fresh, independent ``AllowlistedHttpClient`` for
+    the Adaptive Literature Acquisition step -- never shared with the
+    explicit PMID/NCT path's own client (that path builds its own,
+    internally, inside ``run_literature_pipeline_acquisition`` when it is
+    not given one; the two paths are mutually exclusive in effect per
+    plan.status's SKIPPED_EXPLICIT_OVERRIDE rule, so sharing would add
+    coupling for no benefit) and never shared across tickers (a caller
+    must call this ONCE PER TICKER -- see run_one() -- since this
+    client's own ``max_requests``/cache/attempt counters are
+    instance-scoped; sharing one instance across --compare/--screen
+    targets would let an earlier ticker's attempts silently consume a
+    later ticker's budget).
+
+    Every setting below is read from research/literature_pipeline_
+    integration.py's own constants (never redefined/duplicated here):
+    the same user agent, allowlisted hosts (research/
+    literature_acquisition_adapter.ALLOWED_HOSTS), timeout, rate limit,
+    retry count, and redirect cap the explicit PMID/NCT path's own
+    internally-constructed client uses. ``max_requests`` is fixed to
+    ``READY_MAX_REQUESTS`` (6) -- the physical-attempt (retry-inclusive)
+    cap the bridge that re-verifies a READY plan itself independently
+    verifies that same plan's own ``max_requests`` field already equals,
+    so a mismatch here would make every READY plan REFUSED rather than
+    silently using a different budget. ``out_dir`` is left at its
+    default (``None``): no Capture Manifest, no LAST_RUN marker is ever
+    written by this call, mirroring research/literature_pipeline_
+    integration.py's own stated boundary for the explicit path."""
+    return AllowlistedHttpClient(
+        user_agent=LITERATURE_PIPELINE_USER_AGENT,
+        allowed_hosts=LITERATURE_ALLOWED_HOSTS,
+        timeout=ADAPTIVE_TIMEOUT_SECONDS,
+        rate_limit_rps=ADAPTIVE_RATE_LIMIT_RPS,
+        max_retries=ADAPTIVE_MAX_RETRIES,
+        max_requests=READY_MAX_REQUESTS,
+        max_redirects=ADAPTIVE_MAX_REDIRECTS,
+        source="cli_adaptive_literature",
+        additional_secret_query_params=frozenset({"tool"}),
+        save_failed_responses=True,
+    )
 
 
 def collect(
@@ -389,6 +564,24 @@ def run_one(
     elif args.update:
         mode = "update"
 
+    # Phase 4.3J: --adaptive-literature's own runner injection. Gated on
+    # the SAME condition validate_adaptive_literature_flags() already
+    # enforced at startup (args.adaptive_literature and args.live and not
+    # fixtures/corpus) -- re-checked here, per ticker, rather than trusted
+    # from that one startup call, so a future caller of run_one() that
+    # skips main()'s own validation still gets the same fixtures/corpus
+    # protection. A fresh AllowlistedHttpClient is built PER TICKER (never
+    # shared across --compare/--screen targets, never shared with the
+    # explicit PMID/NCT path's own client) -- see build_adaptive_http_
+    # client()'s own docstring. Constructing it makes no network call by
+    # itself; this is safe to do even on --resume, since whether it is
+    # ever actually used is judged entirely inside Pipeline.run()/
+    # run_adaptive_literature_step() from persisted checkpoints, never
+    # re-decided here.
+    enable_adaptive = args.adaptive_literature and args.live and not args.fixtures and not args.corpus
+    adaptive_http_client = build_adaptive_http_client() if enable_adaptive else None
+    adaptive_env = build_adaptive_env(os.environ) if enable_adaptive else None
+
     pipeline = Pipeline(
         repo,
         build_search_provider(http, settings),
@@ -402,6 +595,8 @@ def run_one(
         direct_acquisition_info=bundle_diagnostics(
             literature_bundle, enabled=literature_request is not None
         ),
+        adaptive_http_client=adaptive_http_client,
+        adaptive_env=adaptive_env,
     )
     return pipeline.run(
         ticker,
@@ -568,6 +763,15 @@ def result_to_json(result: ResearchResult) -> dict:
     # keys this repository produced before Phase 4.2A existed.
     if result.direct_acquisition_info:
         payload["direct_acquisition_info"] = result.direct_acquisition_info
+    # Phase 4.3J: same "omit when empty" contract as direct_acquisition_info
+    # above -- adaptive_literature_info() returns {} for every outcome that
+    # occurs identically whether or not --adaptive-literature was ever
+    # passed (see its own docstring in reporting/report.py), so a run that
+    # never used the flag, and never resumed a run_id an earlier invocation
+    # used it for, gets the exact same --json keys as before this phase.
+    info = adaptive_literature_info(result)
+    if info:
+        payload["adaptive_literature_info"] = info
     return payload
 
 
@@ -592,6 +796,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except LiteraturePipelineRequestError as exc:
         print(f"--document-first-literature: {exc}", file=sys.stderr)
+        return 2
+
+    # Phase 4.3J: validated BEFORE settings/logging/DB/HttpClient are even
+    # constructed, same placement as the explicit PMID/NCT check above --
+    # an invalid --adaptive-literature combination never silently falls
+    # through to the pre-existing NOT_ATTEMPTED_NO_RUNNER no-op; the run
+    # never starts. A flag-off invocation (the default) is a no-op here.
+    try:
+        validate_adaptive_literature_flags(
+            enabled=args.adaptive_literature,
+            live=args.live,
+            use_fixtures=args.fixtures,
+            use_corpus=args.corpus,
+        )
+    except AdaptiveLiteratureFlagError as exc:
+        print(f"--adaptive-literature: {exc}", file=sys.stderr)
         return 2
 
     settings = get_settings()

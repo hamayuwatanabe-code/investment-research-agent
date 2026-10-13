@@ -63,11 +63,6 @@ RESOLVER_MODULE_NAMES_STILL_FORBIDDEN_IN_PIPELINE = ("identifier_validation",)
 #: The two Phase 4.3G intentionally connects to pipeline.py.
 PHASE_4_3G_PIPELINE_MODULE_NAMES = ("program_identity_resolution", "adaptive_acquisition_plan")
 
-TARGET_FILES = (
-    REPO_SRC / "cli.py",
-    *sorted((REPO_SRC / "agents").glob("*.py")),
-)
-
 PIPELINE_FILE = REPO_SRC / "orchestrator" / "pipeline.py"
 
 
@@ -78,14 +73,41 @@ def test_target_files_exist_so_this_check_is_non_vacuous():
     assert len(agent_files) >= 10  # sanity: the real agents/ directory, not an empty one
 
 
-def test_new_modules_never_referenced_in_cli_or_any_agent_source():
-    """cli.py and every agents/*.py module: all four names forbidden --
-    neither Phase 4.3F's structured evidence nor Phase 4.3G's resolver/
-    plan connection ever makes these Agent-visible or CLI-visible."""
-    for path in TARGET_FILES:
+def test_new_modules_never_referenced_in_any_agent_source():
+    """Every agents/*.py module: all four names forbidden -- neither
+    Phase 4.3F's structured evidence nor Phase 4.3G's resolver/plan
+    connection ever makes these Agent-visible. This is the
+    safety-critical half of what was, before Phase 4.3J,
+    ``test_new_modules_never_referenced_in_cli_or_any_agent_source`` --
+    agent isolation (CLAUDE.md rules 2/3) is untouched by and unrelated
+    to Phase 4.3J's CLI wiring, so it stays checked for all four names,
+    unchanged."""
+    for path in sorted((REPO_SRC / "agents").glob("*.py")):
         text = path.read_text(encoding="utf-8")
         for module_name in NEW_MODULE_NAMES:
             assert module_name not in text, f"{path} references {module_name!r}"
+
+
+def test_non_adaptive_new_modules_never_referenced_in_cli_source():
+    """cli.py: ``program_evidence``/``identifier_validation``/
+    ``program_identity_resolution`` stay forbidden -- the CLI never
+    reads/displays Phase 4.3F/4.3G's structured evidence or resolver
+    output directly.
+
+    ``adaptive_acquisition_plan`` is DELIBERATELY excluded here as of
+    Phase 4.3J: cli.py now imports ``READY_MAX_REQUESTS`` from it to
+    size the --adaptive-literature transport's own physical-attempt cap
+    (see cli.py::build_adaptive_http_client()). This is the intentional
+    boundary crossing this phase's own module docstring describes --
+    see test_phase_4_3j_cli_adaptive_literature.py for the behavioral
+    tests of that wiring, and
+    test_phase_4_3g_pipeline_integration.py::
+    test_cli_module_source_never_references_the_new_phase_4_3g_fields
+    for the sibling textual assertion."""
+    non_adaptive_names = tuple(n for n in NEW_MODULE_NAMES if n != "adaptive_acquisition_plan")
+    text = (REPO_SRC / "cli.py").read_text(encoding="utf-8")
+    for module_name in non_adaptive_names:
+        assert module_name not in text, f"cli.py references {module_name!r}"
 
 
 def test_pipeline_never_references_identifier_validation_directly():

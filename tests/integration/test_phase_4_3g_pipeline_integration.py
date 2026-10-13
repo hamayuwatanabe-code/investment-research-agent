@@ -567,9 +567,21 @@ def test_resume_past_verify_bootstrap_uses_snapshot_evidence_not_fresh_collectio
 # 22 (partial). CLI/report rendering never references the new fields
 # =============================================================================
 def test_cli_module_source_never_references_the_new_phase_4_3g_fields():
+    """``bootstrap_program_identity``/``bootstrap_literature_link`` stay
+    forbidden in cli.py -- those remain internal ResearchResult fields no
+    CLI flag reads or displays.
+
+    ``adaptive_acquisition_plan`` is DELIBERATELY excluded from this
+    check as of Phase 4.3J: cli.py now imports ``READY_MAX_REQUESTS``
+    from ``scoring.adaptive_acquisition_plan`` to size the
+    --adaptive-literature transport's own physical-attempt cap (see
+    cli.py::build_adaptive_http_client()) -- the exact, intentional
+    boundary crossing this phase's own module docstring describes. See
+    test_phase_4_3j_cli_adaptive_literature.py for the positive
+    counterpart and the rest of this phase's own CLI-wiring tests."""
     from pathlib import Path
 
     repo_src = Path(__file__).resolve().parent.parent.parent / "src" / "investment_research"
     cli_text = (repo_src / "cli.py").read_text(encoding="utf-8")
-    for name in ("bootstrap_program_identity", "bootstrap_literature_link", "adaptive_acquisition_plan"):
+    for name in ("bootstrap_program_identity", "bootstrap_literature_link"):
         assert name not in cli_text
