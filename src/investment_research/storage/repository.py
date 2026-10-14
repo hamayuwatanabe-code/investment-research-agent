@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -573,6 +573,14 @@ class CollectSnapshot:
     company_identity_evidence: list[CompanyIdentityEvidence] = field(default_factory=list)
     program_candidate_evidence: list[ProgramCandidateEvidence] = field(default_factory=list)
     literature_candidate_evidence: list[LiteratureCandidateEvidence] = field(default_factory=list)
+    #: The invocation's own explicit Literature Document-First record at
+    #: Stage 1 -- the already-sanitized ``direct_acquisition_info`` dict
+    #: (``bundle_diagnostics``: counts, booleans, reason strings; never a
+    #: credential or wire URL). ``{}`` means "recorded: no explicit
+    #: acquisition was requested". ``None`` means the snapshot predates
+    #: this field (or its writer did not record it): UNKNOWN, never read
+    #: as "not requested" -- the caller must fail closed on it.
+    direct_acquisition_info: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1387,6 +1395,7 @@ class Repository:
         company_identity_evidence: Sequence[CompanyIdentityEvidence] = (),
         program_candidate_evidence: Sequence[ProgramCandidateEvidence] = (),
         literature_candidate_evidence: Sequence[LiteratureCandidateEvidence] = (),
+        direct_acquisition_info: Mapping[str, Any] | None = None,
     ) -> None:
         """Persists Stage 1's own pristine (pre-Integrity) output, in
         full, keyed only by this run_id. Called once, right after Stage 1
@@ -1398,7 +1407,7 @@ class Repository:
         built none -- unchanged behavior, unchanged snapshot shape, for
         every collector that does not populate them.
         """
-        payload = {
+        payload: dict[str, Any] = {
             "facts": [f.to_row() for f in facts],
             "company_identity_evidence": [
                 _company_identity_evidence_to_dict(e) for e in company_identity_evidence
@@ -1412,6 +1421,10 @@ class Repository:
             "sources": [_source_to_snapshot_dict(s) for s in sources],
             "collectors": list(collectors),
         }
+        # Written only when the caller recorded it -- an omitted key reads
+        # back as None (unknown), never as {} ("no explicit acquisition").
+        if direct_acquisition_info is not None:
+            payload["direct_acquisition_info"] = dict(direct_acquisition_info)
         self.conn.execute(
             """INSERT OR REPLACE INTO run_checkpoints(run_id, stage, stage_index, status,
                                                       payload, fact_count, created_at)
@@ -1467,6 +1480,11 @@ class Repository:
                 _literature_candidate_evidence_from_dict(_snap_record(r))
                 for r in _snap_collection(payload, "literature_candidate_evidence")
             ]
+            # An absent key is a legacy-format snapshot (None: unknown); a
+            # present key that is not a JSON object is corruption.
+            direct_acquisition_info = payload.get("direct_acquisition_info")
+            if direct_acquisition_info is not None and not isinstance(direct_acquisition_info, dict):
+                raise TypeError("direct_acquisition_info is not a JSON object")
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ResumeSnapshotCorrupted(
                 f"collect snapshot for run_id={run_id!r} is corrupted: {exc}"
@@ -1478,6 +1496,7 @@ class Repository:
             company_identity_evidence=company_identity_evidence,
             program_candidate_evidence=program_candidate_evidence,
             literature_candidate_evidence=literature_candidate_evidence,
+            direct_acquisition_info=direct_acquisition_info,
         )
 
     def save_verify_snapshot(

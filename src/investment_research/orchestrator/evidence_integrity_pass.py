@@ -137,7 +137,7 @@ before this correction. Production's Stage 2 call site passes
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -355,45 +355,22 @@ def run_full_evidence_integrity_pass(
     # Item 8: Literature completeness-consistency (Phase 4.2B correction 1,
     # reproduced verbatim). A clean, complete Literature fetch (or a run
     # that never used the flag at all) is entirely unaffected.
-    direct_acquisition_info: Mapping[str, Any] = pass_input.direct_acquisition_info
-    if direct_acquisition_info.get("feature_enabled") and direct_acquisition_info.get(
-        "coverage_complete"
-    ):
-        literature_collection_results = [
-            c
-            for c in pass_input.collection_results
-            if c.collector == LITERATURE_BRIDGE_COLLECTOR_LABEL
-        ]
-        literature_raw_fact_ids = {
+    literature_collection_results = [
+        c
+        for c in pass_input.collection_results
+        if c.collector == LITERATURE_BRIDGE_COLLECTOR_LABEL
+    ]
+    direct_acquisition_info = apply_literature_completeness_consistency(
+        pass_input.direct_acquisition_info,
+        literature_fact_ids={
             raw.fact_id() for c in literature_collection_results for raw in c.raw_facts
-        }
-        missing_literature_fact_ids = literature_raw_fact_ids - {f.fact_id for f in verified_facts}
-        if missing_literature_fact_ids:
-            literature_source_ids = {
-                s.source_id for c in literature_collection_results for s in c.sources
-            }
-            quarantined_literature_source_ids = {
-                q.source_id for q in quarantined_sources
-            } & literature_source_ids
-            if quarantined_literature_source_ids:
-                reason = (
-                    f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) were "
-                    f"excluded after {len(quarantined_literature_source_ids)} Literature "
-                    "source(s) were quarantined by Source validation (source_id(s): "
-                    f"{', '.join(sorted(quarantined_literature_source_ids))})"
-                )
-            else:
-                reason = (
-                    f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) "
-                    "submitted by the acquisition bridge did not survive Evidence Integrity"
-                )
-            updated_direct_acquisition_info = dict(direct_acquisition_info)
-            updated_direct_acquisition_info["coverage_complete"] = False
-            updated_direct_acquisition_info["unresolved_reasons"] = [
-                *updated_direct_acquisition_info.get("unresolved_reasons", []),
-                reason,
-            ]
-            direct_acquisition_info = updated_direct_acquisition_info
+        },
+        literature_source_ids={
+            s.source_id for c in literature_collection_results for s in c.sources
+        },
+        verified_facts=verified_facts,
+        quarantined_sources=quarantined_sources,
+    )
 
     # Item 9: persist every surviving fact. save_fact is idempotent (an
     # unchanged fact is a no-op, never a duplicate row/version).
@@ -414,8 +391,54 @@ def run_full_evidence_integrity_pass(
     )
 
 
+def apply_literature_completeness_consistency(
+    direct_acquisition_info: Mapping[str, Any],
+    *,
+    literature_fact_ids: Iterable[str],
+    literature_source_ids: Iterable[str],
+    verified_facts: Sequence[Fact],
+    quarantined_sources: Sequence[QuarantinedSource],
+) -> Mapping[str, Any]:
+    """Item 8 as a function: an explicit Literature acquisition recorded as
+    complete (``feature_enabled`` and ``coverage_complete``) whose own facts
+    did not all survive Evidence Integrity is returned as a copy with
+    ``coverage_complete=False`` and the reason appended. Anything else is
+    returned unchanged. Shared by this pass (literature identified by its
+    CollectionResult) and by a resumed run judging a restored acquisition
+    (literature identified from the restored pre-Integrity facts), so the
+    two can never disagree on what "survived" means."""
+    if not (
+        direct_acquisition_info.get("feature_enabled")
+        and direct_acquisition_info.get("coverage_complete")
+    ):
+        return direct_acquisition_info
+    missing_literature_fact_ids = set(literature_fact_ids) - {f.fact_id for f in verified_facts}
+    if not missing_literature_fact_ids:
+        return direct_acquisition_info
+    quarantined_literature_source_ids = {
+        q.source_id for q in quarantined_sources
+    } & set(literature_source_ids)
+    if quarantined_literature_source_ids:
+        reason = (
+            f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) were "
+            f"excluded after {len(quarantined_literature_source_ids)} Literature "
+            "source(s) were quarantined by Source validation (source_id(s): "
+            f"{', '.join(sorted(quarantined_literature_source_ids))})"
+        )
+    else:
+        reason = (
+            f"{len(missing_literature_fact_ids)} Literature-sourced fact(s) "
+            "submitted by the acquisition bridge did not survive Evidence Integrity"
+        )
+    updated = dict(direct_acquisition_info)
+    updated["coverage_complete"] = False
+    updated["unresolved_reasons"] = [*updated.get("unresolved_reasons", []), reason]
+    return updated
+
+
 __all__ = [
     "LITERATURE_BRIDGE_COLLECTOR_LABEL",
+    "apply_literature_completeness_consistency",
     "FullIntegrityPassInput",
     "FullIntegrityPassOutput",
     "IntegrityPassKind",

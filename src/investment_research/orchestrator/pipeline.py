@@ -95,6 +95,7 @@ from .adaptive_literature_step import run_adaptive_literature_step
 from .evidence_integrity_pass import (
     FullIntegrityPassInput,
     IntegrityPassKind,
+    apply_literature_completeness_consistency,
     run_full_evidence_integrity_pass,
 )
 from .isolation import (
@@ -120,6 +121,15 @@ log = logging.getLogger(__name__)
 #: any acquisition code itself, whatever a run's ``collection_results``
 #: happen to contain. A dedicated test asserts the two stay equal.
 _LITERATURE_BRIDGE_COLLECTOR_LABEL = "literature_evidence_projection"
+
+#: FactCollectorAgent stamps every pre-Integrity Fact with
+#: ``notes="collected_by=<RawFact.collector>"``, and the Literature
+#: acquisition's RawFacts keep collectors/literature.py's own collector
+#: names (``literature_pubmed``/``literature_europepmc``). This is how a
+#: resume that restored only the collect snapshot's pre-Integrity facts
+#: recognises the Literature ones -- there is no CollectionResult to read
+#: them from. A dedicated test asserts the naming still holds.
+_LITERATURE_RAW_FACT_NOTES_PREFIX = "collected_by=literature_"
 
 
 def _literature_incomplete_blocking_reasons(
@@ -732,6 +742,22 @@ class Pipeline:
                             f"no collect snapshot recorded for run_id={ctx.run_id!r}; "
                             "cannot safely re-evaluate this run's Stage-1 facts without one"
                         )
+                    elif collect_snapshot.direct_acquisition_info is None:
+                        # A collect snapshot written before Stage 1 recorded
+                        # its own direct_acquisition_info. Re-running Integrity
+                        # from it would have to guess whether an explicit
+                        # Literature acquisition was requested (and whether it
+                        # completed); "not recorded" is never read as "not
+                        # requested". No "verify" checkpoint is written on this
+                        # path, so every later resume of this run_id fails
+                        # closed the same way rather than inheriting a guess.
+                        snapshot_missing_reason = (
+                            f"collect snapshot for run_id={ctx.run_id!r} does not record "
+                            "direct_acquisition_info (written before that field existed): "
+                            "whether an explicit Literature Document-First acquisition was "
+                            "requested for this run, and whether it completed, cannot be "
+                            "determined -- failing closed rather than presuming none was"
+                        )
                     else:
                         snapshot_facts = collect_snapshot.facts
             elif needed > stage_index("verify"):
@@ -973,6 +999,7 @@ class Pipeline:
                 company_identity_evidence=result.company_identity_evidence,
                 program_candidate_evidence=result.program_candidate_evidence,
                 literature_candidate_evidence=result.literature_candidate_evidence,
+                direct_acquisition_info=result.direct_acquisition_info,
             )
 
         checkpoint("collect", {"collectors": [c.collector for c in collection_results]})
@@ -992,6 +1019,17 @@ class Pipeline:
         # further EvidenceIntegrityAgent executions for those facts in this
         # invocation.
         skip_verify = resume_plan is not None and not resume_plan.should_run("verify")
+        # The explicit Literature record behind a RESTORED base -- never
+        # THIS invocation's own (that one stays result.direct_acquisition_
+        # info). Verify-path resume: the verify snapshot's persisted copy.
+        # Collect-path resume: the collect snapshot's Stage-1 copy, re-run
+        # through the same Integrity consistency check below. None for a
+        # fresh run or a stale re-collect.
+        restored_direct_acquisition_info: dict[str, Any] | None = (
+            dict(verify_snapshot.direct_acquisition_info)
+            if skip_verify and not snapshot_unavailable and verify_snapshot is not None
+            else None
+        )
         if snapshot_unavailable:
             # Phase 4.3C correction 5: fail closed. A snapshot this resume
             # NEEDED could not be obtained (see the resume-plan-building
@@ -1060,11 +1098,41 @@ class Pipeline:
                 ctx.status = RunStatus.INCOMPLETE_RESEARCH
             result.direct_acquisition_info = dict(pass_output.direct_acquisition_info)
             result.agent_records.append(pass_output.agent_run_record)
+            verify_snapshot_info = result.direct_acquisition_info
+            if skip_collect and collect_snapshot is not None:
+                # Collect-path resume: the verified base is the collecting
+                # invocation's, so its Stage-1 record is judged against
+                # THIS pass's outcome exactly as Integrity item 8 judges a
+                # fresh run's -- a "complete" record whose Literature facts
+                # did not all survive is complete no longer. (A legacy
+                # snapshot without the record never reaches here; see the
+                # resume-plan block.)
+                stage1_info = collect_snapshot.direct_acquisition_info
+                # Never defaulted to {}: unknown is not "none requested".
+                assert stage1_info is not None  # legacy fails closed in the resume block
+                literature_facts = [
+                    f for f in pre_integrity_facts
+                    if f.notes.startswith(_LITERATURE_RAW_FACT_NOTES_PREFIX)
+                ]
+                restored_direct_acquisition_info = dict(
+                    apply_literature_completeness_consistency(
+                        stage1_info,
+                        literature_fact_ids={f.fact_id for f in literature_facts},
+                        literature_source_ids={f.source_id for f in literature_facts},
+                        verified_facts=verified_facts,
+                        quarantined_sources=pass_output.quarantined_sources,
+                    )
+                )
+                # The verify snapshot describes the verified base, so it
+                # carries the collecting invocation's record -- a later
+                # verify-path resume then judges the same acquisition this
+                # one did, instead of whatever this invocation's flags were.
+                verify_snapshot_info = restored_direct_acquisition_info
             # Phase 4.3C correction 5: the run-scoped snapshot a LATER
             # resume of THIS run_id (past this point) would need.
             self.repo.save_verify_snapshot(
                 ctx.run_id, verified_facts, pass_output.quarantined_sources,
-                result.direct_acquisition_info,
+                verify_snapshot_info,
             )
 
         if not snapshot_unavailable:
@@ -1154,21 +1222,17 @@ class Pipeline:
         # skipped, the base evidence instead came from the run_id's own
         # snapshots: the collect snapshot's per-collector metadata records
         # whether an earlier invocation's explicit Literature acquisition
-        # is part of it, and (when resuming past verify) the verify
-        # snapshot persists that invocation's direct_acquisition_info --
-        # which also covers an acquisition refused before any request, one
-        # that never produced a collector entry. Without this, a resume
+        # is part of it, and restored_direct_acquisition_info (set in Stage
+        # 2 above from the verify snapshot, or from the collect snapshot's
+        # own Stage-1 record) is that invocation's direct_acquisition_info
+        # -- which also covers an acquisition refused before any request,
+        # one that never produced a collector entry. Without this, a resume
         # that omits the explicit flags would plan READY and acquire the
         # same literature a second time on top of the restored copy, and
         # would lose that acquisition's incompleteness from the final
         # Literature completeness check below. A resume that re-collects
         # from the start (stale facts) has skip_collect False and behaves
         # exactly like a fresh run.
-        restored_direct_acquisition_info = (
-            dict(verify_snapshot.direct_acquisition_info)
-            if skip_verify and verify_snapshot is not None
-            else None
-        )
         restored_explicit_literature = skip_collect and (
             (
                 collect_snapshot is not None
