@@ -61,11 +61,14 @@ class Settings:
     market_provider: str = field(default_factory=lambda: _env("IRA_MARKET_PROVIDER", "none"))
     polygon_api_key: str = field(default_factory=lambda: _env("POLYGON_API_KEY"))
 
-    #: Phase 3F: NCBI E-utilities' documented courtesy identification
-    #: parameters -- future-use only this phase (no live PubMed/Europe PMC
-    #: call is ever made from this repository's CI environment). Never
-    #: hardcoded, never logged, never placed in a Capture Manifest or a
-    #: displayed request URL uncensored -- see ``secret_values`` below.
+    #: NCBI E-utilities' documented courtesy identification parameters,
+    #: read here for log redaction (``secret_values`` below). The Literature
+    #: acquisition paths (--document-first-literature/--adaptive-literature)
+    #: do NOT use these fields: they read IRA_NCBI_TOOL/IRA_NCBI_EMAIL/
+    #: IRA_NCBI_API_KEY directly via research/ncbi_credentials.py, where TOOL
+    #: and EMAIL are required -- the ``ncbi_tool`` default below does not
+    #: satisfy that check. Never hardcoded, never logged, never placed in a
+    #: Capture Manifest or a displayed request URL uncensored.
     ncbi_tool: str = field(default_factory=lambda: _env("IRA_NCBI_TOOL", "investment-research-agent"))
     ncbi_email: str = field(default_factory=lambda: _env("IRA_NCBI_EMAIL"))
     ncbi_api_key: str = field(default_factory=lambda: _env("IRA_NCBI_API_KEY"))

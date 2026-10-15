@@ -166,6 +166,50 @@ class MaxRequestsExceededError(Exception):
     than ``max_requests`` real GETs in one run."""
 
 
+class OutboundGetBudgetExhaustedError(Exception):
+    """Raised by :meth:`AllowlistedHttpClient._reserve_outbound_get` when the
+    next outbound GET -- in practice a redirect hop, since a new attempt is
+    never started once the budget is spent -- would exceed ``max_requests``.
+    Raised BEFORE any connection for that GET is opened, and always caught
+    in ``_do_get``: the request ends as an incomplete fetch, never a crash."""
+
+
+#: Fixed, secret-free message for a fetch cut short by the outbound GET
+#: budget while following a redirect (interpolates only the integer cap).
+_REDIRECT_BUDGET_EXHAUSTED_ERROR = (
+    "live GET cap of {cap} outbound GETs reached before a redirect could be "
+    "followed; the redirect target was not requested"
+)
+
+
+class _BudgetedHTTPHandler(urllib.request.HTTPHandler):
+    """Reserves one unit of the client's outbound GET budget immediately
+    before EVERY plain-HTTP connection the opener makes -- the initial GET,
+    a retry, or a redirect hop alike -- so ``max_requests`` bounds what is
+    actually sent, not merely how many times ``_do_get`` was entered."""
+
+    def __init__(self, reserve: Callable[[], None]) -> None:
+        super().__init__()
+        self._reserve = reserve
+
+    def http_open(self, req):
+        self._reserve()
+        return super().http_open(req)
+
+
+class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
+    """The HTTPS counterpart of :class:`_BudgetedHTTPHandler` (constructed
+    with the same defaults ``urllib.request.build_opener`` would use)."""
+
+    def __init__(self, reserve: Callable[[], None]) -> None:
+        super().__init__()
+        self._reserve = reserve
+
+    def https_open(self, req):
+        self._reserve()
+        return super().https_open(req)
+
+
 def _valid_user_agent_or_none(value: str | None) -> str | None:
     """The single validation rule for what counts as a real, usable SEC
     User-Agent -- unset/blank/the built-in placeholder all map to ``None``.
@@ -369,6 +413,12 @@ class AllowlistedHttpClient:
     timeout: float = DEFAULT_TIMEOUT_SECONDS
     rate_limit_rps: float = DEFAULT_RATE_LIMIT_RPS
     max_retries: int = MAX_RETRIES
+    #: Hard cap on ACTUAL outbound GETs over this client's lifetime: every
+    #: initial GET, every retry, and every redirect hop actually followed
+    #: count one each (``attempts_made``). Budget is reserved immediately
+    #: before each connection is opened, so the GET that would exceed the
+    #: cap is never sent -- a redirect it would have followed ends the
+    #: fetch as an incomplete ERROR result instead.
     max_requests: int = MAX_LIVE_GETS
     #: Explicit cap on redirects followed in one request -- Phase 3F.0.4
     #: requirement 2; passed straight to ``_AllowlistedRedirectHandler``.
@@ -432,15 +482,23 @@ class AllowlistedHttpClient:
         #: stored under them.
         self._cache: dict[str, FetchResult] = {}
         self._requests_made = 0
-        #: Physical GET-attempt counter -- every real socket-level attempt
-        #: made via ``_do_get`` (including every retry), regardless of how
-        #: many LOGICAL ``.get()`` calls that spans. ``max_requests``
-        #: bounds THIS counter (Phase 3F.1 correction requirement 3): a
-        #: hard cap on real outbound traffic must actually cap real
-        #: outbound traffic, not the number of distinct URLs asked for.
+        #: Actual outbound GET counter -- incremented by
+        #: ``_reserve_outbound_get`` immediately before EVERY connection
+        #: the opener opens: the initial GET, each retry, and each redirect
+        #: hop actually followed. ``max_requests`` bounds THIS counter
+        #: (Phase 3F.1 correction requirement 3, extended in Phase 4.3K to
+        #: redirect hops): a hard cap on real outbound traffic must
+        #: actually cap real outbound traffic.
         self._attempts_made = 0
+        # Redirect targets are validated (scheme/userinfo/host/hop cap) in
+        # _AllowlistedRedirectHandler.redirect_request; only a target that
+        # passes reaches a budgeted *_open below, which reserves budget
+        # immediately before connecting. A rejected target therefore never
+        # consumes budget and is never connected to.
         self._opener = urllib.request.build_opener(
-            _AllowlistedRedirectHandler(self.allowed_hosts, self.max_redirects)
+            _AllowlistedRedirectHandler(self.allowed_hosts, self.max_redirects),
+            _BudgetedHTTPHandler(self._reserve_outbound_get),
+            _BudgetedHTTPSHandler(self._reserve_outbound_get),
         )
         #: PUBLIC requested URL -> the (already-sanitized) URL the response
         #: actually came from (after any allowed redirect) -- FetchResult
@@ -460,18 +518,33 @@ class AllowlistedHttpClient:
 
     @property
     def requests_made(self) -> int:
-        """Logical request count -- one increment per ``.get()`` call that
-        was neither a cache hit nor a disallowed-host rejection, REGARDLESS
-        of how many physical retries it took. See ``attempts_made`` for the
-        physical count ``max_requests`` actually bounds."""
+        """LOGICAL request count -- one per ``.get()`` call that was
+        neither a cache hit nor a disallowed-host rejection, however many
+        retries or redirect hops it took (including one that ended
+        incomplete because the GET budget ran out). Not what
+        ``max_requests`` bounds; see ``attempts_made``."""
         return self._requests_made
 
     @property
     def attempts_made(self) -> int:
-        """Physical GET-attempt count -- every real socket-level attempt,
-        including every retry of every logical request. This is what
-        ``max_requests`` caps (Phase 3F.1 correction requirement 3)."""
+        """ACTUAL outbound GET count -- every GET for which a connection
+        was opened: initial GETs, retries, and followed redirect hops.
+        Always ``<= max_requests``. A redirect target rejected by host/
+        scheme/hop-cap validation is never connected to and never counted;
+        a GET that was sent but failed (timeout, connection error, HTTP
+        error status) is counted."""
         return self._attempts_made
+
+    def _reserve_outbound_get(self) -> None:
+        """Reserve one outbound GET from the budget, immediately before a
+        connection is opened (called by the opener's budgeted HTTP/HTTPS
+        handlers). Raises :class:`OutboundGetBudgetExhaustedError` --
+        before connecting -- when the budget is already spent."""
+        if self._attempts_made >= self.max_requests:
+            raise OutboundGetBudgetExhaustedError(
+                f"outbound GET budget of {self.max_requests} exhausted"
+            )
+        self._attempts_made += 1
 
     @property
     def cache_hits(self) -> int:
@@ -497,11 +570,23 @@ class AllowlistedHttpClient:
                 error=cached.error, elapsed_ms=cached.elapsed_ms,
             )
 
-        host = urllib.parse.urlparse(url).hostname
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
         if host not in self.allowed_hosts:
             result = FetchResult(
                 url=public_url, outcome=FetchOutcome.BLOCKED,
                 error=f"refused disallowed host: {host!r}",
+            )
+            self._cache[public_url] = result
+            return result
+        if parsed.scheme not in ("http", "https"):
+            # Only the budgeted HTTP/HTTPS handlers count outbound GETs;
+            # any other scheme (ftp:, file:, ...) is refused before a
+            # connection exists rather than opened outside the budget.
+            # Redirects get the same rule from _validate_redirect_target.
+            result = FetchResult(
+                url=public_url, outcome=FetchOutcome.BLOCKED,
+                error=f"refused unsupported scheme: {parsed.scheme!r}",
             )
             self._cache[public_url] = result
             return result
@@ -642,7 +727,8 @@ class AllowlistedHttpClient:
                 self.on_first_attempt()
                 self._first_attempt_signaled = True
             attempt += 1
-            self._attempts_made += 1
+            # The outbound GET itself is counted by _reserve_outbound_get,
+            # inside the opener, immediately before its connection opens.
             self._limiter.wait()
             result = self._do_get(url, public_url=public_url, attempt=attempt)
             # Never retry a definitive outcome -- only a transient one.
@@ -736,6 +822,15 @@ class AllowlistedHttpClient:
             return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
         except TooManyRedirectsError as exc:
             return FetchResult(url=public_url, outcome=FetchOutcome.BLOCKED, attempts=attempt, error=str(exc))
+        except OutboundGetBudgetExhaustedError:
+            # Only reachable on a redirect hop (a new attempt is never
+            # started once the budget is spent). ERROR, not OK: the
+            # resource was not obtained. _get_with_retry's budget check
+            # then returns this result without any further GET.
+            return FetchResult(
+                url=public_url, outcome=FetchOutcome.ERROR, attempts=attempt,
+                error=_REDIRECT_BUDGET_EXHAUSTED_ERROR.format(cap=self.max_requests),
+            )
         except TimeoutError:
             return FetchResult(url=public_url, outcome=FetchOutcome.TIMEOUT, attempts=attempt, error="timed out")
         except (urllib.error.URLError, OSError) as exc:

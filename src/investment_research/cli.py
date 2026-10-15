@@ -170,15 +170,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the separated bear and bull web search passes (requirement P3)",
     )
-    parser.add_argument("--resume", metavar="RUN_ID", help="resume an interrupted run")
+    parser.add_argument(
+        "--resume",
+        metavar="RUN_ID",
+        help=(
+            "resume an interrupted run from its last good stage. The structured collectors "
+            "(and --document-first-literature, if given) run again and make live requests; an "
+            "Adaptive Literature fetch already recorded for RUN_ID is restored, never repeated, "
+            "and an unrecorded or ambiguous one fails closed. Take RUN_ID from --json's run_id "
+            "or the report's 'Run ID' line (the log file name uses a different id)."
+        ),
+    )
     parser.add_argument(
         "--price", type=float, help="current share price, if not otherwise available"
     )
     parser.add_argument("--company-name", help="company name (improves registry lookups)")
     parser.add_argument(
-        "--json", dest="as_json", action="store_true", help="emit machine-readable JSON"
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit machine-readable JSON only; --report-out is NOT written when --json is given",
     )
-    parser.add_argument("--report-out", type=Path, help="write the report to a file")
+    parser.add_argument(
+        "--report-out",
+        type=Path,
+        help="also write the printed report to this file (ignored when --json is given)",
+    )
     parser.add_argument(
         "--portfolio",
         type=Path,
@@ -236,19 +253,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--adaptive-literature",
         action="store_true",
         help=(
-            "Phase 4.3J, default OFF: when combined with --live (and never with --fixtures/"
-            "--corpus -- that combination is REJECTED at startup, exit code 2, before any "
-            "ticker is researched), inject a real NCBI/Europe PMC transport into Pipeline so "
-            "Phase 4.3G's automatically-resolved Adaptive Literature Acquisition plan (if "
-            "READY) can execute. Requires IRA_NCBI_TOOL/IRA_NCBI_EMAIL in the environment; "
-            "without them, IF a READY plan is actually reached for a given ticker, the "
-            "acquisition is REFUSED (zero HTTP for this step only -- not the same as zero "
-            "communication for the whole run) and that ticker's run reports RESEARCH STATUS: "
-            "BLOCKED_PENDING_VERIFICATION with no action label. This credential check is NOT "
-            "performed at startup, since whether any ticker's plan ever reaches READY cannot "
-            "be known before research runs. Never shares a transport with "
-            "--document-first-literature or across tickers; never promoted over an explicit "
-            "PMID/NCT reference used this invocation (SKIPPED_EXPLICIT_OVERRIDE)."
+            "default OFF; requires --live, and is REJECTED (exit code 2, before any ticker is "
+            "researched) with --fixtures/--corpus or without --live. Lets each ticker fetch "
+            "PubMed/Europe PMC literature for its own program, but ONLY when the run's plan is "
+            "READY: SEC EDGAR's official company name must equal, after normalisation, the "
+            "lead sponsor of exactly one ClinicalTrials.gov study from the sponsor search "
+            "(--company-name, or the bare ticker). An explicit --document-first-literature "
+            "reference -- this invocation's, or one restored from an earlier invocation of the "
+            "same run_id -- means no adaptive request (SKIPPED_EXPLICIT_OVERRIDE). Needs "
+            "IRA_NCBI_TOOL and IRA_NCBI_EMAIL (environment or .env; IRA_NCBI_API_KEY optional), "
+            "checked only once a plan is READY: without them that ticker's acquisition is "
+            "REFUSED with zero requests and its run reports no action label. Each ticker gets a "
+            "fresh client limited to eutils.ncbi.nlm.nih.gov/www.ebi.ac.uk/europepmc.org and "
+            "at most 6 actual outbound GETs (initial requests, retries and followed redirects "
+            "all count; the structured collectors are outside this budget). --json and the "
+            "report then show plan_status, plan_rationale, outcome and this invocation's "
+            "logical/actual GET counts."
         ),
     )
     return parser

@@ -235,6 +235,14 @@ def _restored_literature_blocking_reasons(
     ]
 
 
+def _transport_count(transport: Any, attribute: str) -> int | str:
+    """An Adaptive transport's own request counter, or ``UNKNOWN`` when it
+    does not expose one as a plain int -- never inferred from anything
+    else (e.g. a test double's URL list)."""
+    value = getattr(transport, attribute, None)
+    return value if type(value) is int else UNKNOWN
+
+
 def _select_bootstrap_company_identity(
     identities: Sequence[CompanyIdentityEvidence],
 ) -> CompanyIdentityEvidence | None:
@@ -366,6 +374,15 @@ class ResearchResult:
     #: Judge, to extend blocking_reasons, mirroring resume_snapshot_
     #: failures'/the Literature path's own existing pattern exactly.
     adaptive_literature_blocking_reasons: list[str] = field(default_factory=list)
+    #: Phase 4.3K: what THIS invocation's Adaptive Literature transport did.
+    #: Non-empty exactly when a runner was injected (cli: --adaptive-
+    #: literature), empty otherwise -- so a flag-off run's output is
+    #: unchanged. ``plan_status``/``plan_rationale`` describe this
+    #: invocation's plan; the two GET counts are read from this
+    #: invocation's own transport only, never from a restored snapshot (a
+    #: resume that restores instead of fetching reports 0), and are
+    #: ``UNKNOWN`` when the transport does not expose them.
+    adaptive_literature_invocation: dict[str, Any] = field(default_factory=dict)
 
     @property
     def blocked(self) -> bool:
@@ -1279,6 +1296,18 @@ class Pipeline:
         )
         result.adaptive_literature_diagnostics = dict(adaptive_result.diagnostics)
         result.adaptive_literature_blocking_reasons = list(adaptive_result.blocking_reasons)
+        if self.adaptive_http_client is not None:
+            plan = result.adaptive_acquisition_plan
+            result.adaptive_literature_invocation = {
+                "plan_status": str(plan.status) if plan is not None else UNKNOWN,
+                "plan_rationale": plan.rationale if plan is not None else UNKNOWN,
+                "this_invocation_logical_get_count": _transport_count(
+                    self.adaptive_http_client, "requests_made"
+                ),
+                "this_invocation_actual_get_count": _transport_count(
+                    self.adaptive_http_client, "attempts_made"
+                ),
+            }
         # Phase 4.3I correction 1: unconditional, never gated on
         # "non-empty". adaptive_result.verified_facts is ALWAYS the
         # authoritative final set for this point in the run -- for every

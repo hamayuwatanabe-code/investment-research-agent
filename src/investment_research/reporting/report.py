@@ -137,16 +137,25 @@ def adaptive_literature_info(result: ResearchResult) -> dict[str, Any]:
     have caused is visible for this run (see
     ``_ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES``'s own docstring) -- callers
     must treat an empty dict as "add nothing", never as a value to render.
+
+    Phase 4.3K: when --adaptive-literature was given THIS invocation
+    (``result.adaptive_literature_invocation`` non-empty) the dict is
+    always returned, NOT_ATTEMPTED_* outcomes included, and additionally
+    carries ``plan_status``, ``plan_rationale``, ``not_attempted_reason``
+    (NOT_ATTEMPTED_* only) and this invocation's own
+    ``this_invocation_logical_get_count``/``this_invocation_actual_get_count``.
+    A flag-off run takes exactly the pre-4.3K path.
     Every value returned here is already proven credential-/URL-/wire-
     free by this field's own producer in adaptive_literature_step.py; this
     function adds no new field and performs no further sanitization
     itself.
     """
     diagnostics = result.adaptive_literature_diagnostics
+    invocation = result.adaptive_literature_invocation
     outcome = diagnostics.get("outcome")
-    if not outcome or outcome in _ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES:
+    if not invocation and (not outcome or outcome in _ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES):
         return {}
-    info: dict[str, Any] = {"outcome": outcome}
+    info: dict[str, Any] = {"outcome": outcome or UNKNOWN}
     for key in _ADAPTIVE_DIAGNOSTICS_OPTIONAL_KEYS:
         if key in diagnostics:
             info[key] = diagnostics[key]
@@ -155,6 +164,20 @@ def adaptive_literature_info(result: ResearchResult) -> dict[str, Any]:
         info["reference_mode"] = plan.reference_mode
         info["nct_id"] = plan.nct_id
     info["blocking_reasons"] = list(result.adaptive_literature_blocking_reasons)
+    if invocation:
+        # Phase 4.3K: --adaptive-literature was given this invocation --
+        # always visible, including a non-READY plan (zero GETs, and why).
+        # A NOT_ATTEMPTED_* outcome carries no blocking reason, so its own
+        # reason is shown here instead (never duplicating blocking_reasons).
+        if outcome in _ADAPTIVE_DIAGNOSTICS_HIDDEN_OUTCOMES and "reason" in diagnostics:
+            info["not_attempted_reason"] = diagnostics["reason"]
+        for key in (
+            "plan_status",
+            "plan_rationale",
+            "this_invocation_logical_get_count",
+            "this_invocation_actual_get_count",
+        ):
+            info[key] = invocation.get(key, UNKNOWN)
     return info
 
 
@@ -366,6 +389,24 @@ class ReportRenderer:
             if adaptive_info["blocking_reasons"]:
                 out.append("  blocking_reasons:")
                 out.extend(f"    - {self._safe(r)}" for r in adaptive_info["blocking_reasons"])
+            # Phase 4.3K: present only when --adaptive-literature was given
+            # this invocation (see adaptive_literature_info()).
+            if "plan_status" in adaptive_info:
+                out.append(f"  plan_status: {adaptive_info['plan_status']}")
+                out.append(f"  plan_rationale: {self._safe(str(adaptive_info['plan_rationale']))}")
+                if "not_attempted_reason" in adaptive_info:
+                    out.append(
+                        "  not_attempted_reason: "
+                        f"{self._safe(str(adaptive_info['not_attempted_reason']))}"
+                    )
+                out.append(
+                    "  this_invocation_logical_get_count: "
+                    f"{adaptive_info['this_invocation_logical_get_count']}"
+                )
+                out.append(
+                    "  this_invocation_actual_get_count: "
+                    f"{adaptive_info['this_invocation_actual_get_count']}"
+                )
         return "\n".join(out)
 
     def _section_2_confidence(self) -> str:

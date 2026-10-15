@@ -80,7 +80,7 @@ python3 -m pip install pytest ruff mypy        # dev tooling only
 cp .env.example .env                           # optional; everything works empty
 
 python3 main.py DEMOBIO --fixtures             # synthetic end-to-end run
-python3 -m pytest -q                           # 233 tests
+python3 -m pytest -q                           # full offline suite
 ```
 
 Live research (network off by default):
@@ -108,10 +108,51 @@ python3 main.py CRBP --live --company-name "Corbus Pharmaceuticals Holdings, Inc
 | `--resume RUN_ID` | restart an interrupted run from its last good stage |
 | `--token-budget N` | cap total LLM tokens for the run |
 | `--fixtures` | use synthetic data (always labelled) |
-| `--json` / `--report-out FILE` | machine-readable / file output |
+| `--company-name NAME` | company name for registry searches (the ClinicalTrials.gov sponsor search uses it; the bare ticker otherwise) |
+| `--db PATH` | use this SQLite file instead of `IRA_DB_PATH` |
+| `--document-first-literature` | fetch ONE explicit PMID/NCT reference (see *Literature acquisition*) |
+| `--adaptive-literature` | fetch literature only when the run's own plan is `READY` (see *Literature acquisition*) |
+| `--json` | machine-readable output **only** — when `--json` is given, `--report-out` is **not** written |
+| `--report-out FILE` | print the report and also write it to FILE (use without `--json`) |
 
 Exit code is `1` when the run is `INCOMPLETE_RESEARCH`, so it fails loudly in a
-pipeline.
+pipeline. Exit code `2` is an invalid invocation (for example `--adaptive-literature`
+without `--live`), rejected before any settings, database or network client exists.
+
+### Literature acquisition (opt-in, `--live` only)
+
+Two default-OFF paths fetch PubMed / Europe PMC documents. Both require `--live`,
+are rejected with exit code 2 alongside `--fixtures` or `--corpus`, and need
+`IRA_NCBI_TOOL` and `IRA_NCBI_EMAIL` (`IRA_NCBI_API_KEY` is optional). Without
+those two the acquisition is refused before any request and the run reports no
+action label.
+
+| Flag | What it fetches |
+|---|---|
+| `--document-first-literature --literature-nct-id NCT…` (or `--literature-pmid`) | ONE explicit reference you name |
+| `--adaptive-literature` | literature for the run's own program, only when its plan is `READY` |
+
+The adaptive plan is `READY` only when SEC EDGAR's official company name equals,
+after normalisation, the `lead_sponsor` of exactly one ClinicalTrials.gov study
+found by the sponsor search, and literature is not already linked. Several
+matching studies, no SEC identity, or an explicit reference — this invocation's,
+or one restored from an earlier invocation of the same run_id — mean no adaptive
+request at all.
+
+Each ticker gets a fresh client restricted to `eutils.ncbi.nlm.nih.gov`,
+`www.ebi.ac.uk` and `europepmc.org`, with a hard cap of **6 actual outbound
+GETs**: initial requests, retries and followed redirects all count, and the GET
+that would exceed the cap is never sent. The structured collectors (SEC EDGAR,
+ClinicalTrials.gov, openFDA) use their own client and are outside this budget.
+
+With `--adaptive-literature`, `--json` carries `adaptive_literature_info` and the
+report's verdict section shows the same block: `outcome`, `plan_status`,
+`plan_rationale`, `not_attempted_reason` (when nothing was attempted),
+`blocking_reasons`, and **this invocation's** `this_invocation_logical_get_count`
+and `this_invocation_actual_get_count`. A resume that restores an earlier fetch
+reports 0 for this invocation; it never relabels the earlier run's traffic. A
+transport that cannot report a count shows `UNKNOWN`. Credential values and
+request URLs carrying them are never printed, logged or stored.
 
 ## What it actually produces
 
@@ -328,7 +369,7 @@ printed before the action.
 ## Testing
 
 ```bash
-python3 -m pytest -q                    # 233 tests
+python3 -m pytest -q                    # full offline suite (no external network)
 python3 -m pytest tests/regression -q   # the LGVN-type guard
 ```
 
@@ -344,7 +385,8 @@ check and all three suites, and exits non-zero on failure.
 ## Configuration and security
 
 Everything is optional; the system runs with an empty `.env` and reports the
-resulting gaps rather than filling them.
+resulting gaps rather than filling them. The two Literature flags additionally
+need `IRA_NCBI_TOOL` and `IRA_NCBI_EMAIL` to make any request.
 
 | Variable | Purpose |
 |---|---|
@@ -352,6 +394,8 @@ resulting gaps rather than filling them.
 | `IRA_ANTHROPIC_API_KEY` | optional narrative synthesis of verified facts |
 | `IRA_SEARCH_PROVIDER` + key | `none` / `tavily` / `brave` — enables the kill-search set |
 | `IRA_MARKET_PROVIDER` + key | optional microstructure data |
+| `IRA_NCBI_TOOL`, `IRA_NCBI_EMAIL` | NCBI courtesy identification; required by the Literature flags |
+| `IRA_NCBI_API_KEY` | optional NCBI API key for the Literature flags |
 
 Keys are read from the environment only, `.env` is gitignored, and the log
 formatter redacts known secret values and secret-shaped tokens. External web
@@ -410,7 +454,14 @@ Stated plainly rather than left to be discovered:
   from the last successful stage; if any restored fact is past the freshness
   threshold for its category, it restarts from collection instead. That is
   deliberate — resuming onto a stale regulatory fact is worse than starting
-  over, because it would look current.
+  over, because it would look current. On every `--resume` the structured
+  collectors (and `--document-first-literature`, if passed) run again and make
+  live requests; an Adaptive Literature fetch already recorded for the run_id is
+  restored, never repeated. A fetch that was started but not durably recorded
+  (interrupted mid-request), or a collect snapshot written before Stage 1
+  recorded its explicit-literature state, fails closed: no re-fetch, no action
+  label. Take `RUN_ID` from `--json`'s `run_id` or the report's `Run ID` line —
+  the log file name uses a different id.
 - **Insider detail is shallow.** Without Form 4 XML parsing, the individual, the
   role and the price are usually not in the filing text; they are stored as
   `UNKNOWN` rather than inferred.
@@ -419,7 +470,9 @@ Stated plainly rather than left to be discovered:
   Anthropic API speaking the real wire protocol, but the container has no
   credential available to the program and its egress policy blocks
   `sec.gov`, `clinicaltrials.gov`, `api.fda.gov` and the news domains. The real
-  ticker runs therefore use `CAPTURED` corpora, and every report says so.
+  ticker runs therefore use `CAPTURED` corpora, and every report says so. The
+  same holds for the PubMed / Europe PMC Literature paths: they have only been
+  exercised against fake and loopback transports.
 - **The captured corpora are search summaries, not source documents.** Direct
   fetch of the underlying filings and releases was blocked, so what is stored is
   a search engine's summary *about* each document. The system marks these
