@@ -411,6 +411,9 @@ class AllowlistedHttpClient:
     user_agent: str
     allowed_hosts: frozenset[str] = ALLOWED_HOSTS
     timeout: float = DEFAULT_TIMEOUT_SECONDS
+    #: Minimum spacing between ANY two outbound GETs this client sends --
+    #: initial GETs, retries and followed redirect hops alike (applied in
+    #: ``_reserve_outbound_get``, immediately before each connection).
     rate_limit_rps: float = DEFAULT_RATE_LIMIT_RPS
     max_retries: int = MAX_RETRIES
     #: Hard cap on ACTUAL outbound GETs over this client's lifetime: every
@@ -536,14 +539,24 @@ class AllowlistedHttpClient:
         return self._attempts_made
 
     def _reserve_outbound_get(self) -> None:
-        """Reserve one outbound GET from the budget, immediately before a
-        connection is opened (called by the opener's budgeted HTTP/HTTPS
-        handlers). Raises :class:`OutboundGetBudgetExhaustedError` --
-        before connecting -- when the budget is already spent."""
+        """The single gate every outbound GET passes through -- initial,
+        retry, or followed redirect hop -- called by the opener's budgeted
+        HTTP/HTTPS handlers immediately before a connection is opened (and
+        after the redirect target, if any, already passed host/scheme/hop-
+        cap validation). In order:
+
+        1. budget: raises :class:`OutboundGetBudgetExhaustedError`, before
+           connecting and WITHOUT waiting, when the budget is spent;
+        2. rate limit: waits ``rate_limit_rps``'s spacing since the
+           previous GET this client sent, so redirect hops are paced
+           exactly like initial GETs and retries;
+        3. counts the GET.
+        """
         if self._attempts_made >= self.max_requests:
             raise OutboundGetBudgetExhaustedError(
                 f"outbound GET budget of {self.max_requests} exhausted"
             )
+        self._limiter.wait()
         self._attempts_made += 1
 
     @property
@@ -719,17 +732,18 @@ class AllowlistedHttpClient:
             if self.on_first_attempt is not None and not self._first_attempt_signaled:
                 # Fires exactly once, immediately before the very first
                 # real socket-level attempt this client will ever make --
-                # strictly before self._limiter.wait()/self._do_get() below,
-                # so no attempt (physical or rate-limit wait) can start
-                # before this returns. If it raises, this loop -- and every
+                # strictly before self._do_get() below (and therefore before
+                # _reserve_outbound_get's rate-limit wait), so no attempt
+                # (physical or rate-limit wait) can start before this returns. If it raises, this loop -- and every
                 # counter above (_attempts_made) -- is left untouched, and
                 # the exception propagates straight out of get() uncaught.
                 self.on_first_attempt()
                 self._first_attempt_signaled = True
             attempt += 1
-            # The outbound GET itself is counted by _reserve_outbound_get,
-            # inside the opener, immediately before its connection opens.
-            self._limiter.wait()
+            # Rate-limit wait and GET counting both happen in
+            # _reserve_outbound_get, inside the opener, immediately before
+            # each connection opens -- once per GET actually sent,
+            # redirect hops included.
             result = self._do_get(url, public_url=public_url, attempt=attempt)
             # Never retry a definitive outcome -- only a transient one.
             if result.outcome != FetchOutcome.ERROR and result.outcome != FetchOutcome.TIMEOUT:

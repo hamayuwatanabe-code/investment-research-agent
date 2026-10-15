@@ -13,7 +13,9 @@ never the client's opinion of itself.
 from __future__ import annotations
 
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import pairwise
 
 import pytest
 
@@ -32,6 +34,8 @@ _SECRET_API_KEY = "budgetSecretApiKey0123456789"
 
 class _Handler(BaseHTTPRequestHandler):
     hits: list[str] = []
+    #: time.monotonic() at each GET's arrival, same clock as the client
+    arrivals: list[float] = []
     #: path -> redirect target path (same server)
     chain: dict[str, str] = {}
     #: path -> HTTP status to fail with (no redirect)
@@ -43,6 +47,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        type(self).arrivals.append(time.monotonic())
         type(self).hits.append(path)
         if path == "/to-disallowed":
             self._redirect(
@@ -86,6 +91,7 @@ class _DisallowedHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def base_url():
     _Handler.hits = []
+    _Handler.arrivals = []
     _Handler.chain = {}
     _Handler.fail = {}
     _DisallowedHandler.hits = []
@@ -260,3 +266,82 @@ def test_non_http_scheme_on_an_allowlisted_host_is_refused_before_any_connection
     assert "unsupported scheme" in result.error
     assert client.attempts_made == 0
     assert client.requests_made == 0
+
+
+
+# =============================================================================
+# Rate limiting applies to EVERY GET actually sent, redirect hops included.
+# Gaps are measured at the server, on the same monotonic clock; a lower bound
+# on a sleep never flakes, and the tolerance only absorbs connect jitter.
+# =============================================================================
+_JITTER = 0.015
+
+
+def _gaps() -> list[float]:
+    a = _Handler.arrivals
+    return [later - earlier for earlier, later in pairwise(a)]
+
+
+def test_redirect_hops_are_paced_like_initial_gets(base_url):
+    _Handler.chain = {"/a": "/b", "/b": "/c", "/c": "/ok"}
+    client = _client(rate_limit_rps=10.0)  # 0.1 s minimum spacing
+
+    assert client.get(f"{base_url}/a").ok
+
+    assert _Handler.hits == ["/a", "/b", "/c", "/ok"]
+    assert len(_gaps()) == 3
+    assert min(_gaps()) >= 0.1 - _JITTER, _gaps()
+
+
+def test_retries_and_redirects_are_paced_and_still_capped_at_six(base_url):
+    _Handler.chain = {"/r1": "/r2", "/r2": "/fail"}
+    _Handler.fail = {"/fail": 500}
+    client = _client(rate_limit_rps=20.0, max_requests=6, max_retries=2)  # 0.05 s
+
+    assert not client.get(f"{base_url}/r1").ok
+
+    assert _Handler.hits == ["/r1", "/r2", "/fail", "/r1", "/r2", "/fail"]
+    assert client.attempts_made == 6
+    assert min(_gaps()) >= 0.05 - _JITTER, _gaps()
+
+
+def test_pacing_spans_logical_requests_and_their_hops_up_to_the_cap(base_url):
+    _Handler.chain = {f"/p{i}": f"/q{i}" for i in range(10)}
+    client = _client(rate_limit_rps=20.0, max_requests=6)
+
+    for i in range(10):
+        try:
+            client.get(f"{base_url}/p{i}")
+        except MaxRequestsExceededError:
+            break
+
+    assert len(_Handler.hits) == 6 == client.attempts_made
+    assert min(_gaps()) >= 0.05 - _JITTER, _gaps()
+
+
+def test_a_redirect_refused_by_the_budget_is_never_waited_for(base_url):
+    """Budget is checked before the rate-limit wait: a GET that will not be
+    sent costs no time."""
+    _Handler.chain = {"/a": "/ok"}
+    client = _client(rate_limit_rps=2.0, max_requests=1)  # 0.5 s spacing
+
+    started = time.monotonic()
+    result = client.get(f"{base_url}/a")
+    elapsed = time.monotonic() - started
+
+    assert result.outcome is FetchOutcome.ERROR
+    assert _Handler.hits == ["/a"]
+    assert elapsed < 0.4, elapsed
+
+
+def test_a_disallowed_redirect_is_refused_without_waiting_or_connecting(base_url):
+    client = _client(rate_limit_rps=2.0)  # 0.5 s spacing
+
+    started = time.monotonic()
+    result = client.get(f"{base_url}/to-disallowed")
+    elapsed = time.monotonic() - started
+
+    assert result.outcome is FetchOutcome.BLOCKED
+    assert _DisallowedHandler.hits == []
+    assert client.attempts_made == 1
+    assert elapsed < 0.4, elapsed
