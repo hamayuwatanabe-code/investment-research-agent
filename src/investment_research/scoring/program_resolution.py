@@ -45,6 +45,55 @@ _LEAD_MARKER_RE = re.compile(
 )
 
 
+#: Phase 4.3L: a prose disclosure that can change WHICH programme is current
+#: -- a reported primary-endpoint outcome, a discontinuation, a strategic
+#: review, or a lost pivotal status. A lead/current/pivotal description
+#: dated before (or on the same day as) any such disclosure no longer
+#: proves the current programme. Deliberately broad: a false positive only
+#: makes the resolution UNRESOLVED (findings stay provisional and block),
+#: while a miss would let a stale description scope a real failure on
+#: another trial down to a "different programme" K1. Registry status
+#: lines ("overall status is TERMINATED") are NOT matched -- a terminated
+#: historical trial does not, by itself, say anything about the lead.
+_SUPERSEDING_DISCLOSURE_RE = re.compile(
+    r"(?i)"
+    r"\b(?:did\s+not|didn't|failed\s+to|does\s+not|fails\s+to)\s+(?:meet|achieve|reach|demonstrate)\b"
+    r"[^.]{0,80}\bendpoint"
+    r"|\bmiss(?:ed|es)\b[^.]{0,60}\bendpoint"
+    r"|\b(?:met|achieved)\b[^.]{0,40}\bprimary\s+(?:efficacy\s+)?endpoint"
+    r"|\bprimary\s+(?:efficacy\s+)?endpoint\b[^.]{0,60}\b(?:was|were)\s+(?:not\s+)?(?:met|achieved)"
+    r"|\bprimary\s+(?:efficacy\s+)?endpoint\b[^.]{0,80}\bnot\s+statistically\s+significant"
+    r"|\b(?:discontinu\w*|terminat\w*|halt\w*|suspend\w*|wind(?:ing)?\s+down|deprioriti[sz]\w*)\b"
+    r"[^.]{0,60}\b(?:program|programme|trial|study|development)\b"
+    r"|\bstrategic\s+(?:review|alternatives|options|re-?prioriti[sz]ation)\b"
+    r"|\bexplor\w*\s+(?:all\s+)?(?:strategic\s+)?(?:options|alternatives)\b"
+    r"|\bno\s+longer\b[^.]{0,60}\b(?:pivotal|registrational|lead)\b"
+)
+
+def is_superseding_disclosure(fact: Fact) -> bool:
+    """Whether ``fact`` reports something that can change WHICH programme
+    is current (see ``_SUPERSEDING_DISCLOSURE_RE``) -- read from its claim
+    and, when a string, its value (an issuer-8-K fact carries its
+    classifier's reading there; research/sec_material_8k.py)."""
+    value = fact.value if isinstance(fact.value, str) else ""
+    return bool(_SUPERSEDING_DISCLOSURE_RE.search(f"{fact.claim} {value}"))
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _disclosure_date(fact: Fact) -> str | None:
+    """The latest ISO date known for a fact (event, publication, filing,
+    effective) -- when it was said, as best the record shows. ``None``
+    when no date is known: such a fact cannot be placed in time."""
+    dates = [
+        value[:10]
+        for value in (fact.event_date, fact.publication_date, fact.filing_date, fact.effective_date)
+        if value and value != UNKNOWN and _ISO_DATE_RE.match(value)
+    ]
+    return max(dates) if dates else None
+
+
 @dataclass(frozen=True)
 class ProgramCandidate:
     """One clinical programme (trial identifier) found in the evidence."""
@@ -150,11 +199,19 @@ def resolve_current_program(facts: Sequence[Fact]) -> ProgramResolution:
     2. Exactly one candidate is explicitly described (by the company or a
        registry entry) as lead/current/pivotal/registrational -> that one,
        regardless of its status (a genuinely terminated CURRENT programme is
-       still the current programme).
-    3. Otherwise, if exactly one candidate's most recent evidence date is
-       unambiguously later than every other candidate's -> that one, as a
-       recency tiebreaker.
-    4. Otherwise unresolved: multiple candidates, no way to prefer one.
+       still the current programme) -- UNLESS a superseding disclosure (a
+       reported primary-endpoint outcome, a discontinuation, a strategic
+       review, a lost pivotal status; see ``_SUPERSEDING_DISCLOSURE_RE``)
+       is dated on or after the latest such description, or cannot be
+       dated. Then the description no longer proves what is current.
+    3. Otherwise unresolved: multiple candidates, no way to prove one.
+
+    Phase 4.3L removed the former recency tiebreaker ("the candidate with
+    the latest evidence date"): registry ``event_date`` is the PLANNED
+    primary completion date, so a newly registered trial always won it, and
+    a wrong choice scoped a real primary-endpoint failure on another trial
+    down to a K1 "different programme" finding that no longer blocked the
+    Action. Recency alone never proves which programme is current.
     """
     clinical = [f for f in facts if f.category in (FactCategory.CLINICAL, FactCategory.SCIENCE)]
     by_trial: dict[str, list[Fact]] = {}
@@ -174,6 +231,11 @@ def resolve_current_program(facts: Sequence[Fact]) -> ProgramResolution:
             rationale="no trial identifier found anywhere in the clinical evidence"
         )
 
+    #: Latest date of each candidate's lead/current/pivotal description
+    #: (None: at least one such description, none of them datable).
+    marker_dates: dict[str, str | None] = {}
+    superseding = [f for f in facts if is_superseding_disclosure(f)]
+
     candidates: list[ProgramCandidate] = []
     for trial_id in order:
         trial_facts = by_trial[trial_id]
@@ -189,6 +251,12 @@ def resolve_current_program(facts: Sequence[Fact]) -> ProgramResolution:
                 phase = fact.value
             if _LEAD_MARKER_RE.search(fact.claim):
                 has_marker = True
+                when = _disclosure_date(fact)
+                previous = marker_dates.get(trial_id)
+                if trial_id not in marker_dates or (
+                    when is not None and (previous is None or when > previous)
+                ):
+                    marker_dates[trial_id] = when
             if fact.event_date and fact.event_date != UNKNOWN and (
                 most_recent == UNKNOWN or fact.event_date > most_recent
             ):
@@ -218,43 +286,45 @@ def resolve_current_program(facts: Sequence[Fact]) -> ProgramResolution:
     marked = [c for c in candidates if c.has_lead_marker]
     if len(marked) == 1:
         chosen = marked[0]
-        return ProgramResolution(
-            trial_id=chosen.trial_id,
-            status=chosen.status,
-            phase=chosen.phase,
-            relevance_unresolved=False,
-            rationale=(
-                f"{chosen.trial_id} is explicitly described in the evidence as the "
-                "lead/current/pivotal/registrational programme"
-            ),
-            candidates=tuple(candidates),
-        )
-
-    if not marked:
-        dated = [c for c in candidates if c.most_recent_date != UNKNOWN]
-        dated.sort(key=lambda c: c.most_recent_date, reverse=True)
-        if len(dated) >= 1 and (len(dated) == 1 or dated[0].most_recent_date > dated[1].most_recent_date):
-            newest = dated[0]
+        marker_date = marker_dates.get(chosen.trial_id)
+        superseded_by = [
+            f for f in superseding
+            if marker_date is None
+            or (when := _disclosure_date(f)) is None
+            or when >= marker_date
+        ]
+        if not superseding or not superseded_by:
             return ProgramResolution(
-                trial_id=newest.trial_id,
-                status=newest.status,
-                phase=newest.phase,
+                trial_id=chosen.trial_id,
+                status=chosen.status,
+                phase=chosen.phase,
                 relevance_unresolved=False,
                 rationale=(
-                    f"{newest.trial_id} has the most recent evidence dates among "
-                    f"{len(candidates)} clinical programmes found, with no explicit lead "
-                    "designation for any of them"
+                    f"{chosen.trial_id} is explicitly described in the evidence as the "
+                    "lead/current/pivotal/registrational programme"
                 ),
                 candidates=tuple(candidates),
             )
+        return ProgramResolution(
+            relevance_unresolved=True,
+            rationale=(
+                f"{chosen.trial_id}'s lead/current/pivotal description "
+                f"(latest dated {marker_date or 'UNKNOWN'}) is superseded by "
+                f"{len(superseded_by)} later or undatable disclosure(s) reporting a trial "
+                "outcome, discontinuation, strategic review or lost pivotal status "
+                f"({', '.join(f.fact_id for f in superseded_by[:5])}) -- the current "
+                "thesis-relevant programme cannot be proven from evidence"
+            ),
+            candidates=tuple(candidates),
+        )
 
     return ProgramResolution(
         relevance_unresolved=True,
         rationale=(
             f"{len(candidates)} distinct clinical programmes in evidence "
             f"({', '.join(c.trial_id for c in candidates)}) with no unambiguous lead "
-            "designation or recency signal -- the current thesis-relevant programme could "
-            "not be determined from evidence"
+            "designation -- the current thesis-relevant programme could not be determined "
+            "from evidence (recency alone never decides it)"
         ),
         candidates=tuple(candidates),
     )

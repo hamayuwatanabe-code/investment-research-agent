@@ -131,6 +131,43 @@ _LITERATURE_BRIDGE_COLLECTOR_LABEL = "literature_evidence_projection"
 #: them from. A dedicated test asserts the naming still holds.
 _LITERATURE_RAW_FACT_NOTES_PREFIX = "collected_by=literature_"
 
+#: Phase 4.3L: must equal ``research.sec_material_8k.MATERIAL_8K_COLLECTOR``
+#: / ``UNVERIFIED_PREFIX`` exactly -- duplicated (not imported), like
+#: ``_LITERATURE_BRIDGE_COLLECTOR_LABEL`` above, so this module gains no
+#: import edge onto the SEC document/HTTP code. A test asserts they match.
+_MATERIAL_8K_COLLECTOR_LABEL = "sec_material_8k"
+_UNVERIFIED_MATERIAL_8K_PREFIX = "UNVERIFIED MATERIAL 8-K:"
+_SEC_EDGAR_COLLECTOR_LABEL = "sec_edgar"
+
+
+def _material_8k_blocking_reasons(
+    collector_summaries: Sequence[Mapping[str, Any]], *, restored: bool,
+) -> list[str]:
+    """Phase 4.3L: every material 8-K in scope that was NOT fully read --
+    and therefore cannot be shown not to report a failed trial or a changed
+    strategy -- blocks the action label. ``collector_summaries`` are this
+    invocation's CollectionResults on a fresh run, or the restored collect
+    snapshot's persisted per-collector summaries on a resume (both carry
+    ``collector`` and ``errors``). A RESTORED snapshot whose collecting
+    invocation used the live SEC collector but has no material-8-K entry at
+    all (written before Phase 4.3L) never had any 8-K body read: that is
+    unverified too, never read as "nothing material was filed"."""
+    reasons = [
+        str(error)
+        for summary in collector_summaries
+        if summary.get("collector") == _MATERIAL_8K_COLLECTOR_LABEL
+        for error in (summary.get("errors") or [])
+        if str(error).startswith(_UNVERIFIED_MATERIAL_8K_PREFIX)
+    ]
+    labels = {summary.get("collector") for summary in collector_summaries}
+    if restored and _SEC_EDGAR_COLLECTOR_LABEL in labels and _MATERIAL_8K_COLLECTOR_LABEL not in labels:
+        reasons.append(
+            f"{_UNVERIFIED_MATERIAL_8K_PREFIX} the restored collection used the SEC filing list "
+            "but read no 8-K body (it predates Phase 4.3L), so recent material 8-K "
+            "disclosures are UNVERIFIED for this run"
+        )
+    return reasons
+
 
 def _literature_incomplete_blocking_reasons(
     collection_results: Sequence[CollectionResult],
@@ -1861,6 +1898,26 @@ class Pipeline:
             ):
                 if reason not in literature_blocking_reasons:
                     literature_blocking_reasons.append(reason)
+        # Phase 4.3L: material 8-K bodies that were in scope but not fully
+        # read. Judged from the evidence actually used: this invocation's
+        # collection on a fresh run, the restored collect snapshot's own
+        # per-collector record on a resume (never this invocation's fresh
+        # fetch, whose facts a resume does not use). The snapshot-
+        # unavailable path already fails closed and adds nothing here.
+        if skip_collect:
+            material_8k_reasons = (
+                _material_8k_blocking_reasons(collect_snapshot.collectors, restored=True)
+                if collect_snapshot is not None and not snapshot_unavailable
+                else []
+            )
+        else:
+            material_8k_reasons = _material_8k_blocking_reasons(
+                [{"collector": c.collector, "errors": c.errors} for c in collection_results],
+                restored=False,
+            )
+        for reason in material_8k_reasons:
+            if reason not in literature_blocking_reasons:
+                literature_blocking_reasons.append(reason)
         blocking_reasons.extend(literature_blocking_reasons)
         if literature_blocking_reasons:
             # Without this, a run whose ONLY incompleteness is Literature's

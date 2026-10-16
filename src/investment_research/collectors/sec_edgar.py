@@ -111,6 +111,14 @@ class SecEdgarCollector:
     def __init__(self, http: HttpClient, *, max_filings: int = 60) -> None:
         self.http = http
         self.max_filings = max_filings
+        #: Phase 4.3L: set by :meth:`collect` ONLY from a successfully
+        #: fetched and parsed submissions payload -- the resolved CIK and
+        #: that payload's ``filings.recent`` block, so the material-8-K
+        #: body collector can select candidates without fetching the
+        #: submissions a second time. ``None`` whenever that payload was
+        #: not obtained: never guessed, never defaulted to "no filings".
+        self.resolved_cik: int | None = None
+        self.recent_filings: dict[str, Any] | None = None
 
     # -- ticker -> CIK -----------------------------------------------------
     def _fetch_and_resolve_cik(
@@ -246,6 +254,10 @@ class SecEdgarCollector:
             out.errors.append("submissions payload was not a JSON object")
             return out
 
+        recent = (payload.get("filings") or {}).get("recent")
+        if isinstance(recent, dict):
+            self.resolved_cik = cik
+            self.recent_filings = recent
         out.raw_facts.extend(self._filings_to_facts(ticker, cik, payload, out))
         return out
 

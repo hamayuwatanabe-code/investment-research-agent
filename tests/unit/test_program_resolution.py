@@ -116,7 +116,12 @@ def test_a_genuinely_terminated_current_lead_trial_is_still_resolved_as_current(
     assert resolution.status == "TERMINATED"
 
 
-def test_recency_breaks_a_tie_when_no_explicit_lead_marker_exists():
+def test_recency_alone_no_longer_breaks_a_tie_when_no_explicit_lead_marker_exists():
+    """Phase 4.3L: the former recency tiebreaker is gone. Registry
+    ``event_date`` is the planned primary completion date, so "most
+    recent" picked whichever trial was registered last -- and a wrong pick
+    scoped a real failure on another trial down to a K1 "different
+    programme" finding (see test_program_resolution_supersession.py)."""
     facts = [
         make_fact(
             f"{OLD_TRIAL} overall status is COMPLETED",
@@ -132,8 +137,9 @@ def test_recency_breaks_a_tie_when_no_explicit_lead_marker_exists():
         ),
     ]
     resolution = resolve_current_program(facts)
-    assert resolution.trial_id == CURRENT_TRIAL
-    assert resolution.relevance_unresolved is False
+    assert resolution.trial_id == "UNKNOWN"
+    assert resolution.relevance_unresolved is True
+    assert "recency alone never decides it" in resolution.rationale
 
 
 def test_ambiguous_multiple_programmes_with_no_signal_are_left_unresolved():

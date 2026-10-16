@@ -462,6 +462,20 @@ Stated plainly rather than left to be discovered:
   recorded its explicit-literature state, fails closed: no re-fetch, no action
   label. Take `RUN_ID` from `--json`'s `run_id` or the report's `Run ID` line —
   the log file name uses a different id.
+- **SEC filing bodies: material 8-Ks only.** A `--live` run reads the bodies of 8-K/8-K/A
+  filings with items 1.02, 2.05, 7.01 or 8.01 (or no items stated) from the last 365 days,
+  newest first, at most 6 per run with up to 2 EX-99 exhibits each (at most 24 actual
+  outbound GETs to `www.sec.gov`, retries and redirects included, 2 requests/second). An
+  issuer statement that a primary endpoint was or was not met, or that a strategic review
+  or programme change began, becomes a `COMPANY_CLAIM` fact quoting the filing. Any
+  in-scope 8-K that is not fully read (beyond the cap, out of budget, failed or invalid
+  body, no `IRA_SEC_USER_AGENT`, ambiguous or contradictory wording) is reported as
+  `UNVERIFIED MATERIAL 8-K` and withholds the action label. Earlier 8-Ks, other item codes
+  (e.g. 2.02 earnings releases) and 10-K/10-Q bodies are not read.
+- **The current programme is never chosen by recency.** When more than one clinical
+  programme is in evidence, only an explicit lead/current/pivotal description that no later
+  disclosure (a reported result, discontinuation, strategic review) supersedes decides it;
+  otherwise it stays unresolved and per-trial kill findings stay blocking.
 - **Insider detail is shallow.** Without Form 4 XML parsing, the individual, the
   role and the price are usually not in the filing text; they are stored as
   `UNKNOWN` rather than inferred.
