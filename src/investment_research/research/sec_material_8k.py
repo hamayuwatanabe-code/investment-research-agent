@@ -17,7 +17,7 @@ only ever created from a fetched, validated body):
   is selected too (its items cannot be judged, so it is not excluded);
 * filed within the last ``LOOKBACK_DAYS`` (365: one full annual reporting
   cycle);
-* newest first, at most ``MAX_FILINGS`` (6) read per run.
+* newest first, at most ``MAX_FILINGS`` (8) read per run.
 
 What this deliberately does NOT cover, and says so in the run's notes:
 8-Ks outside the look-back window, other item codes (notably 2.02 earnings
@@ -31,7 +31,7 @@ blocking frequency, never safety.
 
 Traffic: per filing at most ``GETS_PER_FILING`` (4) GETs -- the accession's
 ``index.json``, the primary document, and up to ``MAX_EXHIBITS_PER_FILING``
-(2) EX-99 exhibits -- so the run budget is ``MAX_OUTBOUND_GETS`` (24)
+(2) EX-99 exhibits -- so the run budget is ``MAX_OUTBOUND_GETS`` (32 = 8 x 4)
 ACTUAL outbound GETs. The caller supplies an ``AllowlistedHttpClient``
 (www.sec.gov only) whose ``max_requests`` counts retries and followed
 redirects as GETs too (Phase 4.3K), rate-limits every GET, validates
@@ -83,7 +83,7 @@ MATERIAL_8K_COLLECTOR = "sec_material_8k"
 MATERIAL_8K_FORMS = frozenset({"8-K", "8-K/A"})
 MATERIAL_8K_ITEMS = frozenset({"1.02", "2.05", "7.01", "8.01"})
 LOOKBACK_DAYS = 365
-MAX_FILINGS = 6
+MAX_FILINGS = 8
 MAX_EXHIBITS_PER_FILING = 2
 GETS_PER_FILING = 2 + MAX_EXHIBITS_PER_FILING
 MAX_OUTBOUND_GETS = MAX_FILINGS * GETS_PER_FILING
@@ -212,6 +212,22 @@ _INNER_HYPOTHETICAL_RE = re.compile(
 )
 _REGULATOR_VIEW_RULES = ("endpoint_insufficient_for_efficacy", "endpoint_not_accepted")
 _REGULATOR_STATUS_RULES = ("registrational_status_withdrawn",)
+_REGULATOR_CONSULTATION_RULES = ("endpoint_agreement_not_reached",)
+#: A financing whose later tranche / closing depends on a regulatory step
+#: (an FDA agreement, the primary endpoint). A contractual condition, not a
+#: result, so the forward-looking qualifier list does not apply -- only the
+#: risk-factor vocabulary does.
+_FINANCING_RE = re.compile(
+    r"(?i)\b(?:tranche|financing|private\s+placement|purchase\s+agreement|warrants?"
+    r"|funding|gross\s+proceeds)\b"
+)
+_FINANCING_CONDITION_RE = re.compile(
+    r"(?i)\b(?:condition(?:ed|al)?|contingent|milestone|subject\s+to)\b"
+)
+_FINANCING_REGULATORY_RE = re.compile(r"(?i)\b(?:FDA|primary\s+(?:efficacy\s+)?end\s?-?point)\b")
+_RISK_TEXT_RE = re.compile(
+    r"(?i)\b(?:risks?|possibility|possible|may|might|could|assurance|uncertain\w*|forward-looking)\b"
+)
 #: The company reporting how a consultation with the regulator ended (it
 #: agreed, no agreement was reached, an alternative endpoint was discussed).
 #: That is neither the regulator's own document nor a trial result, and it
@@ -276,6 +292,19 @@ def _reports_regulator_status(sentence: str) -> bool:
     return _reports_regulator(sentence, _REGULATOR_STATUS_RULES)
 
 
+def _reports_consultation_outcome(sentence: str) -> bool:
+    return _reports_regulator(sentence, _REGULATOR_CONSULTATION_RULES)
+
+
+def _financing_contingent_on_regulatory(sentence: str) -> bool:
+    return bool(
+        _FINANCING_RE.search(sentence)
+        and _FINANCING_CONDITION_RE.search(sentence)
+        and _FINANCING_REGULATORY_RE.search(sentence)
+        and not _RISK_TEXT_RE.search(sentence)
+    )
+
+
 def _qualified(sentence: str, match: re.Match[str]) -> bool:
     """True when the clause before the outcome phrase is conditional or
     forward-looking (same sentence, nearest 80 characters)."""
@@ -285,6 +314,10 @@ def _qualified(sentence: str, match: re.Match[str]) -> bool:
 @dataclass(frozen=True)
 class DisclosureStatement:
     #: PRIMARY_ENDPOINT_NOT_MET / PRIMARY_ENDPOINT_MET / STRATEGIC_CHANGE /
+    #: REGULATOR_CONSULTATION_OUTCOME_REPORTED (issuer's report that it and
+    #: the regulator did not agree on an endpoint; a REGULATORY company
+    #: claim) / FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE (a financing
+    #: condition tied to an FDA / endpoint step) /
     #: REGULATOR_STATUS_CHANGE_REPORTED (issuer's report that the regulator no
     #: longer treats the trial as pivotal/registrational) /
     #: AMBIGUOUS_REGULATOR_STATEMENT (a consultation outcome that is not
@@ -313,6 +346,7 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
         regulator_view = _reports_regulator_view(sentence)
         regulator_status = _reports_regulator_status(sentence)
         consultation = _consultation_outcome(sentence)
+        consultation_outcome = _reports_consultation_outcome(sentence)
         overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(
             not_met or met or regulator_view or regulator_status
         )
@@ -337,8 +371,20 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
             and not any(_qualified(sentence, m) for m in _PRIMARY_RE.finditer(sentence))
         ):
             statements.append(DisclosureStatement("AMBIGUOUS_PRIMARY_ENDPOINT", sentence))
-        if consultation:
+        if consultation_outcome:
+            statements.append(
+                DisclosureStatement("REGULATOR_CONSULTATION_OUTCOME_REPORTED", sentence)
+            )
+        elif consultation:
             statements.append(DisclosureStatement("AMBIGUOUS_REGULATOR_STATEMENT", sentence))
+        if (
+            len(sentence) <= _MAX_CLAIM_CHARS
+            and "forward-looking" not in sentence.lower()
+            and _financing_contingent_on_regulatory(sentence)
+        ):
+            statements.append(
+                DisclosureStatement("FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE", sentence)
+            )
         if (
             not regulator_status
             and len(sentence) <= _MAX_CLAIM_CHARS
@@ -363,11 +409,19 @@ _FACT_VALUE = {
     "REGULATOR_STATUS_CHANGE_REPORTED": (
         "regulatory status change reported by the issuer (FDA document not retrieved)"
     ),
+    "REGULATOR_CONSULTATION_OUTCOME_REPORTED": (
+        "regulatory consultation outcome reported by the issuer (FDA document not retrieved)"
+    ),
+    "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE": (
+        "financing condition tied to a regulatory step (issuer 8-K disclosure)"
+    ),
 }
 _FACT_CATEGORY = {
     "STRATEGIC_CHANGE": FactCategory.OTHER,
     "REGULATOR_VIEW_REPORTED": FactCategory.REGULATORY,
     "REGULATOR_STATUS_CHANGE_REPORTED": FactCategory.REGULATORY,
+    "REGULATOR_CONSULTATION_OUTCOME_REPORTED": FactCategory.REGULATORY,
+    "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE": FactCategory.LIQUIDITY,
 }
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,

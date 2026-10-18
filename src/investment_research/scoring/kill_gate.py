@@ -34,6 +34,7 @@ from ..schemas.evaluation import KillAssessment, KillFinding, KillGateResult
 from ..schemas.fact import Fact
 from .program_resolution import NCT_RE
 from .regulator_language import (
+    CONSULTATION_NO_AGREEMENT,
     ENDPOINT_NOT_ACCEPTED,
     ENDPOINT_NOT_SUFFICIENT,
     REGISTRATIONAL_STATUS_WITHDRAWN,
@@ -93,6 +94,17 @@ KILL_RULES: tuple[KillRule, ...] = (
         KillLevel.K3,
         "The trial as designed cannot support approval. Every downstream valuation of the "
         "programme assumes an approval path that the regulator has said does not exist.",
+    ),
+    KillRule(
+        "endpoint_agreement_not_reached",
+        KillCategory.REGULATORY_KILL,
+        "Company and regulator did not agree on the primary endpoint",
+        _rx(CONSULTATION_NO_AGREEMENT),
+        KillLevel.K3,
+        KillLevel.K2,
+        "Without an endpoint the regulator accepts, the path from the current trial to an "
+        "approval is undefined. This is the issuer's report of a consultation, not the "
+        "regulator's own document, so it stays provisional until that document is read.",
     ),
     KillRule(
         "additional_trial_required",

@@ -217,7 +217,7 @@ def test_equivalence_key_is_placeholder_and_case_and_whitespace_insensitive():
 
 # --- untouched aggregate gates ----------------------------------------------
 def test_kill_rules_count_is_unchanged_at_19():
-    assert len(KILL_RULES) == 19
+    assert len(KILL_RULES) == 20
 
 
 def test_required_research_domains_unchanged_at_6():

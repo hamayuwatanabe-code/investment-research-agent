@@ -892,4 +892,4 @@ def test_source_routing_catalog_and_catalog_invariants_unchanged():
 def test_kill_rules_count_unchanged():
     from investment_research.scoring.kill_gate import KILL_RULES
 
-    assert len(KILL_RULES) == 19
+    assert len(KILL_RULES) == 20

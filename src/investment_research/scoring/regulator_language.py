@@ -47,3 +47,11 @@ REGISTRATIONAL_STATUS_WITHDRAWN = (
     r"|\b(?:does not|did not)\s+(?:consider|regard|view|call|describe|refer to)\b"
     r"[^.]{0,80}\b(?:pivotal|registrational)\b"
 )
+#: The company reporting that it and the regulator did NOT agree on an
+#: endpoint. ("could not" is deliberately absent: it reads as a hypothetical.)
+CONSULTATION_NO_AGREEMENT = (
+    rf"\b(?:(?:was|were)\s+unable|unable|not\s+able|failed|did\s+not|have\s+not|has\s+not)\b"
+    rf"[^.;]{{0,40}}\bagree(?:ment|d)?\b[^.]{{0,120}}\b{ENDPOINT_TERM}"
+    rf"|\bno\s+agreement\b[^.]{{0,120}}\b{ENDPOINT_TERM}"
+    rf"|\bdisagree\w*[^.]{{0,120}}\b{ENDPOINT_TERM}"
+)

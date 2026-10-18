@@ -51,7 +51,7 @@ def test_a_grouping_into_acquisition_tasks_keeps_every_original_row():
 
 
 def test_a_kill_rules_and_required_domains_are_untouched():
-    assert len(KILL_RULES) == 19
+    assert len(KILL_RULES) == 20
     assert len(REQUIRED_RESEARCH_DOMAINS) == 6
 
 

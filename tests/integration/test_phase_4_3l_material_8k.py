@@ -357,7 +357,7 @@ def _wire_response(url: str, status: int, body: str = "", location: str = ""):
 def test_sec_document_client_configuration():
     client = cli.build_sec_document_client("Synthetic Research ops@example.org")
     assert client.allowed_hosts == frozenset({"www.sec.gov"})
-    assert client.max_requests == m8k.MAX_OUTBOUND_GETS == 24
+    assert client.max_requests == m8k.MAX_OUTBOUND_GETS == 32
     assert client.max_retries == 1
     assert client.rate_limit_rps == 2.0
     assert client.out_dir is None
@@ -756,26 +756,32 @@ def test_c2_appropriate_wording_in_the_pipeline_is_a_provisional_regulatory_k5_b
     assert result.verdict.action is None
 
 
-def test_c2_company_agreement_and_no_alternative_endpoint_fails_closed_with_a_reason():
+def test_c2_company_agreement_alone_fails_closed_with_a_reason():
     """The company agreeing with the FDA is not an FDA document and not a
-    trial result: no fact is invented, and the reason says why."""
-    assert _kinds(AGREES_NO_ALTERNATIVE) == ["AMBIGUOUS_REGULATOR_STATEMENT"]
-    result, _ = _collect(_routes(_ex99(AGREES_NO_ALTERNATIVE)))
+    trial result, and says nothing about the outcome: no fact is invented,
+    and the reason says why. (Correction 3: a stated failure to AGREE on an
+    endpoint is different, and is kept as a company-reported fact.)"""
+    sentence = "The Company agrees with the FDA's view."
+    assert _kinds(sentence) == ["AMBIGUOUS_REGULATOR_STATEMENT"]
+    result, _ = _collect(_routes(_ex99(sentence)))
     assert result.raw_facts == []
     assert result.outcome is FetchOutcome.ERROR
     (error,) = result.errors
     assert error.startswith(m8k.UNVERIFIED_PREFIX) and ACC in error
     assert "regulator" in error and "cannot be classified" in error
-    assert "unable to reach agreement" in error  # the sentence is quoted, not paraphrased
+    assert "agrees with the FDA" in error  # the sentence is quoted, not paraphrased
 
 
-def test_c2_view_plus_company_agreement_keeps_the_view_and_still_fails_closed_on_the_rest():
+def test_c2_view_plus_company_agreement_keeps_the_view_and_the_consultation_outcome():
     sentence = (
         "The Company agrees with the FDA's assessment that RVEF is not an appropriate endpoint to "
         "demonstrate efficacy, and the Company and the FDA were unable to reach agreement on an "
         "alternative primary endpoint."
     )
-    assert _kinds(sentence) == ["REGULATOR_VIEW_REPORTED", "AMBIGUOUS_REGULATOR_STATEMENT"]
+    assert _kinds(sentence) == [
+        "REGULATOR_VIEW_REPORTED", "REGULATOR_CONSULTATION_OUTCOME_REPORTED",
+    ]
+    assert _kinds(AGREES_NO_ALTERNATIVE) == ["REGULATOR_CONSULTATION_OUTCOME_REPORTED"]
 
 
 @pytest.mark.parametrize("sentence", [P_PIVOTAL, P_PIVOTAL_WITH_ENDPOINT, P_REGISTRATIONAL])
@@ -824,3 +830,145 @@ def test_c2_future_hypothetical_and_company_only_statements_are_not_classified(s
 def test_c2_an_actual_primary_endpoint_failure_is_still_only_a_trial_result():
     assert _kinds("The SYN-301 trial did not meet its primary endpoint.") == ["PRIMARY_ENDPOINT_NOT_MET"]
     assert _kinds("Topline results showed the primary endpoint was not met.") == ["PRIMARY_ENDPOINT_NOT_MET"]
+
+
+# =============================================================================
+# Correction 3 (all text SYNTHETIC; the real filings were not read here)
+# =============================================================================
+def _march_rows(extra: int):
+    """One filing per day from newest to oldest, the OLDEST being the
+    financing 8-K that a cap of six pushed out of reach."""
+    rows = [("8-K", f"2026-09-{d:02d}", "7.01,8.01", f"0009900001-26-0004{d:02d}", "x.htm")
+            for d in range(20, 20 - extra, -1)]
+    rows.append(("8-K", "2026-03-12", "1.01,3.02,8.01", "0009900001-26-000430", "march.htm"))
+    return rows
+
+
+def test_c3_a_year_of_filings_around_one_clinical_event_still_reaches_the_older_financing_8k():
+    """Six newer 8-Ks used to push the 2026-03-12 financing 8-K beyond the cap."""
+    selected, beyond, _ = m8k.select_material_8k_candidates(_recent(*_march_rows(6)), today=TODAY)
+    assert "0009900001-26-000430" in [c.accession for c in selected]
+    assert beyond == []
+
+
+def test_c3_the_cap_and_the_actual_get_budget_are_stated_and_consistent():
+    assert m8k.MAX_FILINGS == 8
+    assert m8k.MAX_OUTBOUND_GETS == 32 == m8k.MAX_FILINGS * m8k.GETS_PER_FILING
+
+
+def test_c3_beyond_the_new_cap_is_still_an_unverified_blocking_reason_never_dropped():
+    selected, beyond, _ = m8k.select_material_8k_candidates(_recent(*_march_rows(8)), today=TODAY)
+    assert [c.accession for c in beyond] == ["0009900001-26-000430"]  # the oldest
+    result, _ = _collect(routes={}, recent=_recent(*_march_rows(8)))
+    errors = [e for e in result.errors if "0009900001-26-000430" in e]
+    assert errors and "beyond the per-run cap of 8" in errors[0]
+    assert errors[0].startswith(m8k.UNVERIFIED_PREFIX)
+
+
+def test_c3_real_client_actual_gets_never_exceed_32_with_eight_filings_retries_and_redirects(
+    monkeypatch, no_socket,
+):
+    monkeypatch.setattr(cli, "SEC_DOCUMENT_RATE_LIMIT_RPS", 1000.0)
+    wire: list[str] = []
+
+    def fake_https_open(_handler, req):
+        wire.append(req.full_url)
+        if req.full_url.endswith("/index.json") and "redirected" not in req.full_url:
+            return _wire_response(req.full_url, 302, location=req.full_url + "?redirected=1")
+        return _wire_response(req.full_url, 500)
+
+    monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", fake_https_open)
+    rows = [("8-K", f"2026-09-{d:02d}", "8.01", f"0009900001-26-0005{d:02d}", "x.htm") for d in range(1, 10)]
+    client = cli.build_sec_document_client("Synthetic Research ops@example.org")
+    result = m8k.collect_material_8k_disclosures(
+        TICKER, cik=CIK, recent=_recent(*rows), http=client, today=TODAY,
+    )
+    assert len(wire) == client.attempts_made <= 32
+    # nine in scope: eight attempted (all unverified), the oldest beyond the cap
+    assert len([e for e in result.errors if e.startswith(m8k.UNVERIFIED_PREFIX)]) == 9
+    assert any("beyond the per-run cap of 8" in e for e in result.errors)
+    assert result.raw_facts == []
+
+
+CONSULT_NO_AGREEMENT = (
+    "The Company and the FDA were unable to reach agreement on an alternative primary "
+    "endpoint while the trial is ongoing."
+)
+
+
+def test_c3_company_reported_failure_to_agree_on_an_endpoint_is_a_company_claim_fact():
+    assert _kinds(CONSULT_NO_AGREEMENT) == ["REGULATOR_CONSULTATION_OUTCOME_REPORTED"]
+    result, _ = _collect(_routes(_ex99(CONSULT_NO_AGREEMENT)))
+    assert result.errors == [] and result.outcome is FetchOutcome.OK
+    (fact,) = result.raw_facts
+    assert fact.category is FactCategory.REGULATORY and fact.company_claim is True
+    assert fact.claim == CONSULT_NO_AGREEMENT
+    assert fact.source_authority is DocumentAuthority.COMPANY_IR  # never the regulator's document
+    assert fact.source.accession == ACC and fact.source.event_date == "2026-09-16"
+    assert "FDA document not retrieved" in str(fact.value)
+    assert "was not met" not in str(fact.value)
+
+
+def test_c3_the_consultation_fact_is_a_provisional_regulatory_finding_that_blocks_the_action():
+    material, _ = _collect(_routes(_ex99(CONSULT_NO_AGREEMENT)))
+    result, repo = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level >= KillLevel.K3
+    assert regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert regulatory in result.verdict.kill_gate.provisional_major_or_worse
+    assert result.verdict.action is None
+    stored = [f for f in repo.facts_for_resume(result.context.run_id)
+              if f.claim == CONSULT_NO_AGREEMENT]
+    assert len(stored) == 1 and not stored[0].is_decision_grade
+    assert stored[0].evidence_class is EvidenceClass.COMPANY_CLAIM
+
+
+@pytest.mark.parametrize(
+    ("sentence", "kinds"),
+    [
+        # agreement with the FDA alone says nothing about the outcome: still fail-closed
+        ("The Company agrees with the FDA's view.", ["AMBIGUOUS_REGULATOR_STATEMENT"]),
+        # future / hypothetical / hope / plan
+        ("We hope to reach agreement with the FDA on an alternative primary endpoint.", []),
+        ("If we are unable to reach agreement with the FDA on a primary endpoint, we may "
+         "discontinue the program.", []),
+        ("The Company plans to seek FDA agreement on an alternative primary endpoint.", []),
+        ("There can be no assurance that we will reach agreement with the FDA on the endpoint.", []),
+        # a company disagreement with no regulator is not a regulatory consultation outcome
+        ("The investors were unable to agree on an alternative primary endpoint for the plan.", []),
+    ],
+)
+def test_c3_other_consultation_wording_stays_fail_closed_or_unclassified(sentence, kinds):
+    assert _kinds(sentence) == kinds
+
+
+FINANCING_CONTINGENT = (
+    "The second tranche of the financing is conditioned upon the Company reaching agreement "
+    "with the FDA on the primary endpoint."
+)
+
+
+def test_c3_financing_conditioned_on_the_regulatory_endpoint_is_kept_as_a_company_claim():
+    assert _kinds(FINANCING_CONTINGENT) == ["FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"]
+    result, _ = _collect(_routes(_ex99(FINANCING_CONTINGENT)))
+    (fact,) = result.raw_facts
+    assert result.errors == []
+    assert fact.category is FactCategory.LIQUIDITY and fact.company_claim is True
+    assert fact.claim == FINANCING_CONTINGENT
+    assert fact.source.accession == ACC and fact.source_authority is DocumentAuthority.COMPANY_IR
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "The Company closed a financing of $10 million in gross proceeds.",
+        "The tranche will be funded on the closing date.",
+        "The FDA granted Fast Track designation to the program.",
+        "There is a risk that financing could be conditioned on FDA agreement on the primary endpoint.",
+    ],
+)
+def test_c3_ordinary_financing_or_regulatory_sentences_are_not_milestone_facts(sentence):
+    assert _kinds(sentence) == []

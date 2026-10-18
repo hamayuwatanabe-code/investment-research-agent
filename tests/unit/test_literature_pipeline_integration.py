@@ -1376,7 +1376,7 @@ def test_catalog_invariants_unchanged():
 def test_kill_rules_count_unchanged():
     from investment_research.scoring.kill_gate import KILL_RULES
 
-    assert len(KILL_RULES) == 19
+    assert len(KILL_RULES) == 20
 
 
 def test_sec_clinicaltrials_form4_new_adapters_never_imported_by_cli():

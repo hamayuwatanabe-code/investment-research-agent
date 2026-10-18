@@ -45,3 +45,27 @@ def test_regulator_wording_fires_k5(claim):
 )
 def test_benign_wording_does_not_fire(claim):
     assert _regulatory_level(claim) < KillLevel.K3
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The Company and the FDA were unable to reach agreement on an alternative primary endpoint.",
+        "The Company and the FDA did not agree on the primary endpoint.",
+        "There was no agreement with the FDA on an alternative endpoint.",
+    ],
+)
+def test_failure_to_agree_on_the_endpoint_fires_a_provisional_k3(claim):
+    assert _regulatory_level(claim) is KillLevel.K3
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The Company and the FDA reached agreement on the primary endpoint.",
+        "The parties were unable to agree on the dividend policy.",
+        "We hope to reach agreement with the FDA on an alternative primary endpoint.",
+    ],
+)
+def test_agreement_wording_that_is_not_a_failure_on_the_endpoint_does_not_fire(claim):
+    assert _regulatory_level(claim) < KillLevel.K3

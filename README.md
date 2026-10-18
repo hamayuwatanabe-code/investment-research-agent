@@ -464,7 +464,7 @@ Stated plainly rather than left to be discovered:
   the log file name uses a different id.
 - **SEC filing bodies: material 8-Ks only.** A `--live` run reads the bodies of 8-K/8-K/A
   filings with items 1.02, 2.05, 7.01 or 8.01 (or no items stated) from the last 365 days,
-  newest first, at most 6 per run with up to 2 EX-99 exhibits each (at most 24 actual
+  newest first, at most 8 per run with up to 2 EX-99 exhibits each (at most 32 actual
   outbound GETs to `www.sec.gov`, retries and redirects included, 2 requests/second). An
   issuer statement that a primary endpoint was or was not met, or that a strategic review
   or programme change began, becomes a `COMPANY_CLAIM` fact quoting the filing. Any

@@ -121,7 +121,7 @@ def test_company_and_program_scopes_are_kept_separate():
 
 # --- untouched aggregate gates ------------------------------------------------
 def test_kill_rules_and_required_domains_still_19_and_6():
-    assert len(KILL_RULES) == 19
+    assert len(KILL_RULES) == 20
     assert len(REQUIRED_RESEARCH_DOMAINS) == 6
 
 
