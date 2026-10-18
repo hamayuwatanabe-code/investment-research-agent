@@ -36,6 +36,7 @@ from investment_research.research import sec_material_8k as m8k
 from investment_research.schemas.enums import (
     ContentKind,
     DocumentAuthority,
+    EvidenceClass,
     FactCategory,
     FetchOutcome,
     KillCategory,
@@ -573,3 +574,106 @@ def test_the_sec_user_agent_never_appears_in_facts_errors_or_notes(monkeypatch, 
     )
     blob = " ".join([*result.errors, *result.notes, *(f.claim for f in result.raw_facts)])
     assert result.errors and "private-contact@example.org" not in blob
+
+
+# =============================================================================
+# Correction 1: a trial RESULT and an issuer's report of a REGULATOR'S VIEW are
+# different kinds of fact. All sentences below are SYNTHETIC.
+# =============================================================================
+REG_NOT_SUFFICIENT = (
+    "The FDA advised the Company that the primary endpoint, change in SYN-RVEF, is not "
+    "sufficient to demonstrate efficacy."
+)
+REG_NOT_ACCEPTED = (
+    "The FDA does not consider the primary endpoint appropriate to establish effectiveness."
+)
+REGULATOR_EX99 = _ex99(
+    f"The SYN-301 trial ({TRIAL}) did not meet its primary endpoint of change in walking "
+    f"distance at week 52. {REG_NOT_SUFFICIENT} {REG_NOT_ACCEPTED}"
+)
+
+
+@pytest.mark.parametrize(
+    ("sentence", "kinds"),
+    [
+        (REG_NOT_SUFFICIENT, ["REGULATOR_VIEW_REPORTED"]),
+        (REG_NOT_ACCEPTED, ["REGULATOR_VIEW_REPORTED"]),
+        # the trial result is still a trial result
+        ("The SYN-301 trial did not meet its primary endpoint.", ["PRIMARY_ENDPOINT_NOT_MET"]),
+        # future / hypothetical / company expectation: no fact of either kind
+        ("If the FDA advised that the primary endpoint is not sufficient to demonstrate efficacy, "
+         "we may discontinue the program.", []),
+        ("We expect the FDA will advise that the endpoint is not sufficient to demonstrate efficacy.", []),
+        ("The FDA could advise that the endpoint is not sufficient to demonstrate efficacy.", []),
+        ("Whether the FDA would not consider the primary endpoint appropriate is uncertain.", []),
+        ("We believe the FDA will accept the primary endpoint as adequate.", []),
+        ("The Company plans to ask the FDA whether the primary endpoint is acceptable.", []),
+        # a regulator view and a trial result in ONE sentence is never settled
+        ("The trial did not meet its primary endpoint and the FDA advised that the endpoint is "
+         "not sufficient to demonstrate efficacy.", ["AMBIGUOUS_PRIMARY_ENDPOINT"]),
+        # the company's own opinion is not a regulator's view
+        ("The Company believes the endpoint is not sufficient to demonstrate efficacy.", []),
+    ],
+)
+def test_regulator_view_is_a_separate_kind_from_trial_result(sentence, kinds):
+    assert [s.kind for s in m8k.extract_statements(sentence)] == kinds
+
+
+def test_regulator_view_becomes_a_regulatory_company_claim_never_the_regulator():
+    result, _ = _collect(_routes(REGULATOR_EX99))
+    assert result.errors == [] and result.outcome is FetchOutcome.OK
+    regulatory = [f for f in result.raw_facts if f.category is FactCategory.REGULATORY]
+    clinical = [f for f in result.raw_facts if f.category is FactCategory.CLINICAL]
+    assert [f.claim for f in regulatory] == [REG_NOT_SUFFICIENT, REG_NOT_ACCEPTED]
+    assert len(clinical) == 1 and "did not meet" in clinical[0].claim
+    for fact in regulatory:
+        assert fact.company_claim is True
+        assert fact.source_authority is DocumentAuthority.COMPANY_IR  # never REGULATOR
+        assert fact.content_kind is ContentKind.FULL_DOCUMENT
+        assert fact.source.url == f"{BASE}/{EX991}"
+        assert fact.source.accession == ACC
+        assert fact.source.filing_date == "2026-09-23"
+        assert fact.source.event_date == "2026-09-16"
+        assert "not retrieved" in str(fact.value)
+        assert "was not met" not in str(fact.value)  # not a trial-result value
+    assert not result.errors  # nothing was left unclassified
+
+
+def test_pipeline_regulator_view_stays_a_provisional_company_claim_beside_the_trial_failure():
+    material, _ = _collect(_routes(REGULATOR_EX99))
+    result, repo = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+
+    # no unverified blocking reason is left over from an unclassifiable sentence
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5
+    assert regulatory.confirmation is KillConfirmation.PROVISIONAL  # company claim: never CONFIRMED
+    assert regulatory in result.verdict.kill_gate.provisional_major_or_worse
+    # the ELPIS II-type trial failure is unchanged
+    clinical, failed, _ = _failure_findings(result)
+    assert failed and all(f["level"] == str(KillLevel.K5) for f in failed)
+    assert clinical.confirmation is KillConfirmation.PROVISIONAL
+    assert result.verdict.action is None
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    stored = [f for f in repo.facts_for_resume(result.context.run_id) if f.category is FactCategory.REGULATORY
+              and f.claim in (REG_NOT_SUFFICIENT, REG_NOT_ACCEPTED)]
+    assert len(stored) == 2 and not any(f.is_decision_grade for f in stored)
+    assert all(f.evidence_class is EvidenceClass.COMPANY_CLAIM for f in stored)
+
+
+def test_regulator_view_alone_blocks_the_action_without_a_trial_failure_fact():
+    material, _ = _collect(_routes(_ex99(REG_NOT_SUFFICIENT)))
+    result, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5 and regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert result.verdict.action is None
+
+
+def test_regulator_view_reaches_programme_resolution_as_a_superseding_disclosure():
+    material, _ = _collect(_routes(_ex99(REG_NOT_SUFFICIENT)))
+    (fact,) = material.raw_facts
+    assert is_superseding_disclosure(SimpleNamespace(claim=fact.claim, value=fact.value))
+    assert is_superseding_disclosure(SimpleNamespace(claim="x", value=fact.value))

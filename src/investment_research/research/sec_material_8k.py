@@ -196,6 +196,51 @@ _OUTCOME_HINT_RE = re.compile(
     r"|significan\w*|result\w*|outcome\w*|topline|top-line)\b"
 )
 _PRIMARY_RE = re.compile(rf"(?i)\b{_PRIMARY}\b")
+#: The issuer reporting what a REGULATOR said about the primary endpoint
+#: ("FDA advised that ... is not sufficient to demonstrate efficacy"). This
+#: is a different kind of fact from a trial result: it is a COMPANY_CLAIM
+#: about a regulatory consultation, in category REGULATORY, and it stays a
+#: company claim until the regulator's own document is retrieved.
+_REGULATOR_REF_RE = re.compile(
+    r"(?i)\b(?:FDA|Food\s+and\s+Drug\s+Administration|the\s+Agency|EMA|PMDA|MHRA|regulators?)\b"
+)
+#: Wording inside (not before) a regulator-view match that makes it
+#: hypothetical; the match itself is one of the Kill Gate's own regulator
+#: rules, so every fact emitted here is one the gate can read.
+_INNER_HYPOTHETICAL_RE = re.compile(
+    r"(?i)\b(?:if|whether|unless|assum\w*|expect\w*|anticipat\w*|may|might|could|will)\b"
+)
+_REGULATOR_VIEW_RULES = ("endpoint_insufficient_for_efficacy", "endpoint_not_accepted")
+
+
+def _regulator_view_patterns() -> list[re.Pattern[str]]:
+    # Imported lazily: scoring imports are not needed by the other helpers.
+    from ..scoring.kill_gate import KILL_RULES
+
+    return [r.pattern for r in KILL_RULES if r.rule_id in _REGULATOR_VIEW_RULES]
+
+
+def _reports_regulator_view(sentence: str) -> bool:
+    """True when an unqualified sentence reports a regulator's negative view
+    of the endpoint, in wording one of the Kill Gate's regulator rules reads."""
+    ref = _REGULATOR_REF_RE.search(sentence)
+    if ref is None:
+        return False
+    for pattern in _regulator_view_patterns():
+        # Scan from the regulator mention onward so an earlier "endpoint ..."
+        # run cannot swallow the regulator's own wording.
+        for match in pattern.finditer(sentence, ref.start()):
+            text = match.group(0)
+            if text.lower().startswith("would") or _INNER_HYPOTHETICAL_RE.search(text):
+                continue
+            start = min(ref.start(), match.start())
+            if _CONDITIONAL_RE.search(sentence[max(0, start - 80):start]):
+                continue
+            between = sentence[ref.end():match.start()]
+            if _INNER_HYPOTHETICAL_RE.search(between):
+                continue
+            return True
+    return False
 _ABBREVIATIONS = (
     "Inc.", "Corp.", "Co.", "Ltd.", "L.L.C.", "U.S.", "No.", "Nos.", "Dr.", "Mr.", "Ms.",
     "vs.", "e.g.", "i.e.", "approx.", "Ph.D.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.",
@@ -221,6 +266,8 @@ def _qualified(sentence: str, match: re.Match[str]) -> bool:
 @dataclass(frozen=True)
 class DisclosureStatement:
     #: PRIMARY_ENDPOINT_NOT_MET / PRIMARY_ENDPOINT_MET / STRATEGIC_CHANGE /
+    #: REGULATOR_VIEW_REPORTED (issuer's report of a regulator's view; a
+    #: REGULATORY company claim, never a trial result) /
     #: AMBIGUOUS_PRIMARY_ENDPOINT (never becomes a fact)
     kind: str
     sentence: str
@@ -233,11 +280,14 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
             continue
         not_met = [m for m in _NOT_MET_RE.finditer(sentence) if not _qualified(sentence, m)]
         met = [m for m in _MET_RE.finditer(sentence) if not _qualified(sentence, m)]
-        overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(not_met or met)
-        if overlong or (not_met and met):
+        regulator_view = _reports_regulator_view(sentence)
+        overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(not_met or met or regulator_view)
+        if overlong or (not_met and met) or (regulator_view and (not_met or met)):
             # Both readings in one sentence, or a run-on too long to quote
             # whole: never settled either way.
             statements.append(DisclosureStatement("AMBIGUOUS_PRIMARY_ENDPOINT", sentence))
+        elif regulator_view:
+            statements.append(DisclosureStatement("REGULATOR_VIEW_REPORTED", sentence))
         elif not_met:
             statements.append(DisclosureStatement("PRIMARY_ENDPOINT_NOT_MET", sentence))
         elif met:
@@ -262,6 +312,15 @@ _FACT_VALUE = {
     "PRIMARY_ENDPOINT_NOT_MET": "primary endpoint was not met (issuer 8-K disclosure)",
     "PRIMARY_ENDPOINT_MET": "primary endpoint was met (issuer 8-K disclosure)",
     "STRATEGIC_CHANGE": "strategic review or programme change (issuer 8-K disclosure)",
+    # Deliberately neutral: the Kill Gate must fire on the verbatim sentence
+    # (the issuer's own words), never on this label.
+    "REGULATOR_VIEW_REPORTED": (
+        "regulatory view reported by the issuer (FDA document not retrieved)"
+    ),
+}
+_FACT_CATEGORY = {
+    "STRATEGIC_CHANGE": FactCategory.OTHER,
+    "REGULATOR_VIEW_REPORTED": FactCategory.REGULATORY,
 }
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,
@@ -417,10 +476,7 @@ def _read_filing(
             facts.append(
                 RawFact(
                     ticker=ticker.upper(),
-                    category=(
-                        FactCategory.OTHER if statement.kind == "STRATEGIC_CHANGE"
-                        else FactCategory.CLINICAL
-                    ),
+                    category=_FACT_CATEGORY.get(statement.kind, FactCategory.CLINICAL),
                     claim=statement.sentence,
                     source=source,
                     value=_FACT_VALUE[statement.kind],
