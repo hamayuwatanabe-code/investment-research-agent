@@ -972,3 +972,135 @@ def test_c3_financing_conditioned_on_the_regulatory_endpoint_is_kept_as_a_compan
 )
 def test_c3_ordinary_financing_or_regulatory_sentences_are_not_milestone_facts(sentence):
     assert _kinds(sentence) == []
+
+
+# =============================================================================
+# Correction 4: wording taken from the REAL filings' reported clauses.
+# NOTE ON PROVENANCE: the filings themselves were not retrieved in this
+# environment (no external HTTP). The sentences below are COMPOSED around the
+# exact phrases reported from the real documents -- "could not be agreed to
+# while the trial is still ongoing"; "The Second Closing Trigger Date shall
+# occur upon satisfaction ..." followed by the Purchase Agreement, the
+# Milestone and the FDA-agreed primary endpoint -- and are NOT verbatim copies.
+# =============================================================================
+COULD_NOT_A = (
+    "The Company proposed a new primary endpoint to the FDA, but the new primary endpoint "
+    "could not be agreed to while the trial is still ongoing."
+)
+COULD_NOT_B = (
+    "The Company and the FDA discussed a new primary endpoint for the trial; however, a new "
+    "primary endpoint could not be agreed to while the trial is still ongoing."
+)
+COULD_NOT_AGENCY = (
+    "A new primary endpoint could not be agreed to with the Agency while the trial was still ongoing."
+)
+
+
+@pytest.mark.parametrize("sentence", [COULD_NOT_A, COULD_NOT_B, COULD_NOT_AGENCY])
+def test_c4_reported_could_not_be_agreed_is_a_consultation_outcome(sentence):
+    assert _kinds(sentence) == ["REGULATOR_CONSULTATION_OUTCOME_REPORTED"]
+
+
+@pytest.mark.parametrize("sentence", [COULD_NOT_A, COULD_NOT_B])
+def test_c4_could_not_be_agreed_flows_to_a_stored_company_claim_and_a_provisional_k3(sentence):
+    material, _ = _collect(_routes(_ex99(sentence)))
+    assert material.errors == [] and material.outcome is FetchOutcome.OK
+    (fact,) = material.raw_facts
+    assert fact.category is FactCategory.REGULATORY and fact.company_claim is True
+    assert fact.claim == sentence
+    assert fact.source_authority is DocumentAuthority.COMPANY_IR
+    assert "FDA document not retrieved" in str(fact.value)
+
+    result, repo = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K3
+    assert regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert regulatory in result.verdict.kill_gate.provisional_major_or_worse
+    assert result.verdict.action is None
+    stored = [f for f in repo.facts_for_resume(result.context.run_id) if f.claim == sentence]
+    assert len(stored) == 1 and not stored[0].is_decision_grade
+    assert stored[0].evidence_class is EvidenceClass.COMPANY_CLAIM
+
+
+def test_c4_could_not_without_a_reported_anchor_or_a_regulator_fails_closed_with_a_reason():
+    # no temporal anchor: could be a past report or a hypothetical -> not settled
+    assert _kinds("The FDA could not agree to a new primary endpoint.") == [
+        "AMBIGUOUS_REGULATOR_STATEMENT"
+    ]
+    # no regulator named: with whom it was (not) agreed is unknown -> not settled
+    assert _kinds("A new primary endpoint could not be agreed to while the trial is still ongoing.") == [
+        "AMBIGUOUS_REGULATOR_STATEMENT"
+    ]
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "If a new primary endpoint could not be agreed to with the FDA while the trial is still "
+        "ongoing, we may be required to start a new trial.",
+        "There is a risk that the FDA could not agree to a new primary endpoint while the trial is "
+        "ongoing.",
+        "Should the FDA review a new primary endpoint, it could not be agreed to while the trial is "
+        "still ongoing.",
+        "We expect that a new primary endpoint could not be agreed to with the FDA while the trial "
+        "is ongoing.",
+        "Even if the Company proposes a new primary endpoint after completing enrollment of the "
+        "remaining patients in the trial, the FDA could not agree to it while the trial is ongoing.",
+        "The Company believes the FDA would not object to a new primary endpoint.",
+    ],
+)
+def test_c4_future_and_hypothetical_could_not_is_never_a_reported_outcome(sentence):
+    assert "REGULATOR_CONSULTATION_OUTCOME_REPORTED" not in _kinds(sentence)
+    assert _kinds(sentence) == []
+
+
+FIN_BASE = (
+    "The Second Closing Trigger Date shall occur upon satisfaction of the Milestone (as defined "
+    "in the Purchase Agreement), which requires that the Company has reached agreement with the "
+    "U.S. Food and Drug Administration (the “FDA”) on the primary endpoint for the trial, "
+    "and the Investors shall purchase the second tranche of Shares at the Second Closing"
+)
+FIN_WAIVER = FIN_BASE + ", which condition may be waived by the Investors in their sole discretion."
+FIN_PLAIN = FIN_BASE + "."
+FIN_LONG = FIN_BASE + ", " + " ".join(
+    f"subject to the representations in Section 3.{i}(b) of the Purchase Agreement being true and "
+    "correct in all material respects as of such date" for i in range(1, 14)
+) + "."
+
+
+@pytest.mark.parametrize("sentence", [FIN_PLAIN, FIN_WAIVER])
+def test_c4_second_closing_trigger_conditioned_on_the_fda_agreed_endpoint_is_extracted(sentence):
+    assert _kinds(sentence) == ["FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"]
+    result, _ = _collect(_routes(_ex99(sentence)))
+    (fact,) = result.raw_facts
+    assert result.errors == []
+    assert fact.category is FactCategory.LIQUIDITY and fact.company_claim is True
+    assert fact.claim == sentence
+    assert fact.source_authority is DocumentAuthority.COMPANY_IR
+    assert fact.source.accession == ACC
+
+
+def test_c4_an_overlong_financing_condition_sentence_is_never_silently_dropped():
+    assert len(FIN_LONG) > 1200
+    assert _kinds(FIN_LONG) == ["AMBIGUOUS_FINANCING_STATEMENT"]
+    result, _ = _collect(_routes(_ex99(FIN_LONG)))
+    assert result.raw_facts == []
+    (error,) = result.errors
+    assert error.startswith(m8k.UNVERIFIED_PREFIX) and ACC in error
+    assert "financing" in error and "cannot be classified" in error
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "The Company closed a financing of $10 million in gross proceeds.",
+        "The Second Closing shall occur on the third business day after the First Closing.",
+        "There is a risk that the second tranche could be conditioned on FDA agreement on the primary endpoint.",
+        "If the FDA does not agree on the primary endpoint, the Investors may decline to fund the second tranche.",
+    ],
+)
+def test_c4_ordinary_or_hypothetical_financing_text_is_not_a_milestone_fact(sentence):
+    assert _kinds(sentence) == []

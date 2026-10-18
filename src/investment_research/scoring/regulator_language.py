@@ -47,11 +47,20 @@ REGISTRATIONAL_STATUS_WITHDRAWN = (
     r"|\b(?:does not|did not)\s+(?:consider|regard|view|call|describe|refer to)\b"
     r"[^.]{0,80}\b(?:pivotal|registrational)\b"
 )
+#: Words that anchor a "could not" to a REPORTED, past outcome ("... could not
+#: be agreed to WHILE the trial is still ongoing"). A bare "could not" is as
+#: likely to be a hypothetical ("the FDA could not agree ...") as a report.
+REPORTED_ANCHOR = r"(?:while|during|until|because|at\s+that\s+time|at\s+the\s+time)"
 #: The company reporting that it and the regulator did NOT agree on an
-#: endpoint. ("could not" is deliberately absent: it reads as a hypothetical.)
+#: endpoint. A "could not" form counts only with a REPORTED_ANCHOR; the
+#: extractor additionally refuses it after any conditional wording.
 CONSULTATION_NO_AGREEMENT = (
     rf"\b(?:(?:was|were)\s+unable|unable|not\s+able|failed|did\s+not|have\s+not|has\s+not)\b"
     rf"[^.;]{{0,40}}\bagree(?:ment|d)?\b[^.]{{0,120}}\b{ENDPOINT_TERM}"
     rf"|\bno\s+agreement\b[^.]{{0,120}}\b{ENDPOINT_TERM}"
     rf"|\bdisagree\w*[^.]{{0,120}}\b{ENDPOINT_TERM}"
+    rf"|\b{ENDPOINT_TERM}[^.;]{{0,160}}?\bcould\s+not\s+be\s+agreed(?:\s+(?:to|upon))?\b"
+    rf"[^.;]{{0,80}}?\b{REPORTED_ANCHOR}\b"
+    rf"|\bcould\s+not\s+(?:reach\s+)?agree(?:ment)?\b[^.;]{{0,80}}?\b{ENDPOINT_TERM}"
+    rf"[^.;]{{0,80}}?\b{REPORTED_ANCHOR}\b"
 )

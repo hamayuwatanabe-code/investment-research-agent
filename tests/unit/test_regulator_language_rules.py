@@ -69,3 +69,26 @@ def test_failure_to_agree_on_the_endpoint_fires_a_provisional_k3(claim):
 )
 def test_agreement_wording_that_is_not_a_failure_on_the_endpoint_does_not_fire(claim):
     assert _regulatory_level(claim) < KillLevel.K3
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The Company proposed a new primary endpoint to the FDA, but the new primary endpoint "
+        "could not be agreed to while the trial is still ongoing.",
+        "The FDA could not agree to a new primary endpoint while the trial was ongoing.",
+    ],
+)
+def test_reported_could_not_be_agreed_with_a_time_anchor_fires_k3(claim):
+    assert _regulatory_level(claim) is KillLevel.K3
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The FDA could not agree to a new primary endpoint.",  # no anchor: reported or hypothetical?
+        "The measurement could not be agreed to while the trial is ongoing.",  # no endpoint
+    ],
+)
+def test_bare_could_not_does_not_fire_the_gate(claim):
+    assert _regulatory_level(claim) < KillLevel.K3

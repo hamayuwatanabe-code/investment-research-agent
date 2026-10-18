@@ -67,6 +67,7 @@ from ..schemas.enums import (
     SourceTier,
 )
 from ..schemas.fact import RawFact, Source, make_source_id
+from ..scoring.regulator_language import ENDPOINT_TERM
 from .sec_acquisition_adapters import (
     ExhibitCategory,
     _content_is_valid_body,
@@ -219,15 +220,26 @@ _REGULATOR_CONSULTATION_RULES = ("endpoint_agreement_not_reached",)
 #: risk-factor vocabulary does.
 _FINANCING_RE = re.compile(
     r"(?i)\b(?:tranche|financing|private\s+placement|purchase\s+agreement|warrants?"
-    r"|funding|gross\s+proceeds)\b"
+    r"|funding|gross\s+proceeds|closing)\b"
 )
 _FINANCING_CONDITION_RE = re.compile(
-    r"(?i)\b(?:condition(?:ed|al)?|contingent|milestone|subject\s+to)\b"
+    r"(?i)\b(?:condition(?:ed|al)?|contingent|milestone|subject\s+to"
+    r"|upon\s+(?:the\s+)?(?:satisfaction|achievement|occurrence|receipt))\b"
 )
 _FINANCING_REGULATORY_RE = re.compile(r"(?i)\b(?:FDA|primary\s+(?:efficacy\s+)?end\s?-?point)\b")
+#: Risk-factor vocabulary. Contract modals ("which condition MAY be waived")
+#: are not risk wording; a modal matters only BEFORE the condition, where it
+#: turns the condition itself into a possibility (see below).
 _RISK_TEXT_RE = re.compile(
-    r"(?i)\b(?:risks?|possibility|possible|may|might|could|assurance|uncertain\w*|forward-looking)\b"
+    r"(?i)\b(?:risks?|possibility|possible|assurance|uncertain\w*|forward-looking)\b"
 )
+_FINANCING_HYPOTHETICAL_RE = re.compile(r"(?i)\b(?:if|may|might|could|would|should|whether|unless)\b")
+#: "<endpoint> ... could not be agreed" with no regulator named in the
+#: sentence: with whom it was not agreed is unknown, so it is surfaced.
+_UNATTRIBUTED_NO_AGREEMENT_RE = re.compile(
+    rf"(?i)\b{ENDPOINT_TERM}[^.;]{{0,160}}?\bcould\s+not\s+be\s+agreed\b"
+)
+_COULD_NOT_RE = re.compile(r"(?i)\bcould\s+not\b")
 #: The company reporting how a consultation with the regulator ended (it
 #: agreed, no agreement was reached, an alternative endpoint was discussed).
 #: That is neither the regulator's own document nor a trial result, and it
@@ -256,9 +268,27 @@ def _reports_regulator(sentence: str, rule_ids: tuple[str, ...]) -> bool:
     for pattern in _rule_patterns(rule_ids):
         # Scan from the regulator mention onward so an earlier "endpoint ..."
         # run cannot swallow the regulator's own wording.
-        for match in pattern.finditer(sentence, ref.start()):
+        # A passive consultation report ("<endpoint> could not be agreed to
+        # with the Agency ...") names the endpoint BEFORE the regulator, so
+        # that rule is also scanned from the start -- but only where the
+        # regulator is inside the matched clause.
+        starts = [ref.start()]
+        if rule_ids == _REGULATOR_CONSULTATION_RULES:
+            starts.append(0)
+        matches = (m for origin in starts for m in pattern.finditer(sentence, origin))
+        for match in matches:
+            if match.start() < ref.start() and not match.start() <= ref.start() < match.end():
+                continue
             text = match.group(0)
-            if text.lower().startswith("would") or _INNER_HYPOTHETICAL_RE.search(text):
+            could_not = bool(_COULD_NOT_RE.search(text))
+            # "could not" is the reported outcome in "... could not be agreed to
+            # while the trial is still ongoing" (the pattern demands that
+            # anchor) but a hypothetical after any conditional wording earlier
+            # in the sentence, however far back.
+            if could_not and _CONDITIONAL_RE.search(sentence[:match.start()]):
+                continue
+            inner = _COULD_NOT_RE.sub("", text)
+            if text.lower().startswith("would") or _INNER_HYPOTHETICAL_RE.search(inner):
                 continue
             start = min(ref.start(), match.start())
             if _CONDITIONAL_RE.search(sentence[max(0, start - 80):start]):
@@ -268,6 +298,8 @@ def _reports_regulator(sentence: str, rule_ids: tuple[str, ...]) -> bool:
                 continue
             return True
     return False
+
+
 _ABBREVIATIONS = (
     "Inc.", "Corp.", "Co.", "Ltd.", "L.L.C.", "U.S.", "No.", "Nos.", "Dr.", "Mr.", "Ms.",
     "vs.", "e.g.", "i.e.", "approx.", "Ph.D.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.",
@@ -297,11 +329,17 @@ def _reports_consultation_outcome(sentence: str) -> bool:
 
 
 def _financing_contingent_on_regulatory(sentence: str) -> bool:
-    return bool(
-        _FINANCING_RE.search(sentence)
-        and _FINANCING_CONDITION_RE.search(sentence)
-        and _FINANCING_REGULATORY_RE.search(sentence)
-        and not _RISK_TEXT_RE.search(sentence)
+    if (
+        not _FINANCING_RE.search(sentence)
+        or not _FINANCING_REGULATORY_RE.search(sentence)
+        or _RISK_TEXT_RE.search(sentence)
+    ):
+        return False
+    condition = _FINANCING_CONDITION_RE.search(sentence)
+    # A modal / "if" ahead of the condition makes the condition itself
+    # hypothetical ("could be conditioned on ..."); after it, it is contract text.
+    return condition is not None and not _FINANCING_HYPOTHETICAL_RE.search(
+        sentence[:condition.start()]
     )
 
 
@@ -314,6 +352,8 @@ def _qualified(sentence: str, match: re.Match[str]) -> bool:
 @dataclass(frozen=True)
 class DisclosureStatement:
     #: PRIMARY_ENDPOINT_NOT_MET / PRIMARY_ENDPOINT_MET / STRATEGIC_CHANGE /
+    #: AMBIGUOUS_FINANCING_STATEMENT (a financing condition too long to quote;
+    #: never becomes a fact) /
     #: REGULATOR_CONSULTATION_OUTCOME_REPORTED (issuer's report that it and
     #: the regulator did not agree on an endpoint; a REGULATORY company
     #: claim) / FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE (a financing
@@ -330,10 +370,21 @@ class DisclosureStatement:
 
 
 def _consultation_outcome(sentence: str) -> bool:
-    """An unqualified report of how a consultation with a regulator ended."""
+    """An unqualified report of how a consultation with a regulator ended,
+    or an endpoint "could not be agreed" with nobody named."""
+    def reported(match: re.Match[str]) -> bool:
+        if _qualified(sentence, match):
+            return False
+        # "could not" reads as a hypothetical after conditional wording
+        # anywhere earlier in the sentence.
+        return not (
+            _COULD_NOT_RE.search(match.group(0))
+            and _CONDITIONAL_RE.search(sentence[:match.start()])
+        )
+
     if _REGULATOR_REF_RE.search(sentence) is None:
-        return False
-    return any(not _qualified(sentence, m) for m in _CONSULTATION_RE.finditer(sentence))
+        return any(reported(m) for m in _UNATTRIBUTED_NO_AGREEMENT_RE.finditer(sentence))
+    return any(reported(m) for m in _CONSULTATION_RE.finditer(sentence))
 
 
 def extract_statements(text: str) -> list[DisclosureStatement]:
@@ -377,14 +428,12 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
             )
         elif consultation:
             statements.append(DisclosureStatement("AMBIGUOUS_REGULATOR_STATEMENT", sentence))
-        if (
-            len(sentence) <= _MAX_CLAIM_CHARS
-            and "forward-looking" not in sentence.lower()
-            and _financing_contingent_on_regulatory(sentence)
-        ):
-            statements.append(
-                DisclosureStatement("FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE", sentence)
-            )
+        if "forward-looking" not in sentence.lower() and _financing_contingent_on_regulatory(sentence):
+            statements.append(DisclosureStatement(
+                "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"
+                if len(sentence) <= _MAX_CLAIM_CHARS else "AMBIGUOUS_FINANCING_STATEMENT",
+                sentence,
+            ))
         if (
             not regulator_status
             and len(sentence) <= _MAX_CLAIM_CHARS
@@ -566,6 +615,15 @@ def _read_filing(
             provenance=Provenance.LIVE,
         )
         for statement in extract_statements(text):
+            if statement.kind == "AMBIGUOUS_FINANCING_STATEMENT":
+                reasons.append(_unverified(
+                    candidate,
+                    f"{document.doc_type} {document.name} contains a financing condition tied to "
+                    "a regulatory step in a sentence too long to quote whole, so it cannot be "
+                    "classified and no fact is recorded for it: "
+                    f"\"{statement.sentence[:300]}\"",
+                ))
+                continue
             if statement.kind == "AMBIGUOUS_REGULATOR_STATEMENT":
                 reasons.append(_unverified(
                     candidate,
