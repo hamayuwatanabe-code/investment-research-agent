@@ -677,3 +677,150 @@ def test_regulator_view_reaches_programme_resolution_as_a_superseding_disclosure
     (fact,) = material.raw_facts
     assert is_superseding_disclosure(SimpleNamespace(claim=fact.claim, value=fact.value))
     assert is_superseding_disclosure(SimpleNamespace(claim="x", value=fact.value))
+
+
+# =============================================================================
+# Correction 2: the wording that actually matters is "not an APPROPRIATE
+# endpoint to demonstrate efficacy" -- Correction 1's tests only used "not
+# sufficient". Extraction and the Kill Gate must share one vocabulary, so a
+# sentence cannot be extracted yet unseen by the gate (or the reverse).
+# All sentences are SYNTHETIC; they keep the MEANING of the disclosed wording.
+# =============================================================================
+V_APPROPRIATE = (
+    "The FDA advised the Company that RVEF, the primary endpoint of the SYN-301 trial, is not "
+    "an appropriate endpoint to demonstrate efficacy."
+)
+V_PRIMARY_APPROPRIATE = (
+    "The FDA stated that RVEF is not an appropriate primary endpoint to demonstrate efficacy "
+    "of SYN-301."
+)
+V_NOT_APPROPRIATE = "The FDA informed the Company that RVEF is not appropriate to demonstrate efficacy."
+V_DOES_NOT_CONSIDER = (
+    "The FDA indicated that it does not consider RVEF an appropriate endpoint to establish efficacy."
+)
+REGULATOR_VIEW_SENTENCES = [V_APPROPRIATE, V_PRIMARY_APPROPRIATE, V_NOT_APPROPRIATE, V_DOES_NOT_CONSIDER]
+
+AGREES_NO_ALTERNATIVE = (
+    "The Company agrees with the FDA's view and was unable to reach agreement with the FDA on an "
+    "alternative primary endpoint."
+)
+P_PIVOTAL = "The FDA no longer considers the SYN-301 trial to be pivotal."
+P_PIVOTAL_WITH_ENDPOINT = (
+    "The FDA no longer considers the SYN-301 trial, whose primary endpoint is RVEF, to be a "
+    "pivotal trial."
+)
+P_REGISTRATIONAL = "The FDA does not consider the SYN-301 trial to be a registrational trial."
+
+
+def _kinds(sentence):
+    return [s.kind for s in m8k.extract_statements(sentence)]
+
+
+@pytest.mark.parametrize("sentence", REGULATOR_VIEW_SENTENCES)
+def test_c2_regulator_view_wording_variants_are_regulator_views_not_trial_results(sentence):
+    assert _kinds(sentence) == ["REGULATOR_VIEW_REPORTED"]
+
+
+@pytest.mark.parametrize("sentence", REGULATOR_VIEW_SENTENCES)
+def test_c2_every_extracted_regulator_view_is_seen_by_the_kill_gate(sentence):
+    """Structural guard: extraction and Kill Gate rules share one vocabulary."""
+    from investment_research.scoring.kill_gate import evaluate_kill_gate
+
+    material, _ = _collect(_routes(_ex99(sentence)))
+    (fact,) = [f for f in material.raw_facts if f.category is FactCategory.REGULATORY]
+    from tests.conftest import make_fact
+
+    gate = evaluate_kill_gate(
+        [make_fact(fact.claim, category=FactCategory.REGULATORY, value=fact.value,
+                   evidence_class=EvidenceClass.COMPANY_CLAIM, company_claim=True)],
+        [],
+    )
+    regulatory = next(a for a in gate.assessments if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5
+    assert regulatory.confirmation is KillConfirmation.PROVISIONAL
+
+
+def test_c2_appropriate_wording_in_the_pipeline_is_a_provisional_regulatory_k5_beside_the_failure():
+    material, _ = _collect(_routes(_ex99(
+        f"The SYN-301 trial ({TRIAL}) did not meet its primary endpoint of change in walking "
+        f"distance at week 52. {V_APPROPRIATE}"
+    )))
+    result, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5 and regulatory.confirmation is KillConfirmation.PROVISIONAL
+    clinical, failed, _ = _failure_findings(result)
+    assert failed and clinical.level is KillLevel.K5
+    assert result.verdict.action is None
+
+
+def test_c2_company_agreement_and_no_alternative_endpoint_fails_closed_with_a_reason():
+    """The company agreeing with the FDA is not an FDA document and not a
+    trial result: no fact is invented, and the reason says why."""
+    assert _kinds(AGREES_NO_ALTERNATIVE) == ["AMBIGUOUS_REGULATOR_STATEMENT"]
+    result, _ = _collect(_routes(_ex99(AGREES_NO_ALTERNATIVE)))
+    assert result.raw_facts == []
+    assert result.outcome is FetchOutcome.ERROR
+    (error,) = result.errors
+    assert error.startswith(m8k.UNVERIFIED_PREFIX) and ACC in error
+    assert "regulator" in error and "cannot be classified" in error
+    assert "unable to reach agreement" in error  # the sentence is quoted, not paraphrased
+
+
+def test_c2_view_plus_company_agreement_keeps_the_view_and_still_fails_closed_on_the_rest():
+    sentence = (
+        "The Company agrees with the FDA's assessment that RVEF is not an appropriate endpoint to "
+        "demonstrate efficacy, and the Company and the FDA were unable to reach agreement on an "
+        "alternative primary endpoint."
+    )
+    assert _kinds(sentence) == ["REGULATOR_VIEW_REPORTED", "AMBIGUOUS_REGULATOR_STATEMENT"]
+
+
+@pytest.mark.parametrize("sentence", [P_PIVOTAL, P_PIVOTAL_WITH_ENDPOINT, P_REGISTRATIONAL])
+def test_c2_loss_of_pivotal_status_is_one_regulatory_status_fact_not_a_duplicate_block(sentence):
+    assert _kinds(sentence) == ["REGULATOR_STATUS_CHANGE_REPORTED"]
+    result, _ = _collect(_routes(_ex99(sentence)))
+    (fact,) = result.raw_facts
+    assert result.errors == []
+    assert fact.category is FactCategory.REGULATORY and fact.company_claim is True
+    assert fact.claim == sentence and fact.source_authority is DocumentAuthority.COMPANY_IR
+    assert fact.source.accession == ACC and fact.source.event_date == "2026-09-16"
+    assert is_superseding_disclosure(SimpleNamespace(claim=fact.claim, value=fact.value))
+
+
+def test_c2_pivotal_status_loss_reaches_the_kill_gate_and_blocks_the_action():
+    material, _ = _collect(_routes(_ex99(P_PIVOTAL_WITH_ENDPOINT)))
+    result, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5 and regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert result.verdict.action is None
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "If the FDA were to determine that RVEF is not an appropriate endpoint to demonstrate "
+        "efficacy, we may discontinue the program.",
+        "We expect the FDA to confirm that RVEF is not an appropriate endpoint to demonstrate efficacy.",
+        "The FDA could conclude that RVEF is not an appropriate endpoint to demonstrate efficacy.",
+        "There is a risk that the FDA will advise that RVEF is not an appropriate endpoint.",
+        "The Company believes RVEF is an appropriate endpoint to demonstrate efficacy.",
+        "The Company is seeking FDA agreement that RVEF is an appropriate primary endpoint.",
+        "The Company believes RVEF is not an appropriate endpoint to demonstrate efficacy.",
+        "The Company plans to ask the FDA whether it still considers the trial pivotal.",
+        "If the FDA no longer considers the trial to be pivotal, the Company may seek alternatives.",
+        "We do not expect the FDA to stop considering the SYN-301 trial pivotal.",
+    ],
+)
+def test_c2_future_hypothetical_and_company_only_statements_are_not_classified(sentence):
+    assert _kinds(sentence) == []
+
+
+def test_c2_an_actual_primary_endpoint_failure_is_still_only_a_trial_result():
+    assert _kinds("The SYN-301 trial did not meet its primary endpoint.") == ["PRIMARY_ENDPOINT_NOT_MET"]
+    assert _kinds("Topline results showed the primary endpoint was not met.") == ["PRIMARY_ENDPOINT_NOT_MET"]

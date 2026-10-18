@@ -211,22 +211,33 @@ _INNER_HYPOTHETICAL_RE = re.compile(
     r"(?i)\b(?:if|whether|unless|assum\w*|expect\w*|anticipat\w*|may|might|could|will)\b"
 )
 _REGULATOR_VIEW_RULES = ("endpoint_insufficient_for_efficacy", "endpoint_not_accepted")
+_REGULATOR_STATUS_RULES = ("registrational_status_withdrawn",)
+#: The company reporting how a consultation with the regulator ended (it
+#: agreed, no agreement was reached, an alternative endpoint was discussed).
+#: That is neither the regulator's own document nor a trial result, and it
+#: is not classified further: it is surfaced as unverified.
+_CONSULTATION_RE = re.compile(
+    r"(?i)\b(?:unable|not\s+able|failed|did\s+not|could\s+not|have\s+not|has\s+not)\b"
+    r"[^.;]{0,40}\bagree(?:ment|d)?\b|\bno\s+agreement\b|\bdisagree\w*"
+    r"|\bagree(?:s|d)?\s+with\s+the\s+(?:FDA|Agency|regulators?)\b"
+)
 
 
-def _regulator_view_patterns() -> list[re.Pattern[str]]:
+def _rule_patterns(rule_ids: tuple[str, ...]) -> list[re.Pattern[str]]:
     # Imported lazily: scoring imports are not needed by the other helpers.
     from ..scoring.kill_gate import KILL_RULES
 
-    return [r.pattern for r in KILL_RULES if r.rule_id in _REGULATOR_VIEW_RULES]
+    return [r.pattern for r in KILL_RULES if r.rule_id in rule_ids]
 
 
-def _reports_regulator_view(sentence: str) -> bool:
-    """True when an unqualified sentence reports a regulator's negative view
-    of the endpoint, in wording one of the Kill Gate's regulator rules reads."""
+def _reports_regulator(sentence: str, rule_ids: tuple[str, ...]) -> bool:
+    """True when an unqualified sentence reports a regulator saying what one
+    of the named Kill Gate regulator rules reads. The rules' own patterns
+    are used, so a sentence classified here is one the gate can see."""
     ref = _REGULATOR_REF_RE.search(sentence)
     if ref is None:
         return False
-    for pattern in _regulator_view_patterns():
+    for pattern in _rule_patterns(rule_ids):
         # Scan from the regulator mention onward so an earlier "endpoint ..."
         # run cannot swallow the regulator's own wording.
         for match in pattern.finditer(sentence, ref.start()):
@@ -257,6 +268,14 @@ def split_sentences(text: str) -> list[str]:
     return [p.replace("\x00", ".").strip() for p in parts if p.strip()]
 
 
+def _reports_regulator_view(sentence: str) -> bool:
+    return _reports_regulator(sentence, _REGULATOR_VIEW_RULES)
+
+
+def _reports_regulator_status(sentence: str) -> bool:
+    return _reports_regulator(sentence, _REGULATOR_STATUS_RULES)
+
+
 def _qualified(sentence: str, match: re.Match[str]) -> bool:
     """True when the clause before the outcome phrase is conditional or
     forward-looking (same sentence, nearest 80 characters)."""
@@ -266,11 +285,22 @@ def _qualified(sentence: str, match: re.Match[str]) -> bool:
 @dataclass(frozen=True)
 class DisclosureStatement:
     #: PRIMARY_ENDPOINT_NOT_MET / PRIMARY_ENDPOINT_MET / STRATEGIC_CHANGE /
+    #: REGULATOR_STATUS_CHANGE_REPORTED (issuer's report that the regulator no
+    #: longer treats the trial as pivotal/registrational) /
+    #: AMBIGUOUS_REGULATOR_STATEMENT (a consultation outcome that is not
+    #: classified; never becomes a fact) /
     #: REGULATOR_VIEW_REPORTED (issuer's report of a regulator's view; a
     #: REGULATORY company claim, never a trial result) /
     #: AMBIGUOUS_PRIMARY_ENDPOINT (never becomes a fact)
     kind: str
     sentence: str
+
+
+def _consultation_outcome(sentence: str) -> bool:
+    """An unqualified report of how a consultation with a regulator ended."""
+    if _REGULATOR_REF_RE.search(sentence) is None:
+        return False
+    return any(not _qualified(sentence, m) for m in _CONSULTATION_RE.finditer(sentence))
 
 
 def extract_statements(text: str) -> list[DisclosureStatement]:
@@ -281,26 +311,39 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
         not_met = [m for m in _NOT_MET_RE.finditer(sentence) if not _qualified(sentence, m)]
         met = [m for m in _MET_RE.finditer(sentence) if not _qualified(sentence, m)]
         regulator_view = _reports_regulator_view(sentence)
-        overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(not_met or met or regulator_view)
-        if overlong or (not_met and met) or (regulator_view and (not_met or met)):
+        regulator_status = _reports_regulator_status(sentence)
+        consultation = _consultation_outcome(sentence)
+        overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(
+            not_met or met or regulator_view or regulator_status
+        )
+        if overlong or (not_met and met) or (
+            (regulator_view or regulator_status) and (not_met or met)
+        ):
             # Both readings in one sentence, or a run-on too long to quote
             # whole: never settled either way.
             statements.append(DisclosureStatement("AMBIGUOUS_PRIMARY_ENDPOINT", sentence))
         elif regulator_view:
             statements.append(DisclosureStatement("REGULATOR_VIEW_REPORTED", sentence))
+        elif regulator_status:
+            statements.append(DisclosureStatement("REGULATOR_STATUS_CHANGE_REPORTED", sentence))
         elif not_met:
             statements.append(DisclosureStatement("PRIMARY_ENDPOINT_NOT_MET", sentence))
         elif met:
             statements.append(DisclosureStatement("PRIMARY_ENDPOINT_MET", sentence))
         elif (
-            _PRIMARY_RE.search(sentence)
+            not consultation
+            and _PRIMARY_RE.search(sentence)
             and _OUTCOME_HINT_RE.search(sentence)
             and not any(_qualified(sentence, m) for m in _PRIMARY_RE.finditer(sentence))
         ):
             statements.append(DisclosureStatement("AMBIGUOUS_PRIMARY_ENDPOINT", sentence))
-        if any(
-            not _qualified(sentence, m) for m in _STRATEGY_RE.finditer(sentence)
-        ) and len(sentence) <= _MAX_CLAIM_CHARS:
+        if consultation:
+            statements.append(DisclosureStatement("AMBIGUOUS_REGULATOR_STATEMENT", sentence))
+        if (
+            not regulator_status
+            and len(sentence) <= _MAX_CLAIM_CHARS
+            and any(not _qualified(sentence, m) for m in _STRATEGY_RE.finditer(sentence))
+        ):
             statements.append(DisclosureStatement("STRATEGIC_CHANGE", sentence))
     return statements
 
@@ -317,10 +360,14 @@ _FACT_VALUE = {
     "REGULATOR_VIEW_REPORTED": (
         "regulatory view reported by the issuer (FDA document not retrieved)"
     ),
+    "REGULATOR_STATUS_CHANGE_REPORTED": (
+        "regulatory status change reported by the issuer (FDA document not retrieved)"
+    ),
 }
 _FACT_CATEGORY = {
     "STRATEGIC_CHANGE": FactCategory.OTHER,
     "REGULATOR_VIEW_REPORTED": FactCategory.REGULATORY,
+    "REGULATOR_STATUS_CHANGE_REPORTED": FactCategory.REGULATORY,
 }
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,
@@ -465,6 +512,15 @@ def _read_filing(
             provenance=Provenance.LIVE,
         )
         for statement in extract_statements(text):
+            if statement.kind == "AMBIGUOUS_REGULATOR_STATEMENT":
+                reasons.append(_unverified(
+                    candidate,
+                    f"{document.doc_type} {document.name} contains a regulator-consultation "
+                    "statement that cannot be classified (it is neither the regulator's own "
+                    "document nor a trial result, and no fact is recorded for it): "
+                    f"\"{statement.sentence[:300]}\"",
+                ))
+                continue
             if statement.kind == "AMBIGUOUS_PRIMARY_ENDPOINT":
                 reasons.append(_unverified(
                     candidate,

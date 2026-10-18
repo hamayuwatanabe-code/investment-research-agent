@@ -33,6 +33,11 @@ from ..schemas.enums import (
 from ..schemas.evaluation import KillAssessment, KillFinding, KillGateResult
 from ..schemas.fact import Fact
 from .program_resolution import NCT_RE
+from .regulator_language import (
+    ENDPOINT_NOT_ACCEPTED,
+    ENDPOINT_NOT_SUFFICIENT,
+    REGISTRATIONAL_STATUS_WITHDRAWN,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,13 +67,7 @@ KILL_RULES: tuple[KillRule, ...] = (
         "endpoint_insufficient_for_efficacy",
         KillCategory.REGULATORY_KILL,
         "Regulator states the primary endpoint is not sufficient to demonstrate efficacy",
-        _rx(
-            r"\b(?:endpoint|rvef|right ventricular ejection fraction|primary outcome)\b"
-            r"[^.]{0,160}?\bnot sufficient\b[^.]{0,80}?"
-            r"(?:demonstrate|establish|support|show)\b[^.]{0,40}?(?:efficacy|effectiveness|benefit)"
-            r"|(?:advised|informed|told)[^.]{0,120}?\bendpoint\b[^.]{0,120}?\bnot sufficient\b"
-            r"|\bendpoint\b[^.]{0,120}?\bcannot (?:prove|demonstrate|establish)\b"
-        ),
+        _rx(ENDPOINT_NOT_SUFFICIENT),
         KillLevel.K5,
         KillLevel.K3,
         "The trial as designed cannot support approval on its primary endpoint. Every valuation "
@@ -78,10 +77,7 @@ KILL_RULES: tuple[KillRule, ...] = (
         "registrational_status_withdrawn",
         KillCategory.REGULATORY_KILL,
         "Regulator no longer treats the trial as pivotal or registrational",
-        _rx(
-            r"\bno longer\b[^.]{0,80}?\b(?:pivotal|registrational)\b"
-            r"|\bno longer\b[^.]{0,40}\b(?:refers to|calls|describes|considers)\b[^.]{0,80}\bpivotal\b"
-        ),
+        _rx(REGISTRATIONAL_STATUS_WITHDRAWN),
         KillLevel.K5,
         KillLevel.K3,
         "A trial that was registrational and no longer is has lost the status the equity value "
@@ -92,11 +88,7 @@ KILL_RULES: tuple[KillRule, ...] = (
         "endpoint_not_accepted",
         KillCategory.REGULATORY_KILL,
         "Regulator does not accept the primary endpoint as adequate to establish effectiveness",
-        _rx(
-            r"(?:does not|did not|would not)\s+(?:consider|agree|view|regard|accept)[^.]{0,120}"
-            r"endpoint[^.]{0,120}(?:appropriate|adequate|acceptable|establish\s+effectiveness|"
-            r"establish\s+efficacy)"
-        ),
+        _rx(ENDPOINT_NOT_ACCEPTED),
         KillLevel.K5,
         KillLevel.K3,
         "The trial as designed cannot support approval. Every downstream valuation of the "

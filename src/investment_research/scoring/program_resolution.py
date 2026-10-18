@@ -68,7 +68,7 @@ _SUPERSEDING_DISCLOSURE_RE = re.compile(
     r"|\bstrategic\s+(?:review|alternatives|options|re-?prioriti[sz]ation)\b"
     r"|\bexplor\w*\s+(?:all\s+)?(?:strategic\s+)?(?:options|alternatives)\b"
     r"|\bno\s+longer\b[^.]{0,60}\b(?:pivotal|registrational|lead)\b"
-    r"|\bregulatory\s+view\s+reported\s+by\s+the\s+issuer\b"
+    r"|\bregulatory\s+(?:view|status\s+change)\s+reported\s+by\s+the\s+issuer\b"
 )
 
 def is_superseding_disclosure(fact: Fact) -> bool:
