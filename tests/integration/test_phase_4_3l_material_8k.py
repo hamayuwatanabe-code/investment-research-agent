@@ -1104,3 +1104,128 @@ def test_c4_an_overlong_financing_condition_sentence_is_never_silently_dropped()
 )
 def test_c4_ordinary_or_hypothetical_financing_text_is_not_a_milestone_fact(sentence):
     assert _kinds(sentence) == []
+
+
+# =============================================================================
+# Correction 5: live results on the real filings showed (a) a "potentially"
+# in an EARLIER part of the sentence suppressed the reported consultation
+# outcome, and (b) the contract-style financing sentence ALSO produced an
+# AMBIGUOUS_PRIMARY_ENDPOINT block. As before, the sentences are COMPOSED
+# around the phrases reported from the real 8-Ks (not retrieved here).
+# =============================================================================
+MAY_COMMA = (
+    "Following discussions of potentially appropriate endpoints for the trial, the FDA indicated "
+    "that a new primary endpoint could not be agreed to while the trial is still ongoing."
+)
+MAY_NO_PUNCTUATION = (
+    "The Company and the FDA discussed potentially appropriate endpoints and the FDA indicated "
+    "that a new primary endpoint could not be agreed to while the trial is still ongoing."
+)
+MAY_EXPECT_ELSEWHERE = (
+    "We expect to discuss potentially appropriate endpoints with the FDA; the FDA indicated that "
+    "a new primary endpoint could not be agreed to while the trial is still ongoing."
+)
+
+
+@pytest.mark.parametrize("sentence", [MAY_COMMA, MAY_NO_PUNCTUATION, MAY_EXPECT_ELSEWHERE])
+def test_c5_an_unrelated_potentially_does_not_hide_the_reported_consultation_outcome(sentence):
+    assert _kinds(sentence) == ["REGULATOR_CONSULTATION_OUTCOME_REPORTED"]
+
+
+def test_c5_the_may_sentence_reaches_a_stored_fact_and_a_provisional_k3_with_no_unverified_reason():
+    material, _ = _collect(_routes(_ex99(MAY_COMMA)))
+    assert material.errors == [] and material.outcome is FetchOutcome.OK
+    (fact,) = material.raw_facts
+    assert fact.category is FactCategory.REGULATORY and fact.company_claim is True
+    assert fact.claim == MAY_COMMA and "FDA document not retrieved" in str(fact.value)
+    result, repo = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K3 and regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert result.verdict.action is None
+    stored = [f for f in repo.facts_for_resume(result.context.run_id) if f.claim == MAY_COMMA]
+    assert len(stored) == 1 and not stored[0].is_decision_grade
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        # a conditional OPENER makes the whole consultation outcome hypothetical
+        "If the FDA indicated that a new primary endpoint could not be agreed to while the trial is "
+        "still ongoing, the Company may need to start a new trial.",
+        "Even if potentially appropriate endpoints are identified, the FDA indicated that a new "
+        "primary endpoint could not be agreed to while the trial is still ongoing.",
+        "We expect that, after discussing potentially appropriate endpoints, the FDA will indicate "
+        "that a new primary endpoint could not be agreed to while the trial is still ongoing.",
+        "The Company noted that if it proposed a new primary endpoint, the FDA could not agree to it "
+        "while the trial is still ongoing.",
+        "There is a risk that, after discussing appropriate endpoints, the FDA will indicate a new "
+        "primary endpoint could not be agreed to while the trial is still ongoing.",
+    ],
+)
+def test_c5_a_qualifier_that_governs_the_outcome_still_prevents_the_fact(sentence):
+    assert _kinds(sentence) == []
+
+
+def test_c5_potentially_that_hedges_the_outcome_itself_is_not_a_fact_but_is_surfaced():
+    """"potentially could not be agreed" hedges the result: never a reported
+    outcome, yet not silently ignored either (it is still about the primary endpoint)."""
+    sentence = (
+        "The FDA indicated that a new primary endpoint potentially could not be agreed to while "
+        "the trial is still ongoing."
+    )
+    kinds = _kinds(sentence)
+    assert "REGULATOR_CONSULTATION_OUTCOME_REPORTED" not in kinds
+    assert kinds == ["AMBIGUOUS_PRIMARY_ENDPOINT"]
+
+
+# ---- the contract-style financing sentence ----------------------------------------
+FIN_SIG = (
+    "The Second Closing Trigger Date shall occur upon satisfaction or waiver of the Milestone set "
+    "forth in the Purchase Agreement, being the Company's receipt of written confirmation from the "
+    "FDA that a statistically significant improvement in the primary endpoint of the trial would "
+    "be sufficient to support a marketing application, and the Investors shall purchase the "
+    "second tranche of Shares at the Second Closing"
+)
+FIN_SIG_PLAIN = FIN_SIG + "."
+
+
+def test_c5_a_contractual_condition_naming_statistical_significance_is_one_liquidity_fact():
+    assert _kinds(FIN_SIG_PLAIN) == ["FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"]
+    result, _ = _collect(_routes(_ex99(FIN_SIG_PLAIN)))
+    (fact,) = result.raw_facts
+    assert result.errors == [] and result.outcome is FetchOutcome.OK  # no AMBIGUOUS_PRIMARY_ENDPOINT block
+    assert fact.category is FactCategory.LIQUIDITY and fact.company_claim is True
+    assert fact.claim == FIN_SIG_PLAIN
+
+
+def test_c5_the_financing_sentence_alone_does_not_block_the_action_with_an_unverified_reason():
+    material, _ = _collect(_routes(_ex99(FIN_SIG_PLAIN)))
+    result, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    assert not [r for r in result.verdict.blocking_verification_required
+                if r.startswith(m8k.UNVERIFIED_PREFIX)]
+
+
+def test_c5_an_independent_clear_trial_result_in_the_same_sentence_is_still_reported():
+    sentence = FIN_SIG + ", and the trial did not meet its primary endpoint."
+    assert sorted(_kinds(sentence)) == sorted(
+        ["PRIMARY_ENDPOINT_NOT_MET", "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"]
+    )
+
+
+def test_c5_an_independent_unclassifiable_trial_result_in_the_same_sentence_is_still_unverified():
+    sentence = FIN_SIG + ", and the trial showed only a numerical trend on the primary endpoint."
+    assert sorted(_kinds(sentence)) == sorted(
+        ["AMBIGUOUS_PRIMARY_ENDPOINT", "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"]
+    )
+
+
+def test_c5_without_a_financing_condition_statistical_significance_stays_ambiguous():
+    assert _kinds("The primary endpoint did not show a statistically significant improvement.") == [
+        "AMBIGUOUS_PRIMARY_ENDPOINT"
+    ]
+    assert _kinds("A statistically significant effect on the primary endpoint was observed.") == [
+        "AMBIGUOUS_PRIMARY_ENDPOINT"
+    ]

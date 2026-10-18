@@ -196,6 +196,15 @@ _OUTCOME_HINT_RE = re.compile(
     r"(?i)\b(?:not|no|never|fail\w*|miss\w*|short|fell|numerical\w*|trend\w*|nominal\w*"
     r"|significan\w*|result\w*|outcome\w*|topline|top-line)\b"
 )
+#: Inside a contractual financing condition ("... a statistically significant
+#: improvement in the primary endpoint ...") "significant", "result" and a
+#: bare "shall not" are contract vocabulary, not a reported trial outcome.
+#: Only wording that NARRATES a result keeps a financing sentence ambiguous.
+_OUTCOME_HINT_NARRATIVE_RE = re.compile(
+    r"(?i)\b(?:fail\w*|miss\w*|fell\s+short|numerical\w*|trend\w*|nominal\w*"
+    r"|(?:did|was|were|has|have|had)\s+not|no\s+(?:significant|statistically|difference|effect)"
+    r"|showed|demonstrated\s+no)\b"
+)
 _PRIMARY_RE = re.compile(rf"(?i)\b{_PRIMARY}\b")
 #: The issuer reporting what a REGULATOR said about the primary endpoint
 #: ("FDA advised that ... is not sufficient to demonstrate efficacy"). This
@@ -258,6 +267,47 @@ def _rule_patterns(rule_ids: tuple[str, ...]) -> list[re.Pattern[str]]:
     return [r.pattern for r in KILL_RULES if r.rule_id in rule_ids]
 
 
+#: Does a conditional word govern the OUTCOME, or only something else in the
+#: sentence? ("Following discussions of potentially appropriate endpoints, the
+#: FDA indicated that ... could not be agreed to ..." -- the "potentially"
+#: describes the endpoints under discussion, not the reported result.)
+#: * STRONG: opens a hypothetical / expresses doubt; governs everything after it.
+_STRONG_QUALIFIER_RE = re.compile(
+    r"(?i)\b(?:if|whether|unless|should|assum\w*|risks?|possibility|assurance|uncertain\w*"
+    r"|forward-looking|in\s+the\s+event)\b"
+)
+#: * LOCAL: modal / intention wording governs only the clause it sits in ...
+_LOCAL_QUALIFIER_RE = re.compile(
+    r"(?i)\b(?:may|might|would|will|can|cannot|could|expect\w*|anticipat\w*|intend\w*|plan\w*"
+    r"|hope\w*|aim\w*|seek\w*)\b"
+)
+#: ... unless it introduces a clause ("we expect THAT, ..., the FDA will ...").
+_COMPLEMENT_QUALIFIER_RE = re.compile(
+    r"(?i)\b(?:expect\w*|anticipat\w*|intend\w*|plan\w*|hope\w*|aim\w*|believe\w*|seek\w*)"
+    r"\s+that\b"
+)
+#: * "potentially" / "possible" count only when they hedge the verb group itself.
+_HEDGED_VERB_GROUP_RE = re.compile(
+    r"(?i)\b(?:potential(?:ly)?|possibl[ey])\s+(?:\w+\s+)?"
+    r"(?:could|cannot|can|would|will|may|might|not|be|was|were|is|are|unable|fail\w*)\b"
+    r"|\bit\s+is\s+(?:potentially\s+)?possible\b"
+)
+_CLAUSE_BREAK_RE = re.compile(r"[,;:\u2014]")
+
+
+def _governing_qualifier(sentence: str, start: int, end: int) -> bool:
+    """True when conditional / forward-looking wording governs the clause
+    ``sentence[start:end]`` (the reported outcome), as opposed to qualifying
+    some other noun or an unrelated earlier clause."""
+    prefix = sentence[:start]
+    if _STRONG_QUALIFIER_RE.search(prefix) or _COMPLEMENT_QUALIFIER_RE.search(prefix):
+        return True
+    clause_start = max((m.end() for m in _CLAUSE_BREAK_RE.finditer(prefix)), default=0)
+    if _LOCAL_QUALIFIER_RE.search(prefix[clause_start:]):
+        return True
+    return bool(_HEDGED_VERB_GROUP_RE.search(sentence[clause_start:end]))
+
+
 def _reports_regulator(sentence: str, rule_ids: tuple[str, ...]) -> bool:
     """True when an unqualified sentence reports a regulator saying what one
     of the named Kill Gate regulator rules reads. The rules' own patterns
@@ -280,16 +330,17 @@ def _reports_regulator(sentence: str, rule_ids: tuple[str, ...]) -> bool:
             if match.start() < ref.start() and not match.start() <= ref.start() < match.end():
                 continue
             text = match.group(0)
-            could_not = bool(_COULD_NOT_RE.search(text))
             # "could not" is the reported outcome in "... could not be agreed to
             # while the trial is still ongoing" (the pattern demands that
-            # anchor) but a hypothetical after any conditional wording earlier
-            # in the sentence, however far back.
-            if could_not and _CONDITIONAL_RE.search(sentence[:match.start()]):
-                continue
+            # anchor); it is not itself a hypothetical marker.
             inner = _COULD_NOT_RE.sub("", text)
             if text.lower().startswith("would") or _INNER_HYPOTHETICAL_RE.search(inner):
                 continue
+            if rule_ids == _REGULATOR_CONSULTATION_RULES:
+                # Scoped: which words govern the OUTCOME, not just appear nearby.
+                if _governing_qualifier(sentence, match.start(), match.end()):
+                    continue
+                return True
             start = min(ref.start(), match.start())
             if _CONDITIONAL_RE.search(sentence[max(0, start - 80):start]):
                 continue
@@ -373,14 +424,7 @@ def _consultation_outcome(sentence: str) -> bool:
     """An unqualified report of how a consultation with a regulator ended,
     or an endpoint "could not be agreed" with nobody named."""
     def reported(match: re.Match[str]) -> bool:
-        if _qualified(sentence, match):
-            return False
-        # "could not" reads as a hypothetical after conditional wording
-        # anywhere earlier in the sentence.
-        return not (
-            _COULD_NOT_RE.search(match.group(0))
-            and _CONDITIONAL_RE.search(sentence[:match.start()])
-        )
+        return not _governing_qualifier(sentence, match.start(), match.end())
 
     if _REGULATOR_REF_RE.search(sentence) is None:
         return any(reported(m) for m in _UNATTRIBUTED_NO_AGREEMENT_RE.finditer(sentence))
@@ -398,6 +442,9 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
         regulator_status = _reports_regulator_status(sentence)
         consultation = _consultation_outcome(sentence)
         consultation_outcome = _reports_consultation_outcome(sentence)
+        financing = "forward-looking" not in sentence.lower() and _financing_contingent_on_regulatory(
+            sentence
+        )
         overlong = len(sentence) > _MAX_CLAIM_CHARS and bool(
             not_met or met or regulator_view or regulator_status
         )
@@ -418,7 +465,7 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
         elif (
             not consultation
             and _PRIMARY_RE.search(sentence)
-            and _OUTCOME_HINT_RE.search(sentence)
+            and (_OUTCOME_HINT_NARRATIVE_RE if financing else _OUTCOME_HINT_RE).search(sentence)
             and not any(_qualified(sentence, m) for m in _PRIMARY_RE.finditer(sentence))
         ):
             statements.append(DisclosureStatement("AMBIGUOUS_PRIMARY_ENDPOINT", sentence))
@@ -428,7 +475,7 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
             )
         elif consultation:
             statements.append(DisclosureStatement("AMBIGUOUS_REGULATOR_STATEMENT", sentence))
-        if "forward-looking" not in sentence.lower() and _financing_contingent_on_regulatory(sentence):
+        if financing:
             statements.append(DisclosureStatement(
                 "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"
                 if len(sentence) <= _MAX_CLAIM_CHARS else "AMBIGUOUS_FINANCING_STATEMENT",
