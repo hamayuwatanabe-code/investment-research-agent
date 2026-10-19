@@ -19,6 +19,9 @@ from itertools import pairwise
 
 import pytest
 
+from investment_research.collectors import http as http_module
+from investment_research.collectors.http import RateLimiter
+from investment_research.research import sec_live_smoke
 from investment_research.research.sec_live_smoke import (
     AllowlistedHttpClient,
     MaxRequestsExceededError,
@@ -41,6 +44,14 @@ class _Handler(BaseHTTPRequestHandler):
     #: path -> HTTP status to fail with (no redirect)
     fail: dict[str, int] = {}
     disallowed_port: int = 0
+    #: seconds the FIRST connection is held up before its request is read
+    #: (simulates cold-start latency: first socket/getaddrinfo/thread spawn)
+    first_connection_delay: float = 0.0
+
+    def setup(self):
+        if type(self).first_connection_delay and not type(self).hits:
+            time.sleep(type(self).first_connection_delay)
+        super().setup()
 
     def log_message(self, *args):
         pass
@@ -94,6 +105,7 @@ def base_url():
     _Handler.arrivals = []
     _Handler.chain = {}
     _Handler.fail = {}
+    _Handler.first_connection_delay = 0.0
     _DisallowedHandler.hits = []
     disallowed = ThreadingHTTPServer(("127.0.0.1", 0), _DisallowedHandler)
     threading.Thread(target=disallowed.serve_forever, daemon=True).start()
@@ -271,29 +283,78 @@ def test_non_http_scheme_on_an_allowlisted_host_is_refused_before_any_connection
 
 # =============================================================================
 # Rate limiting applies to EVERY GET actually sent, redirect hops included.
-# Gaps are measured at the server, on the same monotonic clock; a lower bound
-# on a sleep never flakes, and the tolerance only absorbs connect jitter.
+#
+# What is measured matters. ``RateLimiter.wait()`` guarantees spacing between
+# the instants the CLIENT releases consecutive GETs (``_last`` is stamped on
+# the same monotonic clock after the sleep). The time a GET ARRIVES at the
+# server is that release plus a per-connection latency (socket creation,
+# first-use address lookup, handler-thread spawn, scheduler jitter), so
+# ``arrival[n+1] - arrival[n] = release gap + latency[n+1] - latency[n]``:
+# a cold first connection can legitimately make the server-side gap shorter
+# than the interval (observed once on macOS: 0.0257 s against a 0.05 s limit
+# with a 0.015 s tolerance) without the limiter having misbehaved. No fixed
+# tolerance bounds that under load, so pacing is asserted on the limiter's
+# own release instants, and the server's arrival log is used only for what
+# it can prove: one release per GET actually received, and no GET arriving
+# before its own release.
 # =============================================================================
-_JITTER = 0.015
+@pytest.fixture
+def releases(monkeypatch) -> list[float]:
+    """Release instant (the limiter's own ``_last``) of every GET the client
+    sends, in order."""
+    log: list[float] = []
+
+    class RecordingLimiter(RateLimiter):
+        def wait(self) -> None:
+            super().wait()
+            log.append(self._last)
+
+    monkeypatch.setattr(sec_live_smoke, "RateLimiter", RecordingLimiter)
+    return log
 
 
 def _gaps() -> list[float]:
-    a = _Handler.arrivals
-    return [later - earlier for earlier, later in pairwise(a)]
+    """SERVER-side arrival gaps: informative only, never a pacing bound."""
+    return [later - earlier for earlier, later in pairwise(_Handler.arrivals)]
 
 
-def test_redirect_hops_are_paced_like_initial_gets(base_url):
+def _assert_paced(releases: list[float], interval: float, *, sent: int) -> None:
+    assert len(releases) == sent == len(_Handler.arrivals), (releases, _Handler.arrivals)
+    gaps = [later - earlier for earlier, later in pairwise(releases)]
+    assert len(gaps) == sent - 1
+    # exact: both stamps are the limiter's own, so no tolerance is needed
+    # beyond float rounding
+    assert min(gaps) >= interval - 1e-6, gaps
+    # causality: a GET cannot reach the server before the client released it
+    assert all(arrived >= released for released, arrived in zip(releases, _Handler.arrivals, strict=True))
+
+
+def test_server_arrival_gaps_do_not_bound_the_limiter_spacing(base_url, releases):
+    """The flake, reproduced deterministically: hold the FIRST connection up
+    at the server (cold-start latency). The limiter keeps its contract, yet
+    the server-side arrival gap falls far below the interval -- so a pacing
+    assertion on arrival gaps (the previous measurement) fails spuriously."""
+    _Handler.first_connection_delay = 0.08
+    _Handler.chain = {"/a": "/ok"}
+    client = _client(rate_limit_rps=20.0)  # 0.05 s minimum spacing
+
+    assert client.get(f"{base_url}/a").ok
+
+    _assert_paced(releases, 0.05, sent=2)  # the contract holds
+    assert _gaps()[0] < 0.05 - 0.015, _gaps()  # ...and arrival gaps cannot show it
+
+
+def test_redirect_hops_are_paced_like_initial_gets(base_url, releases):
     _Handler.chain = {"/a": "/b", "/b": "/c", "/c": "/ok"}
     client = _client(rate_limit_rps=10.0)  # 0.1 s minimum spacing
 
     assert client.get(f"{base_url}/a").ok
 
     assert _Handler.hits == ["/a", "/b", "/c", "/ok"]
-    assert len(_gaps()) == 3
-    assert min(_gaps()) >= 0.1 - _JITTER, _gaps()
+    _assert_paced(releases, 0.1, sent=4)
 
 
-def test_retries_and_redirects_are_paced_and_still_capped_at_six(base_url):
+def test_retries_and_redirects_are_paced_and_still_capped_at_six(base_url, releases):
     _Handler.chain = {"/r1": "/r2", "/r2": "/fail"}
     _Handler.fail = {"/fail": 500}
     client = _client(rate_limit_rps=20.0, max_requests=6, max_retries=2)  # 0.05 s
@@ -302,10 +363,10 @@ def test_retries_and_redirects_are_paced_and_still_capped_at_six(base_url):
 
     assert _Handler.hits == ["/r1", "/r2", "/fail", "/r1", "/r2", "/fail"]
     assert client.attempts_made == 6
-    assert min(_gaps()) >= 0.05 - _JITTER, _gaps()
+    _assert_paced(releases, 0.05, sent=6)
 
 
-def test_pacing_spans_logical_requests_and_their_hops_up_to_the_cap(base_url):
+def test_pacing_spans_logical_requests_and_their_hops_up_to_the_cap(base_url, releases):
     _Handler.chain = {f"/p{i}": f"/q{i}" for i in range(10)}
     client = _client(rate_limit_rps=20.0, max_requests=6)
 
@@ -316,7 +377,51 @@ def test_pacing_spans_logical_requests_and_their_hops_up_to_the_cap(base_url):
             break
 
     assert len(_Handler.hits) == 6 == client.attempts_made
-    assert min(_gaps()) >= 0.05 - _JITTER, _gaps()
+    _assert_paced(releases, 0.05, sent=6)
+
+
+def test_a_cold_first_connection_does_not_loosen_the_limiter_across_logical_requests(
+    base_url, releases,
+):
+    """Same cold-start condition across separate .get() calls."""
+    _Handler.first_connection_delay = 0.08
+    client = _client(rate_limit_rps=20.0, max_requests=6)
+
+    for i in range(3):
+        assert client.get(f"{base_url}/ok{i}").ok
+
+    _assert_paced(releases, 0.05, sent=3)
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_rate_limiter_contract_on_a_fake_clock(monkeypatch):
+    """The RateLimiter contract, deterministically: consecutive wait()
+    returns are at least ``1/rps`` apart; no wait when the caller was slower."""
+    clock = _FakeClock()
+    monkeypatch.setattr(http_module, "time", clock)  # the module's own name only
+    limiter = RateLimiter(2.0)  # 0.5 s
+
+    stamps = []
+    for work in (0.0, 0.1, 0.9, 0.0):  # time the caller spends between calls
+        limiter.wait()
+        stamps.append(clock.now)
+        clock.now += work
+
+    assert all(b - a >= 0.5 - 1e-9 for a, b in pairwise(stamps)), stamps
+    assert clock.sleeps == pytest.approx([0.5, 0.4])  # the slow caller (4th call) waits for nothing
+    assert RateLimiter(0.0).wait() is None  # rps<=0 disables spacing
 
 
 def test_a_redirect_refused_by_the_budget_is_never_waited_for(base_url):
