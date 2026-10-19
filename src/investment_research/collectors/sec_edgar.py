@@ -119,6 +119,11 @@ class SecEdgarCollector:
         #: not obtained: never guessed, never defaulted to "no filings".
         self.resolved_cik: int | None = None
         self.recent_filings: dict[str, Any] | None = None
+        #: Phase 4.3M: how many further submissions pages the SEC lists beyond
+        #: ``filings.recent`` (``filings.files``). They are NOT fetched; the
+        #: count lets the document collectors detect a listing that does not
+        #: reach back over their whole window.
+        self.older_listing_pages: int = 0
 
     # -- ticker -> CIK -----------------------------------------------------
     def _fetch_and_resolve_cik(
@@ -258,6 +263,8 @@ class SecEdgarCollector:
         if isinstance(recent, dict):
             self.resolved_cik = cik
             self.recent_filings = recent
+            older = (payload.get("filings") or {}).get("files")
+            self.older_listing_pages = len(older) if isinstance(older, list) else 0
         out.raw_facts.extend(self._filings_to_facts(ticker, cik, payload, out))
         return out
 

@@ -189,7 +189,12 @@ KILL_RULES: tuple[KillRule, ...] = (
         "delisting",
         KillCategory.LIQUIDITY_KILL,
         "Delisting or listing non-compliance",
-        _rx(r"delisting|minimum bid price|non-?compliance with[^.]{0,40}listing"),
+        _rx(
+            r"delisting|minimum bid price|non-?compliance with[^.]{0,40}listing"
+            r"|not\s+in\s+compliance\s+with[^.]{0,80}\blisting\b"
+            r"|\bcontinued\s+listing\b[^.]{0,60}(?:deficien|non-?complian|not\s+in\s+compliance)"
+            r"|(?:deficien\w*|notice)[^.]{0,60}\bcontinued\s+listing\b"
+        ),
         KillLevel.K3,
         KillLevel.K2,
         "Forced exit of index and institutional holders, and a hard deadline for corrective action.",
@@ -198,7 +203,10 @@ KILL_RULES: tuple[KillRule, ...] = (
         "restatement",
         KillCategory.ACCOUNTING_KILL,
         "Restatement or material weakness",
-        _rx(r"restat(?:e|ement)|material weakness|non-?reliance"),
+        _rx(
+            r"restat(?:e|ement)|material weakness|non-?reliance"
+            r"|(?:no\s+longer|not)\s+be\s+relied\s+(?:up)?on"
+        ),
         KillLevel.K4,
         KillLevel.K3,
         "The reported numbers underpinning every valuation are not reliable.",
@@ -207,7 +215,11 @@ KILL_RULES: tuple[KillRule, ...] = (
         "auditor_change",
         KillCategory.ACCOUNTING_KILL,
         "Auditor resignation or dismissal",
-        _rx(r"auditor\s+(?:resign|dismiss|declin)|dismissed\s+its\s+(?:independent\s+)?auditor"),
+        _rx(
+            r"auditor\s+(?:resign|dismiss|declin)|dismissed\s+its\s+(?:independent\s+)?auditor"
+            r"|\b(?:dismiss|resign|declin)\w*\b[^.]{0,100}\b(?:independent\s+registered\s+public"
+            r"\s+accounting\s+firm|certifying\s+accountant)\b"
+        ),
         KillLevel.K3,
         KillLevel.K2,
         "Auditors rarely resign for neutral reasons.",

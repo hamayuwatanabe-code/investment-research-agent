@@ -289,6 +289,8 @@ class ReportRenderer:
         # with the concerns they document.
         add(_section_research_provenance(self))
         add(_section_search_coverage(self))
+        if self.result.sec_coverage:
+            add(_section_sec_coverage(self))
         add(_section_evidence_sufficiency(self))
         add(_section_escalation(self))
         add(_section_traceability(self))
@@ -982,6 +984,41 @@ def _section_search_coverage(self: ReportRenderer) -> str:
     else:
         out.append("")
         out.append("All required domains were examined; a verdict is permitted.")
+    return "\n".join(out)
+
+
+def _section_sec_coverage(self: ReportRenderer) -> str:
+    """Phase 4.3M: which recent SEC filings were READ, which were NOT, and why,
+    one row per accession. Empty (no section at all) when the run kept no
+    ledger -- fixture and corpus runs read no SEC filing body."""
+    rows = self.result.sec_coverage
+    if not rows:
+        return ""
+    out = [_appendix("C. SEC FILING COVERAGE (per accession)")]
+    blocking = [r for r in rows if r.get("blocking")]
+    by_status: dict[str, int] = {}
+    for row in rows:
+        by_status[str(row.get("status"))] = by_status.get(str(row.get("status")), 0) + 1
+    out.append(
+        f"{len(rows)} filing(s) accounted for; {len(blocking)} UNREAD/UNVERIFIED and blocking. "
+        "Statuses: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())) + "."
+    )
+    out.append("")
+    out.append(f"  {'accession':<22} {'form':<7} {'filed':<11} {'items':<18} {'policy':<17} status")
+    for row in rows:
+        mark = "*" if row.get("blocking") else " "
+        out.append(
+            f" {mark}{str(row.get('accession')):<22} {str(row.get('form')):<7} "
+            f"{str(row.get('filing_date')):<11} {','.join(row.get('items') or []) or '-':<18} "
+            f"{str(row.get('policy')):<17} {row.get('status')}"
+        )
+        if row.get("reason"):
+            out.append(self._wrap(f"      reason: {row['reason']}"))
+        for doc in row.get("documents_not_read") or []:
+            out.append(self._wrap(f"      not read: {doc}"))
+    out.append("")
+    out.append("  * = blocks the action label.  NOT_READ_POLICY rows were NOT EXAMINED: no statement")
+    out.append("  about their content is made.  Agreement / instrument exhibits are never read.")
     return "\n".join(out)
 
 

@@ -462,25 +462,45 @@ Stated plainly rather than left to be discovered:
   recorded its explicit-literature state, fails closed: no re-fetch, no action
   label. Take `RUN_ID` from `--json`'s `run_id` or the report's `Run ID` line —
   the log file name uses a different id.
-- **SEC filing bodies: material 8-Ks only.** A `--live` run reads the bodies of 8-K/8-K/A
-  filings with items 1.01, 1.02, 2.03, 2.05, 3.02, 7.01 or 8.01 (or no items stated) from
-  the last 365 days, newest first (same-day filings by accession), at most 8 per run with up
-  to 2 EX-99 exhibits each (at most 32 actual outbound GETs to `www.sec.gov`, retries and
-  redirects included, 2 requests/second). An issuer statement that a primary endpoint was or
-  was not met, or that a strategic review or programme change began, becomes a
-  `COMPANY_CLAIM` fact quoting the filing. Any in-scope 8-K that is not fully read (beyond the
-  cap, out of budget, failed or invalid body, no `IRA_SEC_USER_AGENT`, ambiguous or
-  contradictory wording) is reported as `UNVERIFIED MATERIAL 8-K` with its accession and
-  withholds the action label. A company-reported financing condition tied to a regulatory step
-  (e.g. a later closing that depends on FDA agreement) withholds the action label on its own as
-  `FINANCING CONDITION REQUIRES VERIFICATION` -- a verification requirement, not a kill level.
-  The collect snapshot records the selection scope (`material-8k-scope/v2` with its items,
-  cap and order); a resume refuses a record written under another or no scope and makes no
-  request to fill the gap. 8-Ks whose items are all outside the scope are counted in the
-  run notes but are not read. **Not covered:** 8-Ks with only item 2.02 (earnings releases) or
-  other out-of-scope items, contracts or conditions older than 365 days, filings absent from
-  the submissions `filings.recent` block, and 10-K/10-Q bodies. A run that read no body of a
-  given company has not covered that company's 8-Ks.
+- **SEC primary documents: what is read, what is not, per accession.** A `--live` run reads,
+  from `www.sec.gov` only (2 requests/second; at most **56 actual outbound GETs** in total, retries
+  and redirects included: 48 for 8-Ks and 8 for the periodic reports; a body over 16 MiB is refused,
+  never truncated):
+  - **8-K / 8-K/A filed in the last 365 days**, by item policy (`research/sec_coverage.py`):
+    items 1.01, 1.02, 2.03, 2.05, 3.01, 3.02, 4.01, 4.02, 7.01, 8.01 (or none stated) are
+    **read** and block if unread; the **newest 2** earnings releases (item 2.02) are read and
+    block if unread, older ones are *not read by policy*; items 5.02, 5.03, 5.04, 5.05, 5.07,
+    5.08, 9.01 (officers, bylaws, votes, exhibits) are **not read and NOT EXAMINED** (they do
+    not block, and the report says so); **any other item code is not interpreted and BLOCKS**.
+    Read order is material items first, then earnings releases, newest first, same-day by
+    accession; at most 12 are read per run, the rest are `UNREAD_BEYOND_CAP` and block.
+  - **The newest 10-K (<= 460 days) and the newest 10-Q after it (<= 200 days)**
+    (`research/sec_periodic_reports.py`). A required report missing from the listing is
+    `NOT_FOUND` and blocks (this is also what a foreign private issuer's 20-F produces: unsupported,
+    not clean). Sentences the extractor finds but cannot classify in a long report are *counted*
+    in the ledger, not blocking.
+  - Every filing in scope gets **one ledger row** (accession, form, date, items, policy class,
+    status, reason, documents read / not read), saved in the collect snapshot and printed as
+    "SEC FILING COVERAGE" in the report and `sec_coverage` in `--json`. A blocking row also
+    withholds the action label as `UNVERIFIED MATERIAL 8-K` / `UNVERIFIED PERIODIC REPORT`, and
+    the gate derives a reason from the ledger even if the error list were lost.
+  - An issuer statement that a primary endpoint was or was not met, a regulator's reported view,
+    a listing notice, a going-concern doubt, an auditor change, a reliability-of-financials
+    matter, or a strategic change becomes a `COMPANY_CLAIM` fact quoting the filing.
+  - A company-reported **financing condition tied to a regulatory step** withholds the action
+    label on its own as `FINANCING CONDITION REQUIRES VERIFICATION` (not a kill level). Nothing
+    in code clears it: the reason states what a person must read (the executed agreement, a later
+    issuer filing on whether the closing occurred, and for an FDA-dependent condition the
+    FDA's own record) before it is withdrawn.
+  - A resume compares the restored record's scope ID (one for 8-Ks, one for periodic reports) with
+    the current one; a missing or different scope is refused, no request is made, and the
+    **restored** ledger -- not this invocation's fresh read -- decides.
+  - **NOT READ, and not blocking (residual risk):** agreement / instrument exhibits (EX-10, EX-4,
+    EX-2, EX-3; listed per accession as "not read"), prospectuses (S-1, S-3, 424B*), proxy statements,
+    Form 4, SC 13D/G bodies, 10-K/A and 10-Q/A amendments, 10-K/10-Q sentences the extractor cannot
+    classify, older submissions pages (`filings.files`; a listing that does not reach back over
+    the window is detected and blocks, but the older pages are not fetched), contracts or
+    conditions older than the windows. A run that read nothing for a company has not covered it.
 - **The current programme is never chosen by recency.** When more than one clinical
   programme is in evidence, only an explicit lead/current/pivotal description that no later
   disclosure (a reported result, discontinuation, strategic review) supersedes decides it;

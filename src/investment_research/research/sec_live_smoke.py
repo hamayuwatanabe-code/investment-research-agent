@@ -381,6 +381,11 @@ def _secret_body_patterns(secret_values: list[str]) -> list[re.Pattern[bytes]]:
     return patterns
 
 
+#: Fixed message for a response larger than the client's ``max_body_bytes``.
+#: Deliberately an ERROR that is NOT retried (the same body would be as large),
+#: and never a truncated body: a half-read filing must not look read.
+BODY_TOO_LARGE_ERROR = "response body exceeds the client's max_body_bytes; not read"
+
 #: The fixed, secret-free error message a caller sees whenever a response
 #: is rejected for echoing request credentials -- deliberately a single
 #: constant string, never interpolated with anything about THIS request,
@@ -423,6 +428,11 @@ class AllowlistedHttpClient:
     #: cap is never sent -- a redirect it would have followed ends the
     #: fetch as an incomplete ERROR result instead.
     max_requests: int = MAX_LIVE_GETS
+    #: Phase 4.3M: when set, a response body larger than this many bytes
+    #: (compressed on the wire, or after decompression) is refused as an ERROR
+    #: with :data:`BODY_TOO_LARGE_ERROR` -- never truncated, never retried.
+    #: ``None`` (the default) keeps every existing caller unchanged.
+    max_body_bytes: int | None = None
     #: Explicit cap on redirects followed in one request -- Phase 3F.0.4
     #: requirement 2; passed straight to ``_AllowlistedRedirectHandler``.
     max_redirects: int = DEFAULT_MAX_REDIRECTS
@@ -748,6 +758,8 @@ class AllowlistedHttpClient:
             # Never retry a definitive outcome -- only a transient one.
             if result.outcome != FetchOutcome.ERROR and result.outcome != FetchOutcome.TIMEOUT:
                 return result
+            if result.error == BODY_TOO_LARGE_ERROR:
+                return result
             if attempt > self.max_retries:
                 return result
         assert result is not None
@@ -767,10 +779,21 @@ class AllowlistedHttpClient:
         started = time.monotonic()
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
-                body = response.read()
+                limit = self.max_body_bytes
+                body = response.read() if limit is None else response.read(limit + 1)
+                if limit is not None and len(body) > limit:
+                    return FetchResult(
+                        url=public_url, outcome=FetchOutcome.ERROR, status=int(response.status),
+                        attempts=attempt, error=BODY_TOO_LARGE_ERROR,
+                    )
                 if response.headers.get("Content-Encoding") == "gzip":
                     with contextlib.suppress(OSError):
                         body = gzip.decompress(body)
+                if limit is not None and len(body) > limit:
+                    return FetchResult(
+                        url=public_url, outcome=FetchOutcome.ERROR, status=int(response.status),
+                        attempts=attempt, error=BODY_TOO_LARGE_ERROR,
+                    )
                 final_host = urllib.parse.urlparse(response.geturl()).hostname
                 if final_host not in self.allowed_hosts:
                     # Defense in depth: the redirect handler should already

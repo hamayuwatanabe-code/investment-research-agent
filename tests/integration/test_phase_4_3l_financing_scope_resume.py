@@ -286,7 +286,7 @@ def test_c6_the_collect_snapshot_records_a_structured_scope_id(monkeypatch, cras
     assert scope["items"] == sorted(m8k.MATERIAL_8K_ITEMS)
     assert {"1.01", "2.03", "3.02"} <= set(scope["items"])
     assert scope["forms"] == sorted(m8k.MATERIAL_8K_FORMS)
-    assert scope["max_filings"] == 8 and scope["max_outbound_gets"] == 32
+    assert scope["max_filings"] == m8k.MAX_FILINGS == 12 and scope["max_outbound_gets"] == 48
     assert scope["lookback_days"] == 365
 
 

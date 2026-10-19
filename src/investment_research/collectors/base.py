@@ -51,6 +51,11 @@ class CollectionResult:
     #: in the collect snapshot so a resume can tell which rule produced the
     #: record it restores. Empty for every collector that declares none.
     scope: dict[str, Any] = field(default_factory=dict)
+    #: Phase 4.3M: per-accession coverage ledger (``research/sec_coverage.py``
+    #: ``CoverageEntry.to_dict()`` rows): which recent SEC filings were read,
+    #: which were not, and why. Saved in the collect snapshot. Empty for every
+    #: collector that keeps none.
+    coverage: list[dict[str, Any]] = field(default_factory=list)
     #: Phase 4.3F: structured, one-a-collector primary-source identity
     #: metadata (Phase 4.3B's ``scoring/program_evidence.py`` types) --
     #: never a Fact, never re-derived by re-parsing a claim string or a

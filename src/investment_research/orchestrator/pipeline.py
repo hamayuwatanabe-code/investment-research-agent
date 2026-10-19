@@ -46,9 +46,15 @@ from ..research.adversarial import AdversarialOutcome
 from ..research.discovery import DiscoveryLog
 from ..research.escalation import EscalationReport, escalate, escalate_unresolved_questions
 from ..research.provider import NullResearchProvider, ResearchProvider
+from ..research.sec_coverage import ledger_consistency_reasons
 from ..research.sec_material_8k import (
     financing_condition_blocking_reasons,
     material_8k_scope_blocking_reasons,
+)
+from ..research.sec_periodic_reports import (
+    PERIODIC_COLLECTOR,
+    UNVERIFIED_PERIODIC_PREFIX,
+    periodic_scope_blocking_reasons,
 )
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
@@ -137,8 +143,7 @@ _LITERATURE_RAW_FACT_NOTES_PREFIX = "collected_by=literature_"
 
 #: Phase 4.3L: must equal ``research.sec_material_8k.MATERIAL_8K_COLLECTOR``
 #: / ``UNVERIFIED_PREFIX`` exactly -- duplicated (not imported), like
-#: ``_LITERATURE_BRIDGE_COLLECTOR_LABEL`` above, so this module gains no
-#: import edge onto the SEC document/HTTP code. A test asserts they match.
+#: ``_LITERATURE_BRIDGE_COLLECTOR_LABEL`` above. A test asserts they match.
 _MATERIAL_8K_COLLECTOR_LABEL = "sec_material_8k"
 _UNVERIFIED_MATERIAL_8K_PREFIX = "UNVERIFIED MATERIAL 8-K:"
 _SEC_EDGAR_COLLECTOR_LABEL = "sec_edgar"
@@ -159,16 +164,34 @@ def _material_8k_blocking_reasons(
     reasons = [
         str(error)
         for summary in collector_summaries
-        if summary.get("collector") == _MATERIAL_8K_COLLECTOR_LABEL
+        for label, prefix in (
+            (_MATERIAL_8K_COLLECTOR_LABEL, _UNVERIFIED_MATERIAL_8K_PREFIX),
+            (PERIODIC_COLLECTOR, UNVERIFIED_PERIODIC_PREFIX),
+        )
+        if summary.get("collector") == label
         for error in (summary.get("errors") or [])
-        if str(error).startswith(_UNVERIFIED_MATERIAL_8K_PREFIX)
+        if str(error).startswith(prefix)
     ]
+    for summary in collector_summaries:
+        for label, prefix in (
+            (_MATERIAL_8K_COLLECTOR_LABEL, _UNVERIFIED_MATERIAL_8K_PREFIX),
+            (PERIODIC_COLLECTOR, UNVERIFIED_PERIODIC_PREFIX),
+        ):
+            if summary.get("collector") == label:
+                reasons.extend(ledger_consistency_reasons(summary, prefix=prefix))
     if restored:
-        # Phase 4.3L correction 6: a restored record is judged by the scope it
-        # was written under; the check reads the snapshot's own summary and
-        # makes no request.
+        # Phase 4.3L correction 6 / 4.3M: a restored record is judged by the
+        # scope it was written under; the check reads the snapshot's own
+        # summary and makes no request.
         reasons.extend(material_8k_scope_blocking_reasons(collector_summaries))
+        reasons.extend(periodic_scope_blocking_reasons(collector_summaries))
     labels = {summary.get("collector") for summary in collector_summaries}
+    if restored and _SEC_EDGAR_COLLECTOR_LABEL in labels and PERIODIC_COLLECTOR not in labels:
+        reasons.append(
+            f"{UNVERIFIED_PERIODIC_PREFIX} the restored collection used the SEC filing list but "
+            "read no 10-K / 10-Q body (it predates periodic-report coverage), so the latest "
+            "annual and quarterly reports are UNVERIFIED for this run"
+        )
     if restored and _SEC_EDGAR_COLLECTOR_LABEL in labels and _MATERIAL_8K_COLLECTOR_LABEL not in labels:
         reasons.append(
             f"{_UNVERIFIED_MATERIAL_8K_PREFIX} the restored collection used the SEC filing list "
@@ -343,6 +366,10 @@ class ResearchResult:
     thesis_version: int = 0
     source_ref_map: Any = None
     collection_results: list[CollectionResult] = field(default_factory=list)
+    #: Phase 4.3M: the per-accession SEC coverage ledger the Action was judged on
+    #: (this run's collection, or the restored collect snapshot's on a resume);
+    #: each row is a ``CoverageEntry.to_dict()`` plus ``collector``.
+    sec_coverage: list[dict[str, Any]] = field(default_factory=list)
     #: Populated only when the caller supplied portfolio information.
     portfolio_guidance: dict[str, Any] = field(default_factory=dict)
     #: Phase 2 additions.
@@ -1057,6 +1084,7 @@ class Pipeline:
                         "zero_results": c.zero_results,
                         "raw_fact_count_before_dedup": c.raw_fact_count_before_dedup,
                         "scope": dict(c.scope),
+                        "coverage": [dict(e) for e in c.coverage],
                     }
                     for c in collection_results
                 ],
@@ -1914,6 +1942,22 @@ class Pipeline:
         # per-collector record on a resume (never this invocation's fresh
         # fetch, whose facts a resume does not use). The snapshot-
         # unavailable path already fails closed and adds nothing here.
+        sec_summaries: list[Mapping[str, Any]] = (
+            list(collect_snapshot.collectors)
+            if skip_collect and collect_snapshot is not None and not snapshot_unavailable
+            else [] if skip_collect
+            else [
+                {"collector": c.collector, "coverage": c.coverage, "errors": c.errors}
+                for c in collection_results
+            ]
+        )
+        result.sec_coverage = [
+            {**row, "collector": summary["collector"]}
+            for summary in sec_summaries
+            if summary.get("collector") in (_MATERIAL_8K_COLLECTOR_LABEL, PERIODIC_COLLECTOR)
+            for row in (summary.get("coverage") or [])
+            if isinstance(row, dict)
+        ]
         if skip_collect:
             material_8k_reasons = (
                 _material_8k_blocking_reasons(collect_snapshot.collectors, restored=True)

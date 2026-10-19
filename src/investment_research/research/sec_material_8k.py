@@ -83,19 +83,37 @@ from .sec_acquisition_adapters import (
     _validate_filename,
     classify_exhibit_entry,
 )
+from .sec_coverage import (
+    ADMINISTRATIVE_ITEMS,
+    FINANCING_RELEASE_CONDITIONS,
+    MATERIAL_ITEMS,
+    PERIODIC_RESULTS_ITEMS,
+    PERIODIC_RESULTS_READ,
+    CoverageEntry,
+    CoverageStatus,
+    PolicyClass,
+    classify_items,
+)
 from .sec_live_smoke import MaxRequestsExceededError
 
 MATERIAL_8K_COLLECTOR = "sec_material_8k"
 MATERIAL_8K_FORMS = frozenset({"8-K", "8-K/A"})
-#: 1.01 (entry into a material definitive agreement), 2.03 (creation of a
-#: direct financial obligation) and 3.02 (unregistered sales of equity) carry
-#: the terms of a financing; 1.02, 2.05, 7.01, 8.01 carry terminations,
-#: restructurings, Reg FD press releases and "other events" (clinical results).
-MATERIAL_8K_ITEMS = frozenset({"1.01", "1.02", "2.03", "2.05", "3.02", "7.01", "8.01"})
+#: Items whose filing is READ (see ``sec_coverage`` for the full item policy):
+#: the interpretable MATERIAL items plus 2.02 earnings releases (newest
+#: ``PERIODIC_RESULTS_READ`` only). 1.01 / 2.03 / 3.02 carry the terms of a
+#: financing; 1.02, 2.05, 7.01, 8.01 terminations, restructurings, Reg FD
+#: press releases and "other events" (clinical results); 3.01, 4.01, 4.02
+#: listing notices, auditor changes and non-reliance on financial statements.
+MATERIAL_8K_ITEMS = MATERIAL_ITEMS | PERIODIC_RESULTS_ITEMS
 LOOKBACK_DAYS = 365
-MAX_FILINGS = 8
+#: 12 = the 7 filings a real LGVN run selected under the narrower 4.3L scope
+#: (observed, not assumed) + up to 2 newly in-scope 3.01 notices + the newest
+#: 2 earnings releases + 1 spare. Beyond it a filing is UNVERIFIED, not dropped.
+MAX_FILINGS = 12
 MAX_EXHIBITS_PER_FILING = 2
 GETS_PER_FILING = 2 + MAX_EXHIBITS_PER_FILING
+#: The 8-K share of the run's GET budget: every filing may use its full
+#: ``GETS_PER_FILING``; retries and redirects count inside the same budget.
 MAX_OUTBOUND_GETS = MAX_FILINGS * GETS_PER_FILING
 ALLOWED_HOSTS = frozenset({"www.sec.gov"})
 RATE_LIMIT_RPS = 2.0  # SEC's fair-access ceiling is 10 requests/second
@@ -110,15 +128,18 @@ UNVERIFIED_PREFIX = "UNVERIFIED MATERIAL 8-K:"
 FINANCING_CONDITION_PREFIX = "FINANCING CONDITION REQUIRES VERIFICATION:"
 #: Version of the selection RULE itself (not just its parameters): bump when
 #: the ordering, the tie-break or the meaning of an item changes.
-MATERIAL_8K_SCOPE_RULE = "material-8k-scope/v2"
+MATERIAL_8K_SCOPE_RULE = "material-8k-scope/v3"
 _MAX_CLAIM_CHARS = 1200
 
 
 def _scope_id() -> str:
     return (
         f"{MATERIAL_8K_SCOPE_RULE}|forms={','.join(sorted(MATERIAL_8K_FORMS))}"
-        f"|items={','.join(sorted(MATERIAL_8K_ITEMS))}|lookback_days={LOOKBACK_DAYS}"
-        f"|max_filings={MAX_FILINGS}|order=filing_date_desc,accession_desc"
+        f"|read_items={','.join(sorted(MATERIAL_8K_ITEMS))}"
+        f"|administrative_items={','.join(sorted(ADMINISTRATIVE_ITEMS))}"
+        f"|periodic_results_read={PERIODIC_RESULTS_READ}|lookback_days={LOOKBACK_DAYS}"
+        f"|max_filings={MAX_FILINGS}|unsupported=blocks"
+        "|order=class,filing_date_desc,accession_desc"
     )
 
 
@@ -135,13 +156,17 @@ def material_8k_scope() -> dict[str, Any]:
         "rule": MATERIAL_8K_SCOPE_RULE,
         "forms": sorted(MATERIAL_8K_FORMS),
         "items": sorted(MATERIAL_8K_ITEMS),
+        "administrative_items": sorted(ADMINISTRATIVE_ITEMS),
+        "periodic_results_read": PERIODIC_RESULTS_READ,
         "lookback_days": LOOKBACK_DAYS,
         "max_filings": MAX_FILINGS,
         "max_outbound_gets": MAX_OUTBOUND_GETS,
-        "order": "filing_date_desc,accession_desc",
+        "order": "class,filing_date_desc,accession_desc",
         # stated, not searched: what this scope does NOT protect
         "not_covered": [
-            "8-K whose items are all outside `items` (e.g. 2.02 only)",
+            "8-K items outside the read set are not read: ADMINISTRATIVE items are reported "
+            "as not examined; any other item blocks as UNSUPPORTED",
+            "exhibits other than EX-99 press releases (agreements, instruments) are not read",
             "contracts or conditions older than lookback_days",
             "filings absent from the submissions `filings.recent` block",
         ],
@@ -155,6 +180,8 @@ class Material8KCandidate:
     filing_date: str
     items: tuple[str, ...]
     primary_document: str
+    policy: PolicyClass = PolicyClass.MATERIAL
+    rank: int = 0
 
 
 def _parse_iso(value: Any) -> date | None:
@@ -169,10 +196,15 @@ class Material8KSelection:
     selected: list[Material8KCandidate]
     beyond_cap: list[Material8KCandidate]
     window_start: date
-    #: 8-K / 8-K/A filings inside the window whose stated items are ALL outside
-    #: the scope, as ``{items-as-filed: count}``. Diagnostic only: these are
-    #: not candidates, are never read, and never become a blocking reason.
-    excluded_by_items: dict[str, int]
+    #: Dispositions decided WITHOUT reading anything: ADMINISTRATIVE and older
+    #: earnings releases (NOT_READ_POLICY), UNSUPPORTED items (NOT_READ_UNSUPPORTED,
+    #: blocking). One per accession -- nothing in the window goes unrecorded.
+    pre_entries: list[CoverageEntry]
+
+
+def _unsupported_items(items: tuple[str, ...]) -> list[str]:
+    known = MATERIAL_ITEMS | PERIODIC_RESULTS_ITEMS | ADMINISTRATIVE_ITEMS
+    return sorted(i for i in items if i not in known)
 
 
 def _select(recent: Mapping[str, Any], *, today: date) -> Material8KSelection:
@@ -187,8 +219,9 @@ def _select(recent: Mapping[str, Any], *, today: date) -> Material8KSelection:
         values = columns[key]
         return str(values[index]) if index < len(values) and values[index] is not None else ""
 
-    in_scope: list[Material8KCandidate] = []
-    excluded: dict[str, int] = {}
+    material: list[Material8KCandidate] = []
+    periodic: list[Material8KCandidate] = []
+    pre: list[CoverageEntry] = []
     for index, form in enumerate(forms):
         if form not in MATERIAL_8K_FORMS:
             continue
@@ -197,29 +230,69 @@ def _select(recent: Mapping[str, Any], *, today: date) -> Material8KSelection:
         if filed is not None and not (window_start <= filed <= today):
             continue
         items = tuple(i.strip() for i in at("items", index).split(",") if i.strip())
-        if items and not (set(items) & MATERIAL_8K_ITEMS):
-            key = ",".join(items)
-            excluded[key] = excluded.get(key, 0) + 1
-            continue
-        in_scope.append(
-            Material8KCandidate(
-                accession=at("accessionNumber", index) or UNKNOWN,
-                form=str(form),
-                filing_date=filed.isoformat() if filed else UNKNOWN,
-                items=items,
-                primary_document=at("primaryDocument", index),
-            )
+        policy = classify_items(items)
+        candidate = Material8KCandidate(
+            accession=at("accessionNumber", index) or UNKNOWN,
+            form=str(form),
+            filing_date=filed.isoformat() if filed else UNKNOWN,
+            items=items,
+            primary_document=at("primaryDocument", index),
+            policy=policy,
         )
-    # Newest dated first; same-day filings by accession (descending) so the
-    # order never depends on how the listing happened to be arranged; an
-    # undatable filing last (it cannot be shown to be recent, but it is still
-    # in scope -- beyond the cap it is UNVERIFIED).
-    in_scope.sort(
-        key=lambda c: (c.filing_date if c.filing_date != UNKNOWN else "0000", c.accession),
-        reverse=True,
-    )
+
+        def entry(status: CoverageStatus, reason: str, c: Material8KCandidate = candidate) -> CoverageEntry:
+            return CoverageEntry(
+                accession=c.accession, form=c.form, filing_date=c.filing_date, items=c.items,
+                policy=c.policy, status=status, reason=reason,
+            )
+
+        if policy is PolicyClass.ADMINISTRATIVE:
+            pre.append(entry(
+                CoverageStatus.NOT_READ_POLICY,
+                "administrative items only (officers/directors, bylaws, votes, exhibits): not read "
+                "and NOT EXAMINED",
+            ))
+        elif policy is PolicyClass.UNSUPPORTED:
+            pre.append(entry(
+                CoverageStatus.NOT_READ_UNSUPPORTED,
+                f"item(s) {', '.join(_unsupported_items(items))} have no extractor in this "
+                "system, so the filing was not interpreted",
+            ))
+        elif policy is PolicyClass.PERIODIC_RESULTS:
+            periodic.append(candidate)
+        else:
+            material.append(candidate)
+
+    def newest_first(rows: list[Material8KCandidate]) -> list[Material8KCandidate]:
+        # Same-day filings by accession (descending) so the order never depends
+        # on how the listing happened to be arranged; an undatable filing last
+        # (it cannot be shown to be recent, but it is still in scope).
+        return sorted(
+            rows,
+            key=lambda c: (c.filing_date if c.filing_date != UNKNOWN else "0000", c.accession),
+            reverse=True,
+        )
+
+    periodic = newest_first(periodic)
+    for older in periodic[PERIODIC_RESULTS_READ:]:
+        pre.append(CoverageEntry(
+            accession=older.accession, form=older.form, filing_date=older.filing_date,
+            items=older.items, policy=older.policy, status=CoverageStatus.NOT_READ_POLICY,
+            reason=f"older than the newest {PERIODIC_RESULTS_READ} earnings releases: not read "
+            "and NOT EXAMINED",
+        ))
+    # Read order: interpretable material items first, then the newest earnings
+    # releases; within a class newest first. A filing past the cap is UNVERIFIED.
+    ordered = [*newest_first(material), *periodic[:PERIODIC_RESULTS_READ]]
+    ranked = [
+        Material8KCandidate(
+            c.accession, c.form, c.filing_date, c.items, c.primary_document, c.policy, rank,
+        )
+        for rank, c in enumerate(ordered, start=1)
+    ]
     return Material8KSelection(
-        in_scope[:MAX_FILINGS], in_scope[MAX_FILINGS:], window_start, excluded,
+        ranked[:MAX_FILINGS], ranked[MAX_FILINGS:], window_start,
+        sorted(pre, key=lambda e: (e.filing_date, e.accession), reverse=True),
     )
 
 
@@ -227,8 +300,8 @@ def select_material_8k_candidates(
     recent: Mapping[str, Any], *, today: date,
 ) -> tuple[list[Material8KCandidate], list[Material8KCandidate], date]:
     """``(selected, beyond_cap, window_start)`` from a submissions
-    payload's ``filings.recent`` block, newest first. Selection only --
-    nothing here is evidence."""
+    payload's ``filings.recent`` block, in read-priority order. Selection
+    only -- nothing here is evidence."""
     selection = _select(recent, today=today)
     return selection.selected, selection.beyond_cap, selection.window_start
 
@@ -348,7 +421,8 @@ def _rule_patterns(rule_ids: tuple[str, ...]) -> list[re.Pattern[str]]:
 #: describes the endpoints under discussion, not the reported result.)
 #: * STRONG: opens a hypothetical / expresses doubt; governs everything after it.
 _STRONG_QUALIFIER_RE = re.compile(
-    r"(?i)\b(?:if|whether|unless|should|assum\w*|risks?|possibility|assurance|uncertain\w*"
+    r"(?i)\b(?:if|whether|unless|should(?!\s+(?:no\s+longer|not)\s+be\s+relied)|assum\w*|risks?"
+    r"|possibility|assurance|uncertain\w*"
     r"|forward-looking|in\s+the\s+event)\b"
 )
 #: * LOCAL: modal / intention wording governs only the clause it sits in ...
@@ -375,8 +449,11 @@ def _governing_qualifier(sentence: str, start: int, end: int) -> bool:
     ``sentence[start:end]`` (the reported outcome), as opposed to qualifying
     some other noun or an unrelated earlier clause."""
     prefix = sentence[:start]
-    if _STRONG_QUALIFIER_RE.search(prefix) or _COMPLEMENT_QUALIFIER_RE.search(prefix):
-        return True
+    # matched over the whole sentence (a lookahead may need the words that
+    # follow) but only a qualifier that BEGINS before the outcome counts
+    for regex in (_STRONG_QUALIFIER_RE, _COMPLEMENT_QUALIFIER_RE):
+        if any(m.start() < start for m in regex.finditer(sentence)):
+            return True
     clause_start = max((m.end() for m in _CLAUSE_BREAK_RE.finditer(prefix)), default=0)
     if _LOCAL_QUALIFIER_RE.search(prefix[clause_start:]):
         return True
@@ -506,6 +583,64 @@ def _consultation_outcome(sentence: str) -> bool:
     return any(reported(m) for m in _CONSULTATION_RE.finditer(sentence))
 
 
+# --- issuer-reported events the Kill Gate already has rules for ---------------------
+#: listing notice / going-concern doubt / accounting reliability / auditor
+#: change. Each kind is tied to ONE Kill Gate rule and a sentence becomes a
+#: fact only if that rule's own pattern matches it (the gate can therefore
+#: always see what was extracted), it is not hypothetical, and it is not a
+#: negation or a resolved matter. The fact's value is a neutral label: the
+#: gate fires on the issuer's verbatim sentence, never on this classifier.
+_LISTING_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:received|notif\w*|notice|letter|deficien\w*|not\s+in\s+compliance"
+    r"|failed\s+to\s+(?:maintain|satisfy|meet)|fell\s+below|non-?compliance)\b"
+)
+_LISTING_VENUE_RE = re.compile(
+    r"(?i)\b(?:nasdaq|nyse|new\s+york\s+stock\s+exchange|stock\s+exchange|listing)\b"
+)
+_GOING_CONCERN_NEGATION_RE = re.compile(
+    r"(?i)\b(?:alleviat\w*|dispel\w*|no\s+substantial\s+doubt|(?:did|does|do)\s+not\s+raise"
+    r"|not\s+(?:raise|raised|result)|without\s+substantial)\b"
+)
+_RELIABILITY_NEGATION_RE = re.compile(
+    r"(?i)\b(?:no|not|none|never|without|nor|absence\s+of|remediat\w*)\s+(?:\w+\s+){0,2}"
+    r"(?:material\s+weakness\w*|restate\w*|non-?reliance)\b"
+    r"|\bmaterial\s+weakness\w*[^.]{0,60}\b(?:remediat\w*|resolved|corrected)\b"
+)
+_AUDITOR_CONTEXT_RE = re.compile(r"(?i)\b(?:auditor|accounting\s+firm|certifying\s+accountant)\b")
+
+_EVENT_SPECS: tuple[tuple[str, str], ...] = (
+    ("LISTING_DEFICIENCY_REPORTED", "delisting"),
+    ("GOING_CONCERN_DOUBT_REPORTED", "going_concern"),
+    ("ACCOUNTING_RELIABILITY_REPORTED", "restatement"),
+    ("AUDITOR_CHANGE_REPORTED", "auditor_change"),
+)
+
+
+def _event_context_ok(kind: str, sentence: str) -> bool:
+    if kind == "LISTING_DEFICIENCY_REPORTED":
+        return bool(_LISTING_CONTEXT_RE.search(sentence) and _LISTING_VENUE_RE.search(sentence))
+    if kind == "GOING_CONCERN_DOUBT_REPORTED":
+        return "substantial doubt" in sentence.lower() and not _GOING_CONCERN_NEGATION_RE.search(
+            sentence
+        )
+    if kind == "ACCOUNTING_RELIABILITY_REPORTED":
+        return not _RELIABILITY_NEGATION_RE.search(sentence)
+    return bool(_AUDITOR_CONTEXT_RE.search(sentence))
+
+
+def _event_kind(sentence: str) -> str | None:
+    if "forward-looking" in sentence.lower():
+        return None
+    for kind, rule_id in _EVENT_SPECS:
+        for pattern in _rule_patterns((rule_id,)):
+            for match in pattern.finditer(sentence):
+                if _governing_qualifier(sentence, match.start(), match.end()):
+                    continue
+                if _event_context_ok(kind, sentence):
+                    return kind
+    return None
+
+
 def extract_statements(text: str) -> list[DisclosureStatement]:
     statements: list[DisclosureStatement] = []
     for sentence in split_sentences(text):
@@ -562,6 +697,12 @@ def extract_statements(text: str) -> list[DisclosureStatement]:
             and any(not _qualified(sentence, m) for m in _STRATEGY_RE.finditer(sentence))
         ):
             statements.append(DisclosureStatement("STRATEGIC_CHANGE", sentence))
+        event = _event_kind(sentence)
+        if event is not None:
+            statements.append(DisclosureStatement(
+                event if len(sentence) <= _MAX_CLAIM_CHARS else "AMBIGUOUS_EVENT_STATEMENT",
+                sentence,
+            ))
     return statements
 
 
@@ -586,8 +727,16 @@ _FACT_VALUE = {
     "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE": (
         "financing condition tied to a regulatory step (issuer 8-K disclosure)"
     ),
+    "LISTING_DEFICIENCY_REPORTED": "exchange listing notice reported by the issuer (issuer SEC disclosure)",
+    "GOING_CONCERN_DOUBT_REPORTED": "continuing-operations doubt reported by the issuer (issuer SEC disclosure)",
+    "ACCOUNTING_RELIABILITY_REPORTED": "financial-statement reliability matter reported by the issuer (issuer SEC disclosure)",
+    "AUDITOR_CHANGE_REPORTED": "auditor change reported by the issuer (issuer SEC disclosure)",
 }
 _FACT_CATEGORY = {
+    "LISTING_DEFICIENCY_REPORTED": FactCategory.LISTING,
+    "GOING_CONCERN_DOUBT_REPORTED": FactCategory.LIQUIDITY,
+    "ACCOUNTING_RELIABILITY_REPORTED": FactCategory.ACCOUNTING,
+    "AUDITOR_CHANGE_REPORTED": FactCategory.ACCOUNTING,
     "STRATEGIC_CHANGE": FactCategory.OTHER,
     "REGULATOR_VIEW_REPORTED": FactCategory.REGULATORY,
     "REGULATOR_STATUS_CHANGE_REPORTED": FactCategory.REGULATORY,
@@ -638,6 +787,82 @@ class _Document:
     is_primary: bool
 
 
+#: ``_get`` failure text for an exhausted GET budget (a cause, not just a message).
+_BUDGET_FAILURE = "the run's budget of {cap} outbound SEC GETs was exhausted"
+
+FACT_UNIT_8K = "8k_disclosure_statement"
+FACT_UNIT_PERIODIC = "periodic_report_statement"
+_FACT_UNITS = frozenset({FACT_UNIT_8K, FACT_UNIT_PERIODIC})
+
+#: Statement kinds that are "found a sentence, could not classify it".
+AMBIGUOUS_KINDS = frozenset({
+    "AMBIGUOUS_PRIMARY_ENDPOINT", "AMBIGUOUS_REGULATOR_STATEMENT",
+    "AMBIGUOUS_FINANCING_STATEMENT", "AMBIGUOUS_EVENT_STATEMENT",
+})
+_AMBIGUOUS_TEXT = {
+    "AMBIGUOUS_PRIMARY_ENDPOINT": (
+        "{doc} contains a primary-endpoint statement that cannot be classified unambiguously: "
+        "\"{sentence}\""
+    ),
+    "AMBIGUOUS_REGULATOR_STATEMENT": (
+        "{doc} contains a regulator-consultation statement that cannot be classified (it is "
+        "neither the regulator's own document nor a trial result, and no fact is recorded for "
+        "it): \"{sentence}\""
+    ),
+    "AMBIGUOUS_FINANCING_STATEMENT": (
+        "{doc} contains a financing condition tied to a regulatory step in a sentence too long "
+        "to quote whole, so it cannot be classified and no fact is recorded for it: "
+        "\"{sentence}\""
+    ),
+    "AMBIGUOUS_EVENT_STATEMENT": (
+        "{doc} contains a listing / going-concern / accounting-reliability / auditor statement "
+        "in a sentence too long to quote whole, so it cannot be classified and no fact is "
+        "recorded for it: \"{sentence}\""
+    ),
+}
+
+
+def ambiguous_statement_text(kind: str, doc: str, sentence: str) -> str:
+    return _AMBIGUOUS_TEXT[kind].format(doc=doc, sentence=sentence[:300])
+
+
+def filing_source(
+    *, form: str, accession: str, filing_date: str, doc_type: str, name: str, url: str,
+    event_date: str,
+) -> Source:
+    return Source(
+        source_id=make_source_id(url, f"{accession} {name}"),
+        url=url,
+        title=f"{form} {accession} {doc_type} ({name})",
+        tier=SourceTier.TIER_1,
+        publisher="SEC EDGAR",
+        filing_date=filing_date,
+        published_date=filing_date,
+        event_date=event_date,
+        accession=accession,
+        provenance=Provenance.LIVE,
+    )
+
+
+def statement_fact(
+    ticker: str, statement: DisclosureStatement, source: Source,
+    authority: DocumentAuthority, *, collector: str, unit: str,
+) -> RawFact:
+    """The issuer's verbatim sentence as a COMPANY_CLAIM -- never decision-grade."""
+    return RawFact(
+        ticker=ticker.upper(),
+        category=_FACT_CATEGORY.get(statement.kind, FactCategory.CLINICAL),
+        claim=statement.sentence,
+        source=source,
+        value=_FACT_VALUE[statement.kind],
+        unit=unit,
+        company_claim=True,
+        collector=collector,
+        content_kind=ContentKind.FULL_DOCUMENT,
+        source_authority=authority,
+    )
+
+
 def _unverified(candidate: Material8KCandidate, reason: str) -> str:
     items = ",".join(candidate.items) or "items not stated"
     return (
@@ -647,33 +872,96 @@ def _unverified(candidate: Material8KCandidate, reason: str) -> str:
     )
 
 
-def _get(http: Any, url: str) -> tuple[Any | None, str]:
+class SubBudgetHttp:
+    """A view of one shared ``AllowlistedHttpClient`` that stops starting new
+    logical requests once ``limit`` ACTUAL outbound GETs (as counted by the
+    client: retries and redirect hops included) have been spent THROUGH THIS
+    VIEW. The client's own ``max_requests`` stays the hard total for the run,
+    so the sum of the views can never exceed it; a view only keeps one
+    collector from starving the other. A single logical request that is
+    already running may overshoot its view by its own retries/redirects."""
+
+    def __init__(self, client: Any, limit: int) -> None:
+        self._client = client
+        self._limit = limit
+        self._base = getattr(client, "attempts_made", 0)
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        if getattr(self._client, "attempts_made", 0) - self._base >= self._limit:
+            raise MaxRequestsExceededError(f"sub-budget of {self._limit} outbound GETs exhausted")
+        return self._client.get(url, **kwargs)
+
+
+def _get(http: Any, url: str, *, cap: int = MAX_OUTBOUND_GETS) -> tuple[Any | None, str]:
     try:
         result = http.get(url)
     except MaxRequestsExceededError:
-        return None, f"the run's budget of {MAX_OUTBOUND_GETS} outbound SEC GETs was exhausted"
+        return None, _BUDGET_FAILURE.format(cap=getattr(http, "limit", cap))
     if not result.ok:
         return None, f"fetch failed ({result.outcome})"
     return result, ""
 
 
+def get_failure_status(failure: str) -> CoverageStatus:
+    """Budget exhaustion and a failed fetch are different causes in the ledger."""
+    return (
+        CoverageStatus.UNREAD_BUDGET if failure.startswith("the run's budget of")
+        else CoverageStatus.UNREAD_FETCH_FAILED
+    )
+
+
+#: Non-press-release exhibit types listed in a filing's index that this system
+#: does not read (agreements, instruments, plans). Recorded per accession so
+#: the gap is visible; they do not block (the 8-K body must itself describe
+#: the material terms) -- stated as a residual risk, see the README.
+_UNSUPPORTED_EXHIBIT_RE = re.compile(r"(?i)^EX-(?:1|2|3|4|10)(?:\.|$)")
+
+
+@dataclass
+class FilingRead:
+    facts: list[RawFact]
+    reasons: list[str]
+    notes: list[str]
+    status: CoverageStatus
+    cause: str
+    documents_read: list[str]
+    documents_not_read: list[str]
+    #: statements found but not turned into facts (reported, not blocking, for
+    #: long periodic reports -- see ``sec_periodic_reports``)
+    unclassified: int = 0
+
+
 def _read_filing(
     ticker: str, cik: int, candidate: Material8KCandidate, http: Any,
-) -> tuple[list[RawFact], list[str], list[str]]:
-    """``(raw_facts, unverified_reasons, notes)`` for one candidate."""
+) -> FilingRead:
+    """Read one candidate's primary document and (up to the cap) its EX-99
+    press releases, classifying every statement."""
+    causes: list[str] = []
+
+    def fail(
+        status: CoverageStatus, why: str, *, facts: list[RawFact] | None = None,
+    ) -> FilingRead:
+        return FilingRead(
+            facts or [], [_unverified(candidate, why)], [], status, why, [], [],
+        )
+
     if not _validate_accession(candidate.accession):
-        return [], [_unverified(candidate, "the accession number is malformed")], []
+        return fail(CoverageStatus.UNREAD_INVALID, "the accession number is malformed")
     if not _validate_filename(candidate.primary_document):
-        return [], [_unverified(candidate, "the primary document name is missing or unsafe")], []
+        return fail(CoverageStatus.UNREAD_INVALID, "the primary document name is missing or unsafe")
     accession_nodash = candidate.accession.replace("-", "")
 
     index, failure = _get(http, _directory_index_json_url(cik, accession_nodash))
     if index is None:
-        return [], [_unverified(candidate, f"the filing index could not be read: {failure}")], []
+        return fail(get_failure_status(failure), f"the filing index could not be read: {failure}")
     listing = ((index.json() or {}).get("directory") or {}).get("item") or []
     names = {str(item.get("name", "")) for item in listing if isinstance(item, Mapping)}
     if candidate.primary_document not in names:
-        return [], [_unverified(candidate, "the filing index does not list the primary document")], []
+        return fail(CoverageStatus.UNREAD_INVALID, "the filing index does not list the primary document")
 
     exhibits = sorted(
         (
@@ -687,13 +975,20 @@ def _read_filing(
             description="", primary_document=candidate.primary_document,
         ) is ExhibitCategory.PRESS_RELEASE
     )
+    not_read = [
+        f"{item.get('type')} {item.get('name')}: not read (agreement / instrument exhibits "
+        "are not supported)"
+        for item in listing
+        if isinstance(item, Mapping) and _UNSUPPORTED_EXHIBIT_RE.match(str(item.get("type", "")))
+    ]
     reasons: list[str] = []
     if len(exhibits) > MAX_EXHIBITS_PER_FILING:
-        reasons.append(_unverified(
-            candidate,
+        why = (
             f"{len(exhibits) - MAX_EXHIBITS_PER_FILING} further EX-99 exhibit(s) beyond the "
-            f"per-filing cap of {MAX_EXHIBITS_PER_FILING} were not read",
-        ))
+            f"per-filing cap of {MAX_EXHIBITS_PER_FILING} were not read"
+        )
+        reasons.append(_unverified(candidate, why))
+        causes.append(why)
     documents = [
         _Document(candidate.primary_document, candidate.form, "", DocumentAuthority.STATUTORY_FILING, True),
         *(
@@ -705,89 +1000,87 @@ def _read_filing(
     facts: list[RawFact] = []
     kinds: set[str] = set()
     read_names: list[str] = []
+    first_unread: list[CoverageStatus] = []
+
+    def note_failure(why: str, status: CoverageStatus = CoverageStatus.UNREAD_INVALID) -> None:
+        reasons.append(_unverified(candidate, why))
+        causes.append(why)
+        first_unread.append(status)
+
     for document in documents:
         url = _resolve_document_url(cik, accession_nodash, document.name)
         if url is None:
-            reasons.append(_unverified(candidate, f"{document.doc_type} {document.name!r} has no safe URL"))
+            note_failure(f"{document.doc_type} {document.name!r} has no safe URL")
             continue
         fetched, failure = _get(http, url)
         if fetched is None:
-            reasons.append(_unverified(candidate, f"{document.doc_type} {document.name} was not read: {failure}"))
+            note_failure(
+                f"{document.doc_type} {document.name} was not read: {failure}",
+                get_failure_status(failure),
+            )
             continue
         text = _html_to_text(fetched.text)
         if not _content_is_valid_body(text):
-            reasons.append(_unverified(
-                candidate,
+            note_failure(
                 f"{document.doc_type} {document.name} failed body validation (too short, an index "
-                "page, or an access-denial/rate-limit page)",
-            ))
+                "page, or an access-denial/rate-limit page)"
+            )
             continue
         read_names.append(f"{document.doc_type} {document.name}")
-        event_date = body_event_date(text, is_primary_8k=document.is_primary)
-        source = Source(
-            source_id=make_source_id(fetched.url, f"{candidate.accession} {document.name}"),
-            url=fetched.url,
-            title=f"{candidate.form} {candidate.accession} {document.doc_type} ({document.name})",
-            tier=SourceTier.TIER_1,
-            publisher="SEC EDGAR",
-            filing_date=candidate.filing_date,
-            published_date=candidate.filing_date,
-            event_date=event_date,
-            accession=candidate.accession,
-            provenance=Provenance.LIVE,
+        source = filing_source(
+            form=candidate.form, accession=candidate.accession, filing_date=candidate.filing_date,
+            doc_type=document.doc_type, name=document.name, url=fetched.url,
+            event_date=body_event_date(text, is_primary_8k=document.is_primary),
         )
         for statement in extract_statements(text):
-            if statement.kind == "AMBIGUOUS_FINANCING_STATEMENT":
-                reasons.append(_unverified(
-                    candidate,
-                    f"{document.doc_type} {document.name} contains a financing condition tied to "
-                    "a regulatory step in a sentence too long to quote whole, so it cannot be "
-                    "classified and no fact is recorded for it: "
-                    f"\"{statement.sentence[:300]}\"",
-                ))
-                continue
-            if statement.kind == "AMBIGUOUS_REGULATOR_STATEMENT":
-                reasons.append(_unverified(
-                    candidate,
-                    f"{document.doc_type} {document.name} contains a regulator-consultation "
-                    "statement that cannot be classified (it is neither the regulator's own "
-                    "document nor a trial result, and no fact is recorded for it): "
-                    f"\"{statement.sentence[:300]}\"",
-                ))
-                continue
-            if statement.kind == "AMBIGUOUS_PRIMARY_ENDPOINT":
-                reasons.append(_unverified(
-                    candidate,
-                    f"{document.doc_type} {document.name} contains a primary-endpoint statement "
-                    f"that cannot be classified unambiguously: \"{statement.sentence[:300]}\"",
+            if statement.kind in AMBIGUOUS_KINDS:
+                note_failure(ambiguous_statement_text(
+                    statement.kind, f"{document.doc_type} {document.name}", statement.sentence,
                 ))
                 continue
             kinds.add(statement.kind)
-            facts.append(
-                RawFact(
-                    ticker=ticker.upper(),
-                    category=_FACT_CATEGORY.get(statement.kind, FactCategory.CLINICAL),
-                    claim=statement.sentence,
-                    source=source,
-                    value=_FACT_VALUE[statement.kind],
-                    unit="8k_disclosure_statement",
-                    company_claim=True,
-                    collector=MATERIAL_8K_COLLECTOR,
-                    content_kind=ContentKind.FULL_DOCUMENT,
-                    source_authority=document.authority,
-                )
-            )
+            facts.append(statement_fact(
+                ticker, statement, source, document.authority,
+                collector=MATERIAL_8K_COLLECTOR, unit=FACT_UNIT_8K,
+            ))
     if {"PRIMARY_ENDPOINT_NOT_MET", "PRIMARY_ENDPOINT_MET"} <= kinds:
-        reasons.append(_unverified(
-            candidate,
+        why = (
             "its documents contain contradictory primary-endpoint statements (both met and not "
-            "met); both are reported as facts and neither is treated as settled",
-        ))
+            "met); both are reported as facts and neither is treated as settled"
+        )
+        reasons.append(_unverified(candidate, why))
+        causes.append(why)
     notes = [
         f"{candidate.form} {candidate.accession} filed {candidate.filing_date}: read "
         f"{', '.join(read_names) or 'nothing'}; {len(facts)} outcome/strategy statement(s) extracted"
     ]
-    return facts, reasons, notes
+    if not reasons:
+        status = CoverageStatus.READ
+    elif read_names:
+        status = CoverageStatus.READ_PARTIAL
+    else:
+        status = first_unread[0] if first_unread else CoverageStatus.UNREAD_FETCH_FAILED
+    return FilingRead(
+        facts, reasons, notes, status, "; ".join(causes), read_names, not_read,
+    )
+
+
+def _ledger_note(entries: Sequence[CoverageEntry]) -> list[str]:
+    """Run notes summarising the NOT-read dispositions (the entries
+    themselves are the authority; these only make them easy to see)."""
+    notes: list[str] = []
+    by_reason: dict[tuple[str, str], int] = {}
+    for entry in entries:
+        if entry.status in (CoverageStatus.NOT_READ_POLICY, CoverageStatus.NOT_READ_UNSUPPORTED):
+            key = (entry.status.value, ",".join(entry.items) or "items not stated")
+            by_reason[key] = by_reason.get(key, 0) + 1
+    for (status, items), count in sorted(by_reason.items()):
+        label = (
+            "NOT EXAMINED by policy (does not block)" if status == "NOT_READ_POLICY"
+            else "NOT INTERPRETED, no extractor for these items (BLOCKS)"
+        )
+        notes.append(f"{count} 8-K filing(s) with items {items}: {label}")
+    return notes
 
 
 def collect_material_8k_disclosures(
@@ -798,13 +1091,15 @@ def collect_material_8k_disclosures(
     http: Any | None,
     today: date,
     unavailable_reason: str = "",
+    older_listing_pages: int = 0,
 ) -> CollectionResult:
     """One ``CollectionResult`` for this run's material 8-K reading. ``http``
     is ``None`` exactly when no request may be made (``unavailable_reason``
     says why: offline run, no valid SEC User-Agent) -- every in-scope
     candidate is then UNVERIFIED, and a submissions listing that was never
     obtained makes the whole scope UNVERIFIED (it cannot be known whether a
-    material 8-K exists)."""
+    material 8-K exists). ``older_listing_pages`` is the number of further
+    submissions pages the SEC lists beyond ``filings.recent`` (not fetched)."""
     out = CollectionResult(
         collector=MATERIAL_8K_COLLECTOR, provenance=Provenance.LIVE, scope=material_8k_scope(),
     )
@@ -822,40 +1117,66 @@ def collect_material_8k_disclosures(
         selection.selected, selection.beyond_cap, selection.window_start,
     )
     out.notes.append(
-        f"material 8-K scope: forms {'/'.join(sorted(MATERIAL_8K_FORMS))} with items "
-        f"{', '.join(sorted(MATERIAL_8K_ITEMS))} (or no items stated) filed {window_start} to "
-        f"{today}; {len(selected)} selected for reading, {len(beyond_cap)} beyond the per-run "
-        f"cap of {MAX_FILINGS}. NOT covered: earlier 8-Ks, other item codes (e.g. 2.02), "
-        "and 10-K/10-Q bodies"
+        f"material 8-K scope: forms {'/'.join(sorted(MATERIAL_8K_FORMS))} filed {window_start} to "
+        f"{today}; read-set items {', '.join(sorted(MATERIAL_8K_ITEMS))} (or no items stated); "
+        f"{len(selected)} selected for reading, {len(beyond_cap)} beyond the per-run cap of "
+        f"{MAX_FILINGS}. NOT covered: earlier 8-Ks, agreement/instrument exhibits, and 10-K/10-Q "
+        "bodies (see the periodic-report collector)"
     )
-    if selection.excluded_by_items:
-        total = sum(selection.excluded_by_items.values())
-        detail = ", ".join(
-            f"{items} x{count}" if count > 1 else items
-            for items, count in sorted(selection.excluded_by_items.items())
-        )
-        out.notes.append(
-            f"{total} 8-K filing(s) in the window have items outside the scope and were not "
-            f"read (diagnostic only; not part of the in-scope count above): {detail}"
-        )
+    entries: list[CoverageEntry] = list(selection.pre_entries)
+    out.notes.extend(_ledger_note(selection.pre_entries))
+    for entry in selection.pre_entries:
+        if entry.status is CoverageStatus.NOT_READ_UNSUPPORTED:
+            out.errors.append(
+                f"{UNVERIFIED_PREFIX} {entry.form} accession {entry.accession} filed "
+                f"{entry.filing_date} ({','.join(entry.items)}) -- {entry.reason}; its content is "
+                "UNVERIFIED and no action label can rest on the evidence without it"
+            )
+    if older_listing_pages > 0:
+        dates = [d for d in (_parse_iso(x) for x in (recent.get("filingDate") or [])) if d]
+        if dates and min(dates) > window_start:
+            out.errors.append(
+                f"{UNVERIFIED_PREFIX} the SEC filing list reaches back only to {min(dates)} but "
+                f"the {LOOKBACK_DAYS}-day window starts {window_start}; {older_listing_pages} "
+                "older listing page(s) exist and are not fetched, so 8-Ks in the earlier part of "
+                "the window cannot be accounted for"
+            )
     for candidate in beyond_cap:
-        out.errors.append(_unverified(candidate, f"it is beyond the per-run cap of {MAX_FILINGS} filings"))
+        why = f"it is beyond the per-run cap of {MAX_FILINGS} filings"
+        out.errors.append(_unverified(candidate, why))
+        entries.append(CoverageEntry(
+            candidate.accession, candidate.form, candidate.filing_date, candidate.items,
+            candidate.policy, CoverageStatus.UNREAD_BEYOND_CAP, why, rank=candidate.rank,
+        ))
     for candidate in selected:
         if http is None:
-            out.errors.append(_unverified(candidate, unavailable_reason or "no SEC client available"))
+            why = unavailable_reason or "no SEC client available"
+            out.errors.append(_unverified(candidate, why))
+            entries.append(CoverageEntry(
+                candidate.accession, candidate.form, candidate.filing_date, candidate.items,
+                candidate.policy, CoverageStatus.UNREAD_NO_CLIENT, why, rank=candidate.rank,
+            ))
             continue
-        facts, reasons, notes = _read_filing(ticker, cik, candidate, http)
-        out.raw_facts.extend(facts)
-        out.sources.extend({f.source.source_id: f.source for f in facts}.values())
-        out.errors.extend(reasons)
-        out.notes.extend(notes)
+        read = _read_filing(ticker, cik, candidate, http)
+        out.raw_facts.extend(read.facts)
+        out.sources.extend({f.source.source_id: f.source for f in read.facts}.values())
+        out.errors.extend(read.reasons)
+        out.notes.extend(read.notes)
+        entries.append(CoverageEntry(
+            candidate.accession, candidate.form, candidate.filing_date, candidate.items,
+            candidate.policy, read.status, read.cause,
+            tuple(read.documents_read), tuple(read.documents_not_read), len(read.facts),
+            rank=candidate.rank,
+        ))
+    out.coverage = [e.to_dict() for e in sorted(
+        entries, key=lambda e: (e.filing_date, e.accession), reverse=True,
+    )]
     if out.errors:
         out.outcome = FetchOutcome.ERROR
     return out
 
 
 _FINANCING_KIND = "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"
-_FACT_UNIT = "8k_disclosure_statement"
 
 
 def is_financing_condition_fact(fact: Any) -> bool:
@@ -864,7 +1185,7 @@ def is_financing_condition_fact(fact: Any) -> bool:
     extractor writes (both survive collection, verification and a snapshot
     round-trip), never by re-reading the claim."""
     return (
-        getattr(fact, "unit", None) == _FACT_UNIT
+        getattr(fact, "unit", None) in _FACT_UNITS
         and getattr(fact, "value", None) == _FACT_VALUE[_FINANCING_KIND]
     )
 
@@ -890,7 +1211,8 @@ def financing_condition_blocking_reasons(facts: Sequence[Any]) -> list[str]:
             f"{FINANCING_CONDITION_PREFIX} the issuer reports a financing condition tied to a "
             f"regulatory step (COMPANY_CLAIM, not verified against the agreement or the "
             f"regulator): \"{str(fact.claim)[:400]}\" -- source {fact.source_title}, "
-            f"{fact.source_url}, filed {fact.filing_date}, event {fact.event_date}"
+            f"{fact.source_url}, filed {fact.filing_date}, event {fact.event_date}. "
+            f"{FINANCING_RELEASE_CONDITIONS}"
         )
     return reasons
 

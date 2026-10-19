@@ -161,26 +161,30 @@ def _collect(routes=None, recent=ONE_8K, http="default", **kwargs) -> tuple[Coll
 def test_selection_uses_items_window_and_cap_newest_first():
     rows = [
         ("8-K", "2026-09-23", "7.01,8.01,9.01", "0009900001-26-000001", "a.htm"),
-        ("8-K", "2026-08-12", "2.02,9.01", "0009900001-26-000002", "b.htm"),  # earnings only
+        ("8-K", "2026-08-12", "2.02,9.01", "0009900001-26-000002", "b.htm"),  # newest earnings release: read
         ("8-K/A", "2026-07-01", "8.01", "0009900001-26-000003", "c.htm"),
         ("8-K", "2026-06-01", "", "0009900001-26-000004", "d.htm"),  # items unknown: kept
         ("10-Q", "2026-08-12", "", "0009900001-26-000005", "e.htm"),
         ("8-K", "2025-09-01", "8.01", "0009900001-25-000006", "f.htm"),  # outside 365 days
         ("8-K", "not-a-date", "8.01", "0009900001-26-000007", "g.htm"),  # undatable: kept
+        ("8-K", "2026-08-11", "5.02,9.01", "0009900001-26-000008", "i.htm"),  # administrative: not read
     ]
-    rows += [("8-K", f"2026-05-{d:02d}", "7.01", f"0009900001-26-0001{d:02d}", "h.htm") for d in (1, 2, 3, 4)]
+    rows += [("8-K", f"2026-05-{d:02d}", "7.01", f"0009900001-26-0001{d:02d}", "h.htm") for d in range(1, 13)]
     selected, beyond, start = m8k.select_material_8k_candidates(_recent(*rows), today=TODAY)
 
     assert start == date(2025, 10, 16)
     chosen = [c.accession for c in selected + beyond]
-    assert "0009900001-26-000002" not in chosen and "0009900001-26-000005" not in chosen
+    assert "0009900001-26-000005" not in chosen and "0009900001-26-000008" not in chosen
     assert "0009900001-25-000006" not in chosen
-    assert {"0009900001-26-000004", "0009900001-26-000007"} <= set(chosen)
+    assert {"0009900001-26-000002", "0009900001-26-000004", "0009900001-26-000007"} <= set(chosen)
     assert len(selected) == m8k.MAX_FILINGS
-    assert selected[0].accession == "0009900001-26-000001"  # newest dated first
-    dated = [c.filing_date for c in selected + beyond if c.filing_date != "UNKNOWN"]
-    assert dated == sorted(dated, reverse=True)
-    assert (selected + beyond)[-1].accession == "0009900001-26-000007"  # undatable last
+    assert selected[0].accession == "0009900001-26-000001"  # newest MATERIAL first
+    # the earnings release ranks after every MATERIAL filing
+    ranks = [c.policy.value for c in selected + beyond]
+    assert ranks.index("PERIODIC_RESULTS") > max(i for i, r in enumerate(ranks) if r == "MATERIAL")
+    material_dates = [c.filing_date for c in selected + beyond
+                      if c.policy.value == "MATERIAL" and c.filing_date != "UNKNOWN"]
+    assert material_dates == sorted(material_dates, reverse=True)
     assert len(beyond) == len(chosen) - m8k.MAX_FILINGS
 
 
@@ -327,10 +331,11 @@ def test_an_unobtained_filing_list_makes_the_whole_scope_unverified():
 
 
 def test_candidates_beyond_the_cap_are_unverified_not_dropped():
-    rows = [("8-K", f"2026-09-{d:02d}", "8.01", f"0009900001-26-0002{d:02d}", "x.htm") for d in range(1, 9)]
+    n = m8k.MAX_FILINGS + 2
+    rows = [("8-K", f"2026-09-{d:02d}", "8.01", f"0009900001-26-0002{d:02d}", "x.htm") for d in range(1, n + 1)]
     result, fake = _collect(routes={}, recent=_recent(*rows))
     beyond = [e for e in result.errors if "beyond the per-run cap" in e]
-    assert len(beyond) == 8 - m8k.MAX_FILINGS
+    assert len(beyond) == 2
     assert all("0009900001-26-00020" in e for e in beyond)  # the two OLDEST
 
 
@@ -358,7 +363,8 @@ def _wire_response(url: str, status: int, body: str = "", location: str = ""):
 def test_sec_document_client_configuration():
     client = cli.build_sec_document_client("Synthetic Research ops@example.org")
     assert client.allowed_hosts == frozenset({"www.sec.gov"})
-    assert client.max_requests == m8k.MAX_OUTBOUND_GETS == 32
+    assert client.max_requests == cli.SEC_DOCUMENT_MAX_GETS == 56 == 48 + 8
+    assert client.max_body_bytes == 16 * 1024 * 1024
     assert client.max_retries == 1
     assert client.rate_limit_rps == 2.0
     assert client.out_dir is None
@@ -412,13 +418,15 @@ def test_cli_offline_or_placeholder_user_agent_makes_no_request(monkeypatch):
 
     monkeypatch.setattr(cli, "build_sec_document_client", explode)
     sec = SimpleNamespace(resolved_cik=CIK, recent_filings=ONE_8K)
-    offline = cli.collect_material_8k(TICKER, sec, settings=Settings(), live=False, today=TODAY)
-    placeholder = cli.collect_material_8k(
+    offline = cli.collect_sec_documents(TICKER, sec, settings=Settings(), live=False, today=TODAY)
+    placeholder = cli.collect_sec_documents(
         TICKER, sec, settings=Settings(sec_user_agent="investment-research-agent contact@example.com"),
         live=True, today=TODAY,
     )
-    assert any("offline run" in e for e in offline.errors)
-    assert any("no valid SEC User-Agent" in e for e in placeholder.errors)
+    assert any("offline run" in e for r in offline for e in r.errors)
+    assert any("no valid SEC User-Agent" in e for r in placeholder for e in r.errors)
+    # both document collectors reported, each with its own scope
+    assert {r.collector for r in offline} == {m8k.MATERIAL_8K_COLLECTOR, "sec_periodic_reports"}
 
 
 # =============================================================================
@@ -847,26 +855,31 @@ def _march_rows(extra: int):
 
 def test_c3_a_year_of_filings_around_one_clinical_event_still_reaches_the_older_financing_8k():
     """Six newer 8-Ks used to push the 2026-03-12 financing 8-K beyond the cap."""
-    selected, beyond, _ = m8k.select_material_8k_candidates(_recent(*_march_rows(6)), today=TODAY)
+    selected, beyond, _ = m8k.select_material_8k_candidates(
+        _recent(*_march_rows(m8k.MAX_FILINGS - 1)), today=TODAY,
+    )
     assert "0009900001-26-000430" in [c.accession for c in selected]
     assert beyond == []
 
 
 def test_c3_the_cap_and_the_actual_get_budget_are_stated_and_consistent():
-    assert m8k.MAX_FILINGS == 8
-    assert m8k.MAX_OUTBOUND_GETS == 32 == m8k.MAX_FILINGS * m8k.GETS_PER_FILING
+    # 12 = 7 observed on a real run under the narrower scope + 2 listing notices + 2 earnings
+    # releases + 1 spare; the 8-K GET share is derived from it, never set independently
+    assert m8k.MAX_FILINGS == 12
+    assert m8k.MAX_OUTBOUND_GETS == 48 == m8k.MAX_FILINGS * m8k.GETS_PER_FILING
 
 
 def test_c3_beyond_the_new_cap_is_still_an_unverified_blocking_reason_never_dropped():
-    selected, beyond, _ = m8k.select_material_8k_candidates(_recent(*_march_rows(8)), today=TODAY)
+    extra = m8k.MAX_FILINGS
+    selected, beyond, _ = m8k.select_material_8k_candidates(_recent(*_march_rows(extra)), today=TODAY)
     assert [c.accession for c in beyond] == ["0009900001-26-000430"]  # the oldest
-    result, _ = _collect(routes={}, recent=_recent(*_march_rows(8)))
+    result, _ = _collect(routes={}, recent=_recent(*_march_rows(extra)))
     errors = [e for e in result.errors if "0009900001-26-000430" in e]
-    assert errors and "beyond the per-run cap of 8" in errors[0]
+    assert errors and f"beyond the per-run cap of {m8k.MAX_FILINGS}" in errors[0]
     assert errors[0].startswith(m8k.UNVERIFIED_PREFIX)
 
 
-def test_c3_real_client_actual_gets_never_exceed_32_with_eight_filings_retries_and_redirects(
+def test_c3_real_client_8k_share_of_actual_gets_is_capped_with_retries_and_redirects(
     monkeypatch, no_socket,
 ):
     monkeypatch.setattr(cli, "SEC_DOCUMENT_RATE_LIMIT_RPS", 1000.0)
@@ -879,16 +892,21 @@ def test_c3_real_client_actual_gets_never_exceed_32_with_eight_filings_retries_a
         return _wire_response(req.full_url, 500)
 
     monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", fake_https_open)
-    rows = [("8-K", f"2026-09-{d:02d}", "8.01", f"0009900001-26-0005{d:02d}", "x.htm") for d in range(1, 10)]
+    n = m8k.MAX_FILINGS + 1
+    rows = [("8-K", f"2026-09-{d:02d}", "8.01", f"0009900001-26-0005{d:02d}", "x.htm") for d in range(1, n + 1)]
     client = cli.build_sec_document_client("Synthetic Research ops@example.org")
+    # the same view production hands the 8-K collector
     result = m8k.collect_material_8k_disclosures(
-        TICKER, cik=CIK, recent=_recent(*rows), http=client, today=TODAY,
+        TICKER, cik=CIK, recent=_recent(*rows), http=m8k.SubBudgetHttp(client, m8k.MAX_OUTBOUND_GETS),
+        today=TODAY,
     )
-    assert len(wire) == client.attempts_made <= 32
-    # nine in scope: eight attempted (all unverified), the oldest beyond the cap
-    assert len([e for e in result.errors if e.startswith(m8k.UNVERIFIED_PREFIX)]) == 9
-    assert any("beyond the per-run cap of 8" in e for e in result.errors)
+    assert len(wire) == client.attempts_made <= m8k.MAX_OUTBOUND_GETS == 48
+    unverified = [e for e in result.errors if e.startswith(m8k.UNVERIFIED_PREFIX)]
+    assert len(unverified) == n  # every in-scope filing: read attempted or beyond the cap
+    assert any(f"beyond the per-run cap of {m8k.MAX_FILINGS}" in e for e in result.errors)
     assert result.raw_facts == []
+    # the periodic share is untouched by what the 8-Ks spent: total cap not reached
+    assert client.attempts_made + 8 <= client.max_requests
 
 
 CONSULT_NO_AGREEMENT = (
@@ -1249,8 +1267,8 @@ def test_c6_a_financing_item_alone_puts_an_8k_in_scope(items):
     assert [c.accession for c in selected] == ["0009900001-26-000601"] and beyond == []
 
 
-@pytest.mark.parametrize("items", ["2.02", "2.02,9.01", "5.02", "5.07,9.01", "9.01"])
-def test_c6_other_items_stay_out_of_scope(items):
+@pytest.mark.parametrize("items", ["5.02", "5.07,9.01", "9.01", "5.02,5.03"])
+def test_c6_administrative_items_are_not_candidates(items):
     selected, beyond, _ = m8k.select_material_8k_candidates(
         _recent(_row("2026-03-12", items, 602)), today=TODAY,
     )
@@ -1267,14 +1285,14 @@ def test_c6_same_day_filings_are_ordered_by_accession_not_by_input_order():
     assert [c.accession for c in shuffled] == [c.accession for c in selected]
 
 
-def test_c6_a_ninth_in_scope_filing_is_unverified_by_accession_and_blocks():
-    """Eight newer 8.01 filings + one OLDER financing-only (3.02) filing."""
-    rows = [_row(f"2026-09-{d:02d}", "8.01", 700 + d) for d in range(10, 18)]
+def test_c6_a_filing_past_the_cap_is_unverified_by_accession_and_blocks():
+    """MAX_FILINGS newer 8.01 filings + one OLDER financing-only (3.02) filing."""
+    rows = [_row(f"2026-09-{d:02d}", "8.01", 700 + d) for d in range(5, 5 + m8k.MAX_FILINGS)]
     rows.append(_row("2026-03-12", "3.02,9.01", 799))
     result, _ = _collect(routes={}, recent=_recent(*rows))
     beyond = [e for e in result.errors if "0009900001-26-000799" in e]
     assert len(beyond) == 1 and beyond[0].startswith(m8k.UNVERIFIED_PREFIX)
-    assert "beyond the per-run cap of 8" in beyond[0]
+    assert f"beyond the per-run cap of {m8k.MAX_FILINGS}" in beyond[0]
     material = result
     out, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
     reasons = [r for r in out.verdict.blocking_verification_required
@@ -1282,10 +1300,10 @@ def test_c6_a_ninth_in_scope_filing_is_unverified_by_accession_and_blocks():
     assert reasons and out.verdict.action is None
 
 
-def test_c6_out_of_scope_items_cost_no_request_and_are_a_diagnostic_not_an_error():
+def test_c6_administrative_items_cost_no_request_and_are_ledgered_not_errors():
     rows = [
         _row("2026-09-20", "8.01", 801),
-        _row("2026-09-19", "2.02,9.01", 802),
+        _row("2026-09-19", "5.02,9.01", 802),
         _row("2026-09-18", "5.02", 803),
         _row("2026-09-17", "5.02", 804),
     ]
@@ -1295,18 +1313,19 @@ def test_c6_out_of_scope_items_cost_no_request_and_are_a_diagnostic_not_an_error
     )
     # only the one in-scope filing was requested (its index + body + exhibit at most)
     assert fake.requested and all("000990000126000801" in u for u in fake.requested)
-    assert not any(x in u for u in fake.requested for x in ("000802", "000803", "000804"))
     assert len(fake.requested) <= m8k.GETS_PER_FILING
     assert not [e for e in result.errors if "802" in e or "803" in e or "804" in e]
-    note = next(n for n in result.notes if "outside the scope" in n)
-    assert "3 8-K filing(s)" in note and "2.02,9.01" in note and "5.02 x2" in note
-    # in-scope and out-of-scope are counted separately
+    # ...but nothing is silent: one ledger row per accession, NOT_READ_POLICY, non-blocking
+    rows_by_acc = {r["accession"][-3:]: r for r in result.coverage}
+    for acc in ("802", "803", "804"):
+        assert rows_by_acc[acc]["status"] == "NOT_READ_POLICY" and rows_by_acc[acc]["blocking"] is False
+        assert rows_by_acc[acc]["policy"] == "ADMINISTRATIVE"
+    note = next(n for n in result.notes if "NOT EXAMINED" in n)
+    assert "5.02" in note
     assert "1 selected for reading" in next(n for n in result.notes if "scope:" in n)
 
 
-def test_c6_32_actual_gets_is_still_the_hard_limit_with_financing_item_filings(
-    monkeypatch, no_socket,
-):
+def test_c6_actual_get_limit_still_holds_with_financing_item_filings(monkeypatch, no_socket):
     monkeypatch.setattr(cli, "SEC_DOCUMENT_RATE_LIMIT_RPS", 1000.0)
     wire: list[str] = []
 
@@ -1316,14 +1335,16 @@ def test_c6_32_actual_gets_is_still_the_hard_limit_with_financing_item_filings(
 
     monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", fake_https_open)
     items = ["1.01", "2.03", "3.02", "8.01", "7.01", "1.01,3.02", "2.03,9.01", "3.02,9.01", "1.01"]
+    items = (items * 2)[: m8k.MAX_FILINGS + 1]
     rows = [_row(f"2026-09-{d:02d}", it, 900 + d) for d, it in enumerate(items, start=1)]
     client = cli.build_sec_document_client("Synthetic Research ops@example.org")
     result = m8k.collect_material_8k_disclosures(
-        TICKER, cik=CIK, recent=_recent(*rows), http=client, today=TODAY,
+        TICKER, cik=CIK, recent=_recent(*rows), http=m8k.SubBudgetHttp(client, m8k.MAX_OUTBOUND_GETS),
+        today=TODAY,
     )
-    assert len(wire) == client.attempts_made <= 32
+    assert len(wire) == client.attempts_made <= m8k.MAX_OUTBOUND_GETS
     unverified = [e for e in result.errors if e.startswith(m8k.UNVERIFIED_PREFIX)]
-    assert len(unverified) == 9  # every in-scope filing: 8 attempted, 1 beyond the cap
+    assert len(unverified) == m8k.MAX_FILINGS + 1  # every in-scope filing, none dropped
     assert sum("beyond the per-run cap" in e for e in unverified) == 1
     assert result.raw_facts == []
 

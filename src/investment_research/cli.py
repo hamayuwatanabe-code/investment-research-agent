@@ -78,11 +78,18 @@ from .research.provider import (
 )
 from .research.sec_live_smoke import AllowlistedHttpClient, _valid_user_agent_or_none
 from .research.sec_material_8k import ALLOWED_HOSTS as SEC_DOCUMENT_ALLOWED_HOSTS
-from .research.sec_material_8k import MATERIAL_8K_COLLECTOR, collect_material_8k_disclosures
-from .research.sec_material_8k import MAX_OUTBOUND_GETS as SEC_DOCUMENT_MAX_GETS
+from .research.sec_material_8k import (
+    MATERIAL_8K_COLLECTOR,
+    SubBudgetHttp,
+    collect_material_8k_disclosures,
+)
+from .research.sec_material_8k import MAX_OUTBOUND_GETS as SEC_8K_MAX_GETS
 from .research.sec_material_8k import MAX_RETRIES as SEC_DOCUMENT_MAX_RETRIES
 from .research.sec_material_8k import RATE_LIMIT_RPS as SEC_DOCUMENT_RATE_LIMIT_RPS
 from .research.sec_material_8k import TIMEOUT_SECONDS as SEC_DOCUMENT_TIMEOUT_SECONDS
+from .research.sec_periodic_reports import MAX_BODY_BYTES as SEC_DOCUMENT_MAX_BODY_BYTES
+from .research.sec_periodic_reports import MAX_OUTBOUND_GETS as SEC_PERIODIC_MAX_GETS
+from .research.sec_periodic_reports import collect_periodic_reports
 from .schemas.enums import Provenance, RunStatus
 from .scoring.adaptive_acquisition_plan import READY_MAX_REQUESTS
 from .storage.db import open_db
@@ -414,14 +421,19 @@ def build_adaptive_http_client() -> AllowlistedHttpClient:
     )
 
 
+#: ACTUAL outbound GETs one run may spend on SEC documents: the 8-K share plus
+#: the periodic-report share (each already counts retries and redirect hops).
+SEC_DOCUMENT_MAX_GETS = SEC_8K_MAX_GETS + SEC_PERIODIC_MAX_GETS
+
+
 def build_sec_document_client(user_agent: str) -> AllowlistedHttpClient:
-    """Phase 4.3L: one fresh client per ticker for reading material 8-K
-    bodies and their EX-99 exhibits -- www.sec.gov only, at most
-    ``SEC_DOCUMENT_MAX_GETS`` ACTUAL outbound GETs (retries and followed
-    redirects included), every GET rate-limited, redirect targets validated
-    before connecting, secrets stripped from every returned URL. Never
-    shared with the general collector HttpClient or across tickers. No
-    capture directory is written."""
+    """Phase 4.3L/4.3M: one fresh client per ticker for reading SEC filing
+    bodies -- www.sec.gov only, at most ``SEC_DOCUMENT_MAX_GETS`` ACTUAL
+    outbound GETs in total (retries and followed redirects included), every
+    GET rate-limited, redirect targets validated before connecting, a body
+    larger than ``SEC_DOCUMENT_MAX_BODY_BYTES`` refused rather than truncated,
+    secrets stripped from every returned URL. Never shared with the general
+    collector HttpClient or across tickers. No capture directory is written."""
     return AllowlistedHttpClient(
         user_agent=user_agent,
         allowed_hosts=SEC_DOCUMENT_ALLOWED_HOSTS,
@@ -429,35 +441,46 @@ def build_sec_document_client(user_agent: str) -> AllowlistedHttpClient:
         rate_limit_rps=SEC_DOCUMENT_RATE_LIMIT_RPS,
         max_retries=SEC_DOCUMENT_MAX_RETRIES,
         max_requests=SEC_DOCUMENT_MAX_GETS,
+        max_body_bytes=SEC_DOCUMENT_MAX_BODY_BYTES,
         source=MATERIAL_8K_COLLECTOR,
     )
 
 
-def collect_material_8k(
+def collect_sec_documents(
     ticker: str, sec: SecEdgarCollector, *, settings, live: bool, today: date,
-) -> CollectionResult:
-    """Phase 4.3L: read the bodies of this ticker's material 8-Ks. Without
-    --live, or without a real SEC User-Agent, nothing is requested and every
-    in-scope 8-K is reported UNVERIFIED (which blocks the action label) --
-    never treated as "there was nothing to read"."""
+) -> list[CollectionResult]:
+    """Phase 4.3L/4.3M: read this ticker's material 8-K bodies and its latest
+    10-K / 10-Q. Without --live, or without a real SEC User-Agent, nothing is
+    requested and every in-scope document is reported UNVERIFIED (which blocks
+    the action label) -- never treated as "there was nothing to read"."""
+    common: dict = {
+        "cik": sec.resolved_cik, "recent": sec.recent_filings, "today": today,
+        "older_listing_pages": getattr(sec, "older_listing_pages", 0),
+    }
+    reason = ""
     if not live:
-        return collect_material_8k_disclosures(
-            ticker, cik=sec.resolved_cik, recent=sec.recent_filings, http=None, today=today,
-            unavailable_reason="offline run (--live not given): no 8-K body was requested",
-        )
-    user_agent = _valid_user_agent_or_none(settings.sec_user_agent)
-    if user_agent is None:
-        return collect_material_8k_disclosures(
-            ticker, cik=sec.resolved_cik, recent=sec.recent_filings, http=None, today=today,
-            unavailable_reason=(
+        reason = "offline run (--live not given): no SEC filing body was requested"
+    else:
+        user_agent = _valid_user_agent_or_none(settings.sec_user_agent)
+        if user_agent is None:
+            reason = (
                 "no valid SEC User-Agent with a contact address is configured "
-                "(IRA_SEC_USER_AGENT), so no 8-K body was requested"
-            ),
-        )
-    return collect_material_8k_disclosures(
-        ticker, cik=sec.resolved_cik, recent=sec.recent_filings,
-        http=build_sec_document_client(user_agent), today=today,
-    )
+                "(IRA_SEC_USER_AGENT), so no SEC filing body was requested"
+            )
+    if reason:
+        return [
+            collect_material_8k_disclosures(ticker, http=None, unavailable_reason=reason, **common),
+            collect_periodic_reports(ticker, http=None, unavailable_reason=reason, **common),
+        ]
+    client = build_sec_document_client(user_agent)  # type: ignore[arg-type]
+    return [
+        collect_material_8k_disclosures(
+            ticker, http=SubBudgetHttp(client, SEC_8K_MAX_GETS), **common,
+        ),
+        collect_periodic_reports(
+            ticker, http=SubBudgetHttp(client, SEC_PERIODIC_MAX_GETS), **common,
+        ),
+    ]
 
 
 def collect(
@@ -484,7 +507,7 @@ def collect(
     ]
     # Phase 4.3L: the submissions listing gives only metadata; the bodies
     # of material 8-Ks (and their EX-99 exhibits) are read here.
-    results.append(collect_material_8k(ticker, sec, settings=settings, live=live, today=date.today()))
+    results.extend(collect_sec_documents(ticker, sec, settings=settings, live=live, today=date.today()))
     return results, metadata
 
 
@@ -847,6 +870,8 @@ def result_to_json(result: ResearchResult) -> dict:
     # passed (see its own docstring in reporting/report.py), so a run that
     # never used the flag, and never resumed a run_id an earlier invocation
     # used it for, gets the exact same --json keys as before this phase.
+    if result.sec_coverage:
+        payload["sec_coverage"] = list(result.sec_coverage)
     info = adaptive_literature_info(result)
     if info:
         payload["adaptive_literature_info"] = info

@@ -162,6 +162,13 @@ escalation. Never treat the two as equivalent.
   available to the program and the egress policy blocks the research hosts.
 - Live-universe screening. `--screen` covers the fixture set only.
 - Dedicated TDnet / EDINET collectors for Japanese equities.
+- SEC document coverage beyond the per-accession ledger (`research/sec_coverage.py`): agreement /
+  instrument exhibits (EX-10/4/2/3), prospectuses (S-1/S-3/424B*), proxy statements, Form 4 and
+  SC 13D/G bodies, 10-K/A and 10-Q/A amendments, foreign-issuer forms (20-F/40-F/6-K), older
+  submissions pages (`filings.files`), and 10-K/10-Q sentences the extractor cannot classify
+  are NOT read and do not block. A run that read none of a company's filing bodies has not
+  covered that company. Release of a `FINANCING CONDITION REQUIRES VERIFICATION` blocker is
+  manual by design: no code path clears it.
 - Form 4 XML parsing (insider name, role and price stay UNKNOWN).
 - Corpus capture is a manual step, not an automated collector.
 
