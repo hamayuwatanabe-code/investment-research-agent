@@ -1966,7 +1966,10 @@ class Pipeline:
             )
         else:
             material_8k_reasons = _material_8k_blocking_reasons(
-                [{"collector": c.collector, "errors": c.errors} for c in collection_results],
+                [
+                    {"collector": c.collector, "errors": c.errors, "coverage": c.coverage}
+                    for c in collection_results
+                ],
                 restored=False,
             )
         # Phase 4.3L correction 6: a company-reported financing condition tied

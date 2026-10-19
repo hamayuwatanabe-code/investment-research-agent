@@ -579,6 +579,69 @@ def test_a_listing_notice_in_an_8k_reaches_the_kill_gate_as_a_provisional_k3(mon
     assert listing in gate.provisional_major_or_worse
 
 
+# ---- a fresh run is checked against its OWN ledger, not only its error list ----------
+def _budget_exhausted(issuer, share: int):
+    """Both collections with the given sub-budget (0 = nothing may be fetched)."""
+    fake = fx.FakeSec(issuer.routes())
+    kw = {"cik": issuer.cik, "recent": issuer.recent(), "today": TODAY}
+    material = m8k.collect_material_8k_disclosures(TICKER, http=m8k.SubBudgetHttp(fake, share), **kw)
+    periodic_result = periodic.collect_periodic_reports(TICKER, http=m8k.SubBudgetHttp(fake, share), **kw)
+    return material, periodic_result
+
+
+def _drop_errors(result: CollectionResult) -> None:
+    """Simulate a ledger that says UNREAD while the error list is empty."""
+    result.errors = []
+    result.outcome = FetchOutcome.OK
+
+
+def test_fresh_run_ledger_row_without_a_matching_error_still_blocks_periodic(monkeypatch):
+    issuer = clean_issuer()
+    material, periodic_result = _budget_exhausted(issuer, 0)
+    assert {r["status"] for r in periodic_result.coverage} == {"UNREAD_BUDGET"}
+    _drop_errors(periodic_result)
+    _drop_errors(material)
+    result, _ = run_pipeline(monkeypatch, material, periodic_result)
+
+    # nothing but the ledger can be the cause: no error text names either report
+    assert not any("budget" in r for r in result.verdict.blocking_verification_required
+                   if "no matching unverified reason" not in r)
+    derived = [r for r in blocking(result, UNVERIFIED_PERIODIC) if "no matching unverified reason" in r]
+    assert len(derived) == 2 and all("UNREAD_BUDGET" in r for r in derived)
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert result.context.status is RunStatus.INCOMPLETE_RESEARCH
+    assert result.verdict.action is None
+
+
+def test_fresh_run_ledger_row_without_a_matching_error_still_blocks_8k(monkeypatch):
+    issuer = clean_issuer([fx.Filing("8-K", "2026-09-02", "8.01", 5, [fx.ex99("A neutral update.")])])
+    material, periodic_result = _budget_exhausted(issuer, 0)
+    # the periodic share is healthy here: only the 8-K ledger is the problem
+    periodic_result = collect_both(clean_issuer())[1]
+    assert [r["status"] for r in material.coverage] == ["UNREAD_BUDGET"]
+    _drop_errors(material)
+    result, _ = run_pipeline(monkeypatch, material, periodic_result)
+
+    derived = [r for r in blocking(result, UNVERIFIED) if "no matching unverified reason" in r]
+    assert len(derived) == 1 and "UNREAD_BUDGET" in derived[0]
+    assert not blocking(result, UNVERIFIED_PERIODIC)
+    assert result.verdict.research_status is ResearchStatus.BLOCKED_PENDING_VERIFICATION
+    assert result.verdict.action is None
+
+
+def test_fresh_run_control_a_read_ledger_adds_no_derived_reason(monkeypatch):
+    issuer = clean_issuer([fx.Filing("8-K", "2026-09-02", "8.01", 5, [fx.ex99("A neutral update.")])])
+    material, periodic_result, _ = collect_both(issuer)
+    assert {r["status"] for r in [*material.coverage, *periodic_result.coverage]} == {"READ"}
+    _drop_errors(material)  # an empty error list is consistent with an all-READ ledger
+    _drop_errors(periodic_result)
+    result, _ = run_pipeline(monkeypatch, material, periodic_result)
+    assert not [r for r in result.verdict.blocking_verification_required
+                if "no matching unverified reason" in r]
+    assert result.context.status is RunStatus.COMPLETE
+    assert result.verdict.action is not None
+
+
 # =============================================================================
 # 7. Financing condition: explicit blocker, explicit release conditions, no auto-release
 # =============================================================================
