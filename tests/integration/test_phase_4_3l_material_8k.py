@@ -55,6 +55,7 @@ pytestmark = pytest.mark.integration
 
 TODAY = date(2026, 10, 16)
 TICKER = "SYNTH"
+FINANCING_PREFIX = "FINANCING CONDITION REQUIRES VERIFICATION:"
 CIK = 9900001
 ACC = "0009900001-26-000123"
 ACC_ND = ACC.replace("-", "")
@@ -1229,3 +1230,128 @@ def test_c5_without_a_financing_condition_statistical_significance_stays_ambiguo
     assert _kinds("A statistically significant effect on the primary endpoint was observed.") == [
         "AMBIGUOUS_PRIMARY_ENDPOINT"
     ]
+
+
+# =============================================================================
+# Correction 6: financing items in scope, deterministic same-day order, the
+# 9th in-scope filing blocks with its accession, out-of-scope items are only a
+# diagnostic. Synthetic accessions/dates throughout.
+# =============================================================================
+def _row(date_, items, n, doc="x.htm", form="8-K"):
+    return (form, date_, items, f"0009900001-26-{n:06d}", doc)
+
+
+@pytest.mark.parametrize("items", ["1.01", "1.01,9.01", "2.03", "3.02", "3.02,9.01"])
+def test_c6_a_financing_item_alone_puts_an_8k_in_scope(items):
+    selected, beyond, _ = m8k.select_material_8k_candidates(
+        _recent(_row("2026-03-12", items, 601)), today=TODAY,
+    )
+    assert [c.accession for c in selected] == ["0009900001-26-000601"] and beyond == []
+
+
+@pytest.mark.parametrize("items", ["2.02", "2.02,9.01", "5.02", "5.07,9.01", "9.01"])
+def test_c6_other_items_stay_out_of_scope(items):
+    selected, beyond, _ = m8k.select_material_8k_candidates(
+        _recent(_row("2026-03-12", items, 602)), today=TODAY,
+    )
+    assert selected == [] and beyond == []
+
+
+def test_c6_same_day_filings_are_ordered_by_accession_not_by_input_order():
+    rows = [_row("2026-09-10", "8.01", n) for n in (101, 103, 102)]
+    rows.append(_row("2026-09-11", "1.01", 100))
+    selected, _, _ = m8k.select_material_8k_candidates(_recent(*rows), today=TODAY)
+    assert [c.accession[-3:] for c in selected] == ["100", "103", "102", "101"]
+    # input order must not matter
+    shuffled, _, _ = m8k.select_material_8k_candidates(_recent(*reversed(rows)), today=TODAY)
+    assert [c.accession for c in shuffled] == [c.accession for c in selected]
+
+
+def test_c6_a_ninth_in_scope_filing_is_unverified_by_accession_and_blocks():
+    """Eight newer 8.01 filings + one OLDER financing-only (3.02) filing."""
+    rows = [_row(f"2026-09-{d:02d}", "8.01", 700 + d) for d in range(10, 18)]
+    rows.append(_row("2026-03-12", "3.02,9.01", 799))
+    result, _ = _collect(routes={}, recent=_recent(*rows))
+    beyond = [e for e in result.errors if "0009900001-26-000799" in e]
+    assert len(beyond) == 1 and beyond[0].startswith(m8k.UNVERIFIED_PREFIX)
+    assert "beyond the per-run cap of 8" in beyond[0]
+    material = result
+    out, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    reasons = [r for r in out.verdict.blocking_verification_required
+               if r.startswith(m8k.UNVERIFIED_PREFIX) and "0009900001-26-000799" in r]
+    assert reasons and out.verdict.action is None
+
+
+def test_c6_out_of_scope_items_cost_no_request_and_are_a_diagnostic_not_an_error():
+    rows = [
+        _row("2026-09-20", "8.01", 801),
+        _row("2026-09-19", "2.02,9.01", 802),
+        _row("2026-09-18", "5.02", 803),
+        _row("2026-09-17", "5.02", 804),
+    ]
+    fake = FakeSec(_routes())
+    result = m8k.collect_material_8k_disclosures(
+        TICKER, cik=CIK, recent=_recent(*rows), http=fake, today=TODAY,
+    )
+    # only the one in-scope filing was requested (its index + body + exhibit at most)
+    assert fake.requested and all("000990000126000801" in u for u in fake.requested)
+    assert not any(x in u for u in fake.requested for x in ("000802", "000803", "000804"))
+    assert len(fake.requested) <= m8k.GETS_PER_FILING
+    assert not [e for e in result.errors if "802" in e or "803" in e or "804" in e]
+    note = next(n for n in result.notes if "outside the scope" in n)
+    assert "3 8-K filing(s)" in note and "2.02,9.01" in note and "5.02 x2" in note
+    # in-scope and out-of-scope are counted separately
+    assert "1 selected for reading" in next(n for n in result.notes if "scope:" in n)
+
+
+def test_c6_32_actual_gets_is_still_the_hard_limit_with_financing_item_filings(
+    monkeypatch, no_socket,
+):
+    monkeypatch.setattr(cli, "SEC_DOCUMENT_RATE_LIMIT_RPS", 1000.0)
+    wire: list[str] = []
+
+    def fake_https_open(_handler, req):
+        wire.append(req.full_url)
+        return _wire_response(req.full_url, 500)
+
+    monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", fake_https_open)
+    items = ["1.01", "2.03", "3.02", "8.01", "7.01", "1.01,3.02", "2.03,9.01", "3.02,9.01", "1.01"]
+    rows = [_row(f"2026-09-{d:02d}", it, 900 + d) for d, it in enumerate(items, start=1)]
+    client = cli.build_sec_document_client("Synthetic Research ops@example.org")
+    result = m8k.collect_material_8k_disclosures(
+        TICKER, cik=CIK, recent=_recent(*rows), http=client, today=TODAY,
+    )
+    assert len(wire) == client.attempts_made <= 32
+    unverified = [e for e in result.errors if e.startswith(m8k.UNVERIFIED_PREFIX)]
+    assert len(unverified) == 9  # every in-scope filing: 8 attempted, 1 beyond the cap
+    assert sum("beyond the per-run cap" in e for e in unverified) == 1
+    assert result.raw_facts == []
+
+
+LGVN_TYPE_EX99 = _ex99(
+    f"The SYN-301 trial ({TRIAL}) did not meet its primary endpoint of change in walking "
+    f"distance at week 52. {V_APPROPRIATE} {COULD_NOT_A} {P_PIVOTAL} {FIN_SIG_PLAIN}"
+)
+
+
+def test_c6_lgvn_type_clinical_and_regulatory_findings_survive_alongside_the_financing_fact():
+    material, _ = _collect(_routes(LGVN_TYPE_EX99))
+    result, _ = _run([_registry_and_marker(), CollectionResult(collector="sec_edgar"), material])
+    clinical, failed, _ = _failure_findings(result)
+    assert failed and clinical.level is KillLevel.K5
+    assert clinical.confirmation is KillConfirmation.PROVISIONAL
+    regulatory = next(a for a in result.verdict.kill_gate.assessments
+                      if a.category == KillCategory.REGULATORY_KILL)
+    assert regulatory.level is KillLevel.K5 and regulatory.confirmation is KillConfirmation.PROVISIONAL
+    assert result.verdict.action is None
+    # the financing condition is not a kill level of its own...
+    capital = next(a for a in result.verdict.kill_gate.assessments
+                   if a.category == KillCategory.CAPITAL_KILL)
+    assert capital.level is KillLevel.K0
+    # ...it is an explicit verification blocker that keeps its source and dates
+    reasons = [r for r in result.verdict.blocking_verification_required
+               if r.startswith(FINANCING_PREFIX)]
+    assert len(reasons) == 1
+    assert f"{BASE}/{EX991}" in reasons[0] and "filed 2026-09-23" in reasons[0]
+    assert "event 2026-09-16" in reasons[0] and "COMPANY_CLAIM" in reasons[0]
+    assert "Second Closing Trigger Date" in reasons[0]

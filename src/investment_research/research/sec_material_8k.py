@@ -10,14 +10,19 @@ evidence.
 Selection (8-K ``items`` are used ONLY to choose what to read; a fact is
 only ever created from a fetched, validated body):
 
-* forms ``8-K``/``8-K/A`` whose items include 1.02 (termination of a
-  material agreement), 2.05 (exit/restructuring costs), 7.01 (Reg FD --
-  where press releases are furnished) or 8.01 (other events -- where
-  clinical results are commonly filed); an 8-K whose items field is empty
-  is selected too (its items cannot be judged, so it is not excluded);
+* forms ``8-K``/``8-K/A`` whose items include 1.01 (material definitive
+  agreement), 1.02 (termination of a material agreement), 2.03 (direct
+  financial obligation), 2.05 (exit/restructuring costs), 3.02
+  (unregistered sales of equity), 7.01 (Reg FD -- where press releases are
+  furnished) or 8.01 (other events -- where clinical results are commonly
+  filed); an 8-K whose items field is empty is selected too (its items
+  cannot be judged, so it is not excluded). 8-Ks whose items are ALL outside
+  that set are counted in a run note (diagnostic only, never a blocking
+  reason) and are not read;
 * filed within the last ``LOOKBACK_DAYS`` (365: one full annual reporting
   cycle);
-* newest first, at most ``MAX_FILINGS`` (8) read per run.
+* newest first (same-day filings by accession, descending), at most
+  ``MAX_FILINGS`` (8) read per run.
 
 What this deliberately does NOT cover, and says so in the run's notes:
 8-Ks outside the look-back window, other item codes (notably 2.02 earnings
@@ -82,7 +87,11 @@ from .sec_live_smoke import MaxRequestsExceededError
 
 MATERIAL_8K_COLLECTOR = "sec_material_8k"
 MATERIAL_8K_FORMS = frozenset({"8-K", "8-K/A"})
-MATERIAL_8K_ITEMS = frozenset({"1.02", "2.05", "7.01", "8.01"})
+#: 1.01 (entry into a material definitive agreement), 2.03 (creation of a
+#: direct financial obligation) and 3.02 (unregistered sales of equity) carry
+#: the terms of a financing; 1.02, 2.05, 7.01, 8.01 carry terminations,
+#: restructurings, Reg FD press releases and "other events" (clinical results).
+MATERIAL_8K_ITEMS = frozenset({"1.01", "1.02", "2.03", "2.05", "3.02", "7.01", "8.01"})
 LOOKBACK_DAYS = 365
 MAX_FILINGS = 8
 MAX_EXHIBITS_PER_FILING = 2
@@ -96,7 +105,47 @@ TIMEOUT_SECONDS = 20.0
 #: with this prefix (fresh run and resume alike -- it is persisted in the
 #: collect snapshot's per-collector ``errors``).
 UNVERIFIED_PREFIX = "UNVERIFIED MATERIAL 8-K:"
+#: Prefix of the blocking reason raised for a company-reported financing
+#: condition tied to a regulatory step (see :func:`financing_condition_blocking_reasons`).
+FINANCING_CONDITION_PREFIX = "FINANCING CONDITION REQUIRES VERIFICATION:"
+#: Version of the selection RULE itself (not just its parameters): bump when
+#: the ordering, the tie-break or the meaning of an item changes.
+MATERIAL_8K_SCOPE_RULE = "material-8k-scope/v2"
 _MAX_CLAIM_CHARS = 1200
+
+
+def _scope_id() -> str:
+    return (
+        f"{MATERIAL_8K_SCOPE_RULE}|forms={','.join(sorted(MATERIAL_8K_FORMS))}"
+        f"|items={','.join(sorted(MATERIAL_8K_ITEMS))}|lookback_days={LOOKBACK_DAYS}"
+        f"|max_filings={MAX_FILINGS}|order=filing_date_desc,accession_desc"
+    )
+
+
+#: Identifies the selection rule and its parameters. Saved in the collect
+#: snapshot; a resume compares it with this value and refuses a record
+#: written under any other (or no) scope.
+MATERIAL_8K_SCOPE_ID = _scope_id()
+
+
+def material_8k_scope() -> dict[str, Any]:
+    """The structured scope a material-8-K collection ran under."""
+    return {
+        "id": MATERIAL_8K_SCOPE_ID,
+        "rule": MATERIAL_8K_SCOPE_RULE,
+        "forms": sorted(MATERIAL_8K_FORMS),
+        "items": sorted(MATERIAL_8K_ITEMS),
+        "lookback_days": LOOKBACK_DAYS,
+        "max_filings": MAX_FILINGS,
+        "max_outbound_gets": MAX_OUTBOUND_GETS,
+        "order": "filing_date_desc,accession_desc",
+        # stated, not searched: what this scope does NOT protect
+        "not_covered": [
+            "8-K whose items are all outside `items` (e.g. 2.02 only)",
+            "contracts or conditions older than lookback_days",
+            "filings absent from the submissions `filings.recent` block",
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -115,12 +164,18 @@ def _parse_iso(value: Any) -> date | None:
         return None
 
 
-def select_material_8k_candidates(
-    recent: Mapping[str, Any], *, today: date,
-) -> tuple[list[Material8KCandidate], list[Material8KCandidate], date]:
-    """``(selected, beyond_cap, window_start)`` from a submissions
-    payload's ``filings.recent`` block, newest first. Selection only --
-    nothing here is evidence."""
+@dataclass(frozen=True)
+class Material8KSelection:
+    selected: list[Material8KCandidate]
+    beyond_cap: list[Material8KCandidate]
+    window_start: date
+    #: 8-K / 8-K/A filings inside the window whose stated items are ALL outside
+    #: the scope, as ``{items-as-filed: count}``. Diagnostic only: these are
+    #: not candidates, are never read, and never become a blocking reason.
+    excluded_by_items: dict[str, int]
+
+
+def _select(recent: Mapping[str, Any], *, today: date) -> Material8KSelection:
     window_start = today - timedelta(days=LOOKBACK_DAYS)
     forms = recent.get("form") or []
     columns = {
@@ -133,6 +188,7 @@ def select_material_8k_candidates(
         return str(values[index]) if index < len(values) and values[index] is not None else ""
 
     in_scope: list[Material8KCandidate] = []
+    excluded: dict[str, int] = {}
     for index, form in enumerate(forms):
         if form not in MATERIAL_8K_FORMS:
             continue
@@ -142,6 +198,8 @@ def select_material_8k_candidates(
             continue
         items = tuple(i.strip() for i in at("items", index).split(",") if i.strip())
         if items and not (set(items) & MATERIAL_8K_ITEMS):
+            key = ",".join(items)
+            excluded[key] = excluded.get(key, 0) + 1
             continue
         in_scope.append(
             Material8KCandidate(
@@ -152,10 +210,27 @@ def select_material_8k_candidates(
                 primary_document=at("primaryDocument", index),
             )
         )
-    # Newest dated first; an undatable filing last (it cannot be shown to be
-    # recent, but it is still in scope -- beyond the cap it is UNVERIFIED).
-    in_scope.sort(key=lambda c: c.filing_date if c.filing_date != UNKNOWN else "0000", reverse=True)
-    return in_scope[:MAX_FILINGS], in_scope[MAX_FILINGS:], window_start
+    # Newest dated first; same-day filings by accession (descending) so the
+    # order never depends on how the listing happened to be arranged; an
+    # undatable filing last (it cannot be shown to be recent, but it is still
+    # in scope -- beyond the cap it is UNVERIFIED).
+    in_scope.sort(
+        key=lambda c: (c.filing_date if c.filing_date != UNKNOWN else "0000", c.accession),
+        reverse=True,
+    )
+    return Material8KSelection(
+        in_scope[:MAX_FILINGS], in_scope[MAX_FILINGS:], window_start, excluded,
+    )
+
+
+def select_material_8k_candidates(
+    recent: Mapping[str, Any], *, today: date,
+) -> tuple[list[Material8KCandidate], list[Material8KCandidate], date]:
+    """``(selected, beyond_cap, window_start)`` from a submissions
+    payload's ``filings.recent`` block, newest first. Selection only --
+    nothing here is evidence."""
+    selection = _select(recent, today=today)
+    return selection.selected, selection.beyond_cap, selection.window_start
 
 
 # --- statement extraction ------------------------------------------------------
@@ -730,7 +805,9 @@ def collect_material_8k_disclosures(
     candidate is then UNVERIFIED, and a submissions listing that was never
     obtained makes the whole scope UNVERIFIED (it cannot be known whether a
     material 8-K exists)."""
-    out = CollectionResult(collector=MATERIAL_8K_COLLECTOR, provenance=Provenance.LIVE)
+    out = CollectionResult(
+        collector=MATERIAL_8K_COLLECTOR, provenance=Provenance.LIVE, scope=material_8k_scope(),
+    )
     if cik is None or recent is None:
         out.outcome = FetchOutcome.ERROR
         out.errors.append(
@@ -740,7 +817,10 @@ def collect_material_8k_disclosures(
         )
         return out
 
-    selected, beyond_cap, window_start = select_material_8k_candidates(recent, today=today)
+    selection = _select(recent, today=today)
+    selected, beyond_cap, window_start = (
+        selection.selected, selection.beyond_cap, selection.window_start,
+    )
     out.notes.append(
         f"material 8-K scope: forms {'/'.join(sorted(MATERIAL_8K_FORMS))} with items "
         f"{', '.join(sorted(MATERIAL_8K_ITEMS))} (or no items stated) filed {window_start} to "
@@ -748,6 +828,16 @@ def collect_material_8k_disclosures(
         f"cap of {MAX_FILINGS}. NOT covered: earlier 8-Ks, other item codes (e.g. 2.02), "
         "and 10-K/10-Q bodies"
     )
+    if selection.excluded_by_items:
+        total = sum(selection.excluded_by_items.values())
+        detail = ", ".join(
+            f"{items} x{count}" if count > 1 else items
+            for items, count in sorted(selection.excluded_by_items.items())
+        )
+        out.notes.append(
+            f"{total} 8-K filing(s) in the window have items outside the scope and were not "
+            f"read (diagnostic only; not part of the in-scope count above): {detail}"
+        )
     for candidate in beyond_cap:
         out.errors.append(_unverified(candidate, f"it is beyond the per-run cap of {MAX_FILINGS} filings"))
     for candidate in selected:
@@ -762,6 +852,77 @@ def collect_material_8k_disclosures(
     if out.errors:
         out.outcome = FetchOutcome.ERROR
     return out
+
+
+_FINANCING_KIND = "FINANCING_CONTINGENT_ON_REGULATORY_MILESTONE"
+_FACT_UNIT = "8k_disclosure_statement"
+
+
+def is_financing_condition_fact(fact: Any) -> bool:
+    """True for a fact this module emitted as a financing condition tied to a
+    regulatory step -- recognised by the unit and the fixed value phrase the
+    extractor writes (both survive collection, verification and a snapshot
+    round-trip), never by re-reading the claim."""
+    return (
+        getattr(fact, "unit", None) == _FACT_UNIT
+        and getattr(fact, "value", None) == _FACT_VALUE[_FINANCING_KIND]
+    )
+
+
+def financing_condition_blocking_reasons(facts: Sequence[Any]) -> list[str]:
+    """One explicit blocking reason per distinct company-reported financing
+    condition tied to a regulatory step. It is NOT a kill level: no rule maps
+    "a tranche depends on the FDA" to a severity, and inventing one would be
+    arithmetic without evidence. It is a verification requirement -- the
+    agreement itself and the regulator's position are unread -- so the Action
+    is withheld until a person has checked it. Built from the fact's own
+    claim, source and dates, so none of them is lost."""
+    reasons: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for fact in facts:
+        if not is_financing_condition_fact(fact):
+            continue
+        key = (str(fact.source_url), str(fact.claim))
+        if key in seen:
+            continue
+        seen.add(key)
+        reasons.append(
+            f"{FINANCING_CONDITION_PREFIX} the issuer reports a financing condition tied to a "
+            f"regulatory step (COMPANY_CLAIM, not verified against the agreement or the "
+            f"regulator): \"{str(fact.claim)[:400]}\" -- source {fact.source_title}, "
+            f"{fact.source_url}, filed {fact.filing_date}, event {fact.event_date}"
+        )
+    return reasons
+
+
+def material_8k_scope_blocking_reasons(
+    collector_summaries: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """For a RESTORED collect snapshot: its material-8-K record is only
+    usable if it was written under the CURRENT selection scope. A record with
+    no scope, an unreadable scope or another scope's id is refused -- never
+    reused, and never repaired by guessing or by re-fetching -- because what
+    it did not select (a financing 8-K, say) cannot be told from what did not
+    exist."""
+    reasons: list[str] = []
+    for summary in collector_summaries:
+        if summary.get("collector") != MATERIAL_8K_COLLECTOR:
+            continue
+        scope = summary.get("scope")
+        recorded = scope.get("id") if isinstance(scope, Mapping) else None
+        if recorded == MATERIAL_8K_SCOPE_ID:
+            continue
+        if not isinstance(scope, Mapping) or not scope:
+            found = "no scope recorded"
+        else:
+            found = f"scope {recorded!r}" if isinstance(recorded, str) else "an unreadable scope"
+        reasons.append(
+            f"{UNVERIFIED_PREFIX} the restored collection's material 8-K record was written "
+            f"under a different selection scope ({found}; current scope "
+            f"{MATERIAL_8K_SCOPE_ID}), so which 8-Ks it covered cannot be established and it is "
+            "not reused; no request was made to fill the gap"
+        )
+    return reasons
 
 
 def unverified_material_8k_reasons(collector_summaries: Sequence[Mapping[str, Any]]) -> list[str]:

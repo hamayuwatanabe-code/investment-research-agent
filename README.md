@@ -463,15 +463,24 @@ Stated plainly rather than left to be discovered:
   label. Take `RUN_ID` from `--json`'s `run_id` or the report's `Run ID` line —
   the log file name uses a different id.
 - **SEC filing bodies: material 8-Ks only.** A `--live` run reads the bodies of 8-K/8-K/A
-  filings with items 1.02, 2.05, 7.01 or 8.01 (or no items stated) from the last 365 days,
-  newest first, at most 8 per run with up to 2 EX-99 exhibits each (at most 32 actual
-  outbound GETs to `www.sec.gov`, retries and redirects included, 2 requests/second). An
-  issuer statement that a primary endpoint was or was not met, or that a strategic review
-  or programme change began, becomes a `COMPANY_CLAIM` fact quoting the filing. Any
-  in-scope 8-K that is not fully read (beyond the cap, out of budget, failed or invalid
-  body, no `IRA_SEC_USER_AGENT`, ambiguous or contradictory wording) is reported as
-  `UNVERIFIED MATERIAL 8-K` and withholds the action label. Earlier 8-Ks, other item codes
-  (e.g. 2.02 earnings releases) and 10-K/10-Q bodies are not read.
+  filings with items 1.01, 1.02, 2.03, 2.05, 3.02, 7.01 or 8.01 (or no items stated) from
+  the last 365 days, newest first (same-day filings by accession), at most 8 per run with up
+  to 2 EX-99 exhibits each (at most 32 actual outbound GETs to `www.sec.gov`, retries and
+  redirects included, 2 requests/second). An issuer statement that a primary endpoint was or
+  was not met, or that a strategic review or programme change began, becomes a
+  `COMPANY_CLAIM` fact quoting the filing. Any in-scope 8-K that is not fully read (beyond the
+  cap, out of budget, failed or invalid body, no `IRA_SEC_USER_AGENT`, ambiguous or
+  contradictory wording) is reported as `UNVERIFIED MATERIAL 8-K` with its accession and
+  withholds the action label. A company-reported financing condition tied to a regulatory step
+  (e.g. a later closing that depends on FDA agreement) withholds the action label on its own as
+  `FINANCING CONDITION REQUIRES VERIFICATION` -- a verification requirement, not a kill level.
+  The collect snapshot records the selection scope (`material-8k-scope/v2` with its items,
+  cap and order); a resume refuses a record written under another or no scope and makes no
+  request to fill the gap. 8-Ks whose items are all outside the scope are counted in the
+  run notes but are not read. **Not covered:** 8-Ks with only item 2.02 (earnings releases) or
+  other out-of-scope items, contracts or conditions older than 365 days, filings absent from
+  the submissions `filings.recent` block, and 10-K/10-Q bodies. A run that read no body of a
+  given company has not covered that company's 8-Ks.
 - **The current programme is never chosen by recency.** When more than one clinical
   programme is in evidence, only an explicit lead/current/pivotal description that no later
   disclosure (a reported result, discontinuation, strategic review) supersedes decides it;

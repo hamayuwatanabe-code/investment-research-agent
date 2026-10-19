@@ -8,7 +8,7 @@ visible in the final report, never smoothed over.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..schemas.enums import FetchOutcome, Provenance
 from ..schemas.fact import RawFact, Source
@@ -46,6 +46,11 @@ class CollectionResult:
     #: together let a caller see the dedup step actually bounded output,
     #: rather than inferring it from a single number.
     raw_fact_count_before_dedup: int = 0
+    #: Phase 4.3L correction 6: a structured, JSON-serialisable description of
+    #: WHAT a collector was configured to look at (its selection rule), saved
+    #: in the collect snapshot so a resume can tell which rule produced the
+    #: record it restores. Empty for every collector that declares none.
+    scope: dict[str, Any] = field(default_factory=dict)
     #: Phase 4.3F: structured, one-a-collector primary-source identity
     #: metadata (Phase 4.3B's ``scoring/program_evidence.py`` types) --
     #: never a Fact, never re-derived by re-parsing a claim string or a

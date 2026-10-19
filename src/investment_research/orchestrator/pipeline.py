@@ -46,6 +46,10 @@ from ..research.adversarial import AdversarialOutcome
 from ..research.discovery import DiscoveryLog
 from ..research.escalation import EscalationReport, escalate, escalate_unresolved_questions
 from ..research.provider import NullResearchProvider, ResearchProvider
+from ..research.sec_material_8k import (
+    financing_condition_blocking_reasons,
+    material_8k_scope_blocking_reasons,
+)
 from ..schemas.agent_io import AgentOutput, AgentRunRecord, RunContext
 from ..schemas.enums import (
     UNKNOWN,
@@ -159,6 +163,11 @@ def _material_8k_blocking_reasons(
         for error in (summary.get("errors") or [])
         if str(error).startswith(_UNVERIFIED_MATERIAL_8K_PREFIX)
     ]
+    if restored:
+        # Phase 4.3L correction 6: a restored record is judged by the scope it
+        # was written under; the check reads the snapshot's own summary and
+        # makes no request.
+        reasons.extend(material_8k_scope_blocking_reasons(collector_summaries))
     labels = {summary.get("collector") for summary in collector_summaries}
     if restored and _SEC_EDGAR_COLLECTOR_LABEL in labels and _MATERIAL_8K_COLLECTOR_LABEL not in labels:
         reasons.append(
@@ -1047,6 +1056,7 @@ class Pipeline:
                         "notes": list(c.notes),
                         "zero_results": c.zero_results,
                         "raw_fact_count_before_dedup": c.raw_fact_count_before_dedup,
+                        "scope": dict(c.scope),
                     }
                     for c in collection_results
                 ],
@@ -1915,6 +1925,14 @@ class Pipeline:
                 [{"collector": c.collector, "errors": c.errors} for c in collection_results],
                 restored=False,
             )
+        # Phase 4.3L correction 6: a company-reported financing condition tied
+        # to a regulatory step needs verification on its own. Read from
+        # ``verified_facts`` -- the evidence the gate judges, which on a
+        # resume is the restored snapshot's, never this invocation's fetch.
+        material_8k_reasons = [
+            *material_8k_reasons,
+            *financing_condition_blocking_reasons(verified_facts),
+        ]
         for reason in material_8k_reasons:
             if reason not in literature_blocking_reasons:
                 literature_blocking_reasons.append(reason)
